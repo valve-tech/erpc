@@ -10,6 +10,8 @@
 
 eRPC is a fault-tolerant EVM RPC proxy and **re-org aware permanent caching solution**. It is built with read-heavy use-cases in mind, such as data indexing and high-load frontend usage.
 
+> **Fork note:** this is `valve-tech/erpc`, a fork of [`erpc/erpc`](https://github.com/erpc/erpc) (Apache-2.0). It is currently based on linkpoolio's WebSocket branch (upstream [erpc/erpc#836](https://github.com/erpc/erpc/pull/836)) to provide native WebSocket support and `eth_subscribe`. That base is ~68 commits behind `erpc/erpc` main; rebasing onto current main is tracked as follow-up work.
+
 <img src="./assets/hla-diagram.svg" alt="Architecture Diagram" width="70%" />
 
 ---

@@ -1,0 +1,20 @@
+name: valve-ci
+on:
+  push:
+    branches: [valve-ws]
+  pull_request:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1'
+      - name: Build
+        run: make build
+      - name: WS + indexer tests
+        run: |
+          go test ./clients/... ./indexer/... -count 1 -timeout 15m
+          go test ./erpc -run 'WebSocket|Subscription|Indexer' -count 1 -timeout 15m
