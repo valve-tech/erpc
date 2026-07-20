@@ -107,6 +107,47 @@ onlyNetworks/ignoreNetworks, rateLimitBudget). Work with my existing eRPC config
 https://docs.erpc.cloud/config/projects/networks.llms.txt`}
 />
 
+## `eth_subscribe`
+
+Some JSON-RPC clients include `fromBlock: "0x0"` in the `eth_subscribe("logs", {…})` filter as a "from genesis" marker. `eth_subscribe` is a live-stream RPC — `fromBlock` has no standardised meaning there — and on backends that prune historical data the subscribe call fails outright. Enable `stripSubscribeFromBlockZero` on the network to drop the field before forwarding so the live stream succeeds; historical logs stay retrievable via `eth_getLogs` in the normal way.
+
+<ConfigTabs
+  path="projects[].networks[].evm"
+  yaml={`projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 1
+          # Drops fromBlock: "0x0" / "0" from eth_subscribe logs filters
+          # before forwarding to upstream WebSockets. Only the exact
+          # zero value is stripped — non-zero fromBlocks pass through.
+          stripSubscribeFromBlockZero: true  # default: false`}
+  ts={`import { createConfig } from "@erpc-cloud/config";
+
+export default createConfig({
+  projects: [
+    {
+      id: "main",
+      networks: [
+        {
+          architecture: "evm",
+          evm: {
+            chainId: 1,
+            // Drops fromBlock: "0x0" / "0" from eth_subscribe logs filters
+            // before forwarding to upstream WebSockets. Only the exact
+            // zero value is stripped — non-zero fromBlocks pass through.
+            stripSubscribeFromBlockZero: true,  // default: false
+          },
+        },
+      ],
+    },
+  ],
+});`}
+/>
+
+Leave unset for chains where upstreams handle `fromBlock: "0x0"` in an `eth_subscribe` filter correctly (most do — the flag is a targeted workaround, not a universal default).
+
 <AISection title="Networks — full agent reference">
 
 ### How it works
