@@ -15,10 +15,10 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
-	"golang.org/x/time/rate"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 )
 
 var (

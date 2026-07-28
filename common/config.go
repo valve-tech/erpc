@@ -2629,8 +2629,8 @@ const tsLoaderWalker = `
 // This means closures, imports, and module-level helpers in the user's
 // TS file flow naturally into the evalFunc:
 //
-//   const weights = { hot: { errorRate: 8 }, cold: { errorRate: 4 } };
-//   selectionPolicy: { evalFunc: (u, ctx) => u.sortByScore((u) => weights[u.id] || PREFER_FASTEST) }
+//	const weights = { hot: { errorRate: 8 }, cold: { errorRate: 4 } };
+//	selectionPolicy: { evalFunc: (u, ctx) => u.sortByScore((u) => weights[u.id] || PREFER_FASTEST) }
 //
 // works as written, because `weights` exists in the same module scope
 // as the function in every pool runtime.

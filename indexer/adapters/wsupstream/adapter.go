@@ -464,11 +464,11 @@ func (a *Adapter) handleNewHeads(raw []byte) {
 		return
 	}
 	a.sink.Ingest(indexer.StreamEvent{
-		Kind:      indexer.KindNewHead,
-		NetworkId: a.networkID,
-		SourceId:  a.Name(),
-		Block:     indexer.BlockRef{Number: num, Hash: header.Hash, ParentHash: header.ParentHash},
-		Payload:   outer.Result,
+		Kind:       indexer.KindNewHead,
+		NetworkId:  a.networkID,
+		SourceId:   a.Name(),
+		Block:      indexer.BlockRef{Number: num, Hash: header.Hash, ParentHash: header.ParentHash},
+		Payload:    outer.Result,
 		ObservedAt: time.Now(),
 	})
 }

@@ -53,8 +53,8 @@ func TestEngine_IdentityPolicy_PassesThrough(t *testing.T) {
 	tracker := health.NewTracker(&logger, "test", time.Minute)
 
 	cfg := &common.SelectionPolicyConfig{
-		EvalInterval:    common.Duration(50 * time.Millisecond),
-		EvalTimeout:     common.Duration(10 * time.Millisecond),
+		EvalInterval: common.Duration(50 * time.Millisecond),
+		EvalTimeout:  common.Duration(10 * time.Millisecond),
 		// Distinct from `common.DefaultSelectionPolicySource` so the engine
 		// does NOT auto-upgrade to the rich default policy.
 		EvalFunc: "(ups, _ctx) => ups",
@@ -89,8 +89,8 @@ func TestEngine_OverrideOrderForTest(t *testing.T) {
 	tracker := health.NewTracker(&logger, "test", time.Minute)
 
 	cfg := &common.SelectionPolicyConfig{
-		EvalInterval:    common.Duration(0), // frozen: only manual ticks
-		EvalTimeout:     common.Duration(10 * time.Millisecond),
+		EvalInterval: common.Duration(0), // frozen: only manual ticks
+		EvalTimeout:  common.Duration(10 * time.Millisecond),
 	}
 	require.NoError(t, cfg.SetDefaults())
 

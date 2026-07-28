@@ -595,4 +595,3 @@ var (
 	_ wsclient.NotificationWriter = (*WsConnection)(nil)
 	_ indexer.NetworkHandle       = (*networkHandle)(nil)
 )
-

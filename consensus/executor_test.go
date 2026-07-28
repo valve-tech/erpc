@@ -64,8 +64,6 @@ func validResponseWithCloser(value string, closeCount *atomic.Int32) *common.Nor
 	return validResponseWithValue(value).WithBody(&trackingReadCloser{closeCount: closeCount})
 }
 
-
-
 // TestConsensus_ContextCancelAfterExecution_DoesNotReturnLowParticipants verifies
 // the original bug fix: when the parent context is cancelled after every
 // participant has completed innerFn with a valid result, the consensus machinery
@@ -96,7 +94,6 @@ func TestConsensus_ContextCancelAfterExecution_DoesNotReturnLowParticipants(t *t
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
-
 
 	type result struct {
 		resp *common.NormalizedResponse
@@ -216,7 +213,6 @@ func TestConsensus_CallerAbandons_ParticipantsStillComplete(t *testing.T) {
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
 
-
 	callerReturned := make(chan struct{})
 	go func() {
 		_, _ = pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
@@ -277,7 +273,6 @@ func TestConsensus_TwoParticipants_CancelAfterExecution_DoesNotReturnLowParticip
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
-
 
 	type result struct {
 		resp *common.NormalizedResponse
@@ -345,7 +340,6 @@ func TestConsensus_ShortCircuit_CallerGetsWinnerBeforeSlowParticipants(t *testin
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
-
 
 	start := time.Now()
 	resp, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
@@ -470,7 +464,6 @@ func TestConsensus_CancelBeforeExecution_ReturnsLowParticipants(t *testing.T) {
 	cancel() // cancel immediately, before any participant runs
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
 
-
 	var callCount atomic.Int32
 	_, err := pol.Run(ctx, req, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		callCount.Add(1)
@@ -515,7 +508,6 @@ func TestConsensus_FireAndForget_CallerCancelDoesNotStopParticipants(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
-
 
 	callerReturned := make(chan struct{})
 	go func() {
@@ -583,7 +575,6 @@ func TestConsensus_CallerAbandons_WinnerResponseIsReleased(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx = context.WithValue(ctx, common.RequestContextKey, req)
-
 
 	callerReturned := make(chan struct{})
 	go func() {

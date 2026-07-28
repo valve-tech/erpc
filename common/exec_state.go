@@ -233,8 +233,8 @@ func (s *ExecState) Snapshot() ExecStateSnapshot {
 		// upstream invocation chain, already counted in UpstreamAttempts).
 		Attempts: upAttempts + chAttempts,
 		// Retries and Hedges ARE distinct events per scope; safe to sum.
-		Retries: upRetries + nwRetries + chRetries,
-		Hedges:  upHedges + nwHedges + chHedges,
+		Retries:                  upRetries + nwRetries + chRetries,
+		Hedges:                   upHedges + nwHedges + chHedges,
 		UpstreamAttempts:         upAttempts,
 		UpstreamRetries:          upRetries,
 		UpstreamHedges:           upHedges,
