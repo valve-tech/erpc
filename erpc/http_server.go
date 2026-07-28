@@ -460,7 +460,15 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 		for i, reqBody := range requests {
 			wg.Add(1)
-			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
+			// architecture and chainId are passed in rather than captured. A batch
+			// resolves them per entry — each request object may name its own
+			// "networkId" — so the resolution below assigns to them. Captured,
+			// that assignment would be a write to state shared by every entry's
+			// goroutine: the first entry to resolve would publish its network to
+			// the others, which then took the "already resolved" branch and were
+			// forwarded to the wrong chain. A copy per goroutine keeps each
+			// entry's resolution its own, and takes the race with it.
+			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string, architecture, chainId string) {
 				defer func() {
 					defer wg.Done()
 					if rec := recover(); rec != nil {
@@ -693,7 +701,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 				responses[index] = resp
 				common.EndRequestSpan(requestCtx, resp, nil)
-			}(i, reqBody, headers, queryArgs)
+			}(i, reqBody, headers, queryArgs, architecture, chainId)
 		}
 
 		wg.Wait()
