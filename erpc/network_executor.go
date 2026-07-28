@@ -86,11 +86,9 @@ func NewNetworkExecutor(
 	if cfg.Timeout != nil {
 		e.timeout = common.NewTimeoutFunc(logger, cfg.Timeout)
 	}
-	if cfg.Retry != nil && cfg.Retry.EmptyResultAccept != nil {
-		e.emptyResultAccept = cfg.Retry.EmptyResultAccept
-	} else {
-		e.emptyResultAccept = common.DefaultEmptyResultAccept()
-	}
+	// Same resolver the upstream-rotation layer uses (common/request.go), so
+	// the two layers cannot disagree about which methods accept an empty.
+	e.emptyResultAccept = common.ResolveEmptyResultAccept(cfg.Retry)
 	return e, nil
 }
 
