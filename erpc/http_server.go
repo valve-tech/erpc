@@ -1019,7 +1019,13 @@ func (s *HttpServer) parseUrlPath(
 		return "", "", "", false, false, common.NewErrInvalidUrlPath("architecture is not valid (must be 'evm')", ps)
 	}
 
-	if !isPost && !isOptions && r.Header.Get("Upgrade") != "websocket" {
+	// Anything non-POST that is not an upgrade is treated as a healthcheck, so
+	// misjudging an upgrade here does not surface as an error — it answers 200
+	// with a health body and the upgrade never happens. Use gorilla's own
+	// predicate, the same one the dispatcher below uses to route to
+	// handleWebSocket, so the two cannot disagree: Upgrade and Connection are
+	// case-insensitive tokens (RFC 6455) and a raw == misses "WebSocket".
+	if !isPost && !isOptions && !websocket.IsWebSocketUpgrade(r) {
 		isHealthCheck = true
 	}
 
@@ -1827,6 +1833,22 @@ func gzipHandler(next http.Handler) http.Handler {
 	var gzPool = util.NewGzipWriterPool()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// WebSocket upgrades need the raw connection via Hijack(), and
+		// conditionalGzipWriter cannot provide it — gorilla asserts
+		// http.Hijacker directly, so wrapping the writer turns the upgrade
+		// into a 500. Step aside for the same reason TimeoutHandler does.
+		// There is nothing to compress either way: the 101 carries no body,
+		// and the frames after it are outside net/http's writer entirely.
+		//
+		// This is deliberately the same predicate the request handler uses to
+		// dispatch to handleWebSocket. Testing the bypass any other way lets
+		// the two disagree, and a request the dispatcher calls an upgrade but
+		// this one does not is exactly the 500 being fixed.
+		if websocket.IsWebSocketUpgrade(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Check if client accepts gzip encoding
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			next.ServeHTTP(w, r)
