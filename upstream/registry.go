@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -142,6 +143,10 @@ func (u *UpstreamsRegistry) GetInitializer() *util.Initializer {
 	return u.initializer
 }
 
+func (u *UpstreamsRegistry) SharedStateRegistry() data.SharedStateRegistry {
+	return u.sharedStateRegistry
+}
+
 func (u *UpstreamsRegistry) getNetworkMutex(networkId string) *sync.RWMutex {
 	mutex, _ := u.networkMu.LoadOrStore(networkId, &sync.RWMutex{})
 	return mutex.(*sync.RWMutex)
@@ -149,15 +154,6 @@ func (u *UpstreamsRegistry) getNetworkMutex(networkId string) *sync.RWMutex {
 
 func (u *UpstreamsRegistry) GetProvidersRegistry() *thirdparty.ProvidersRegistry {
 	return u.providersRegistry
-}
-
-// SharedStateRegistry exposes the registry's shared-state backing store so
-// that consumers (e.g., Network) can register their own counters/values for
-// strict-monotonic coordination across pods. The registry is owned here
-// because UpstreamsRegistry is constructed with it; surfacing it via an
-// accessor is cheaper than threading it through Network's constructor.
-func (u *UpstreamsRegistry) SharedStateRegistry() data.SharedStateRegistry {
-	return u.sharedStateRegistry
 }
 
 func (u *UpstreamsRegistry) PrepareUpstreamsForNetwork(ctx context.Context, networkId string) error {
@@ -377,6 +373,26 @@ func (u *UpstreamsRegistry) GetNetworkUpstreams(ctx context.Context, networkId s
 	u.networkUpstreamsAtomic.Store(networkId, cp)
 	u.upstreamsMu.RUnlock()
 	return cp
+}
+
+// GetWsUpstreams returns all WS-capable upstreams for a network (ws:// or wss:// endpoints).
+func (u *UpstreamsRegistry) GetWsUpstreams(ctx context.Context, networkId string) []*Upstream {
+	all := u.GetNetworkUpstreams(ctx, networkId)
+	var ws []*Upstream
+	for _, up := range all {
+		cfg := up.Config()
+		if cfg == nil {
+			continue
+		}
+		parsed, err := url.Parse(cfg.Endpoint)
+		if err != nil {
+			continue
+		}
+		if parsed.Scheme == "ws" || parsed.Scheme == "wss" {
+			ws = append(ws, up)
+		}
+	}
+	return ws
 }
 
 func (u *UpstreamsRegistry) GetAllUpstreams() []*Upstream {

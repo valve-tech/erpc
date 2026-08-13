@@ -154,6 +154,12 @@ var (
 		Help:      "Seconds since the served-tip value last changed (observed in-process, exported at pick time); sustained high values on a live chain = stuck tip.",
 	}, []string{"project", "network", "lane", "axis"})
 
+	MetricUpstreamWebsocketConnected = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "upstream_websocket_connected",
+		Help:      "Whether the upstream WebSocket connection is currently established (1) or down/wedged (0).",
+	}, []string{"project", "vendor", "network", "upstream"})
+
 	MetricUpstreamCordoned = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "erpc",
 		Name:      "upstream_cordoned",
