@@ -31,6 +31,20 @@ const FullySyncedThreshold = 4
 // apply the same rollback tolerance to block heads.
 const DefaultToleratedBlockHeadRollback = common.DefaultToleratedBlockHeadRollback
 
+const (
+	// chainIdVerifyChainProgress is how much CHAIN PROGRESS a head move must
+	// represent before it is treated as major and re-verified against a live
+	// eth_chainId (see majorHeadMoveThreshold). One minute is comfortably more
+	// chain than a healthy poller can miss between samples — the default state
+	// poller interval is 5s — while staying far below the height difference any
+	// two unrelated chains exhibit.
+	chainIdVerifyChainProgress = 60 * time.Second
+
+	// chainIdVerifyMinBlocks keeps the derived threshold off zero on a chain
+	// whose measured block time is longer than the window itself.
+	chainIdVerifyMinBlocks = 2
+)
+
 var _ common.EvmStatePoller = &EvmStatePoller{}
 
 type EvmStatePoller struct {
@@ -98,6 +112,13 @@ type EvmStatePoller struct {
 
 	// Track if updates are in progress to avoid goroutine pile-up
 	finalizedUpdateInProgress sync.Mutex
+
+	// Serializes the off-hot-path chain-identity verification for a MAJOR
+	// forward jump suggested out-of-band via SuggestLatestBlock. At most one
+	// verification is in flight per poller; a concurrent major suggestion is
+	// dropped and re-observed on the next suggestion (or verified poll). Small
+	// keep-fresh advances never touch this.
+	latestMajorVerifyInProgress sync.Mutex
 
 	// Earliest per probe tracking
 	earliestByProbe              map[common.EvmAvailabilityProbeType]data.CounterInt64SharedVariable
@@ -302,6 +323,15 @@ func (e *EvmStatePoller) Poll(ctx context.Context) error {
 		e.stateMu.RLock()
 		skip := e.skipSyncingCheck
 		e.stateMu.RUnlock()
+
+		upsCfg := e.upstream.Config()
+		if upsCfg.Evm != nil && upsCfg.Evm.SkipSyncingCheck != nil && *upsCfg.Evm.SkipSyncingCheck {
+			e.stateMu.Lock()
+			e.syncingState = common.EvmSyncingStateNotSyncing
+			e.stateMu.Unlock()
+			return
+		}
+
 		if e.synced >= FullySyncedThreshold || skip {
 			return
 		}
@@ -348,7 +378,7 @@ func (e *EvmStatePoller) Poll(ctx context.Context) error {
 			e.synced++
 		}
 
-		upsCfg := e.upstream.Config()
+		upsCfg = e.upstream.Config()
 		if upsCfg.Evm == nil {
 			upsCfg.Evm = &common.EvmUpstreamConfig{}
 		}
@@ -515,12 +545,67 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 			Msg("skipping latest block suggestion as it's not newer")
 		return
 	}
+
+	// A major forward jump from an out-of-band suggestion has the exact shape of
+	// a cross-wired / poisoned upstream: a 200-OK response carrying another
+	// chain's (higher) height. The verified poll path already gates such moves
+	// behind a fresh chain-identity check (verifyChainIdOnMajorHeadMove); route
+	// suggestions through the same gate before the sample can enter the shared
+	// counter and skew every lag-based routing decision. That check makes a live
+	// eth_chainId call, so it runs OFF the hot path and this function stays
+	// non-blocking. Small advances (the common keep-fresh case) still apply
+	// inline with zero added latency, exactly as before.
+	if currentValue > 0 && blockNumber-currentValue > e.majorHeadMoveThreshold() {
+		e.verifyThenSuggestLatestBlock(blockNumber)
+		return
+	}
+
 	newValue := e.latestBlockShared.TryUpdate(e.appCtx, blockNumber)
 	e.logger.Trace().
 		Int64("blockNumber", blockNumber).
 		Int64("previousValue", currentValue).
 		Int64("newValue", newValue).
 		Msg("latest block suggestion applied")
+}
+
+// verifyThenSuggestLatestBlock validates a MAJOR suggested forward jump with a
+// fresh chain-identity check and applies it to the shared counter only if it
+// passes. A proven cross-wired endpoint is cordoned by the check itself; an
+// unverifiable one (a transient eth_chainId failure) drops the suggestion for
+// now and it is re-observed on the next suggestion or verified poll. Runs in
+// its own goroutine so the caller (response enrichment) never blocks, and at
+// most one verification is in flight per poller.
+func (e *EvmStatePoller) verifyThenSuggestLatestBlock(blockNumber int64) {
+	if !e.latestMajorVerifyInProgress.TryLock() {
+		return
+	}
+	go func() {
+		defer e.latestMajorVerifyInProgress.Unlock()
+
+		ctx, cancel := context.WithTimeout(e.appCtx, 5*time.Second)
+		defer cancel()
+
+		// Re-read: another path may have advanced the head while this was queued,
+		// turning the jump into a small (or already-applied) one.
+		currentValue := e.latestBlockShared.GetValue()
+		if blockNumber <= currentValue {
+			return
+		}
+		if blockNumber-currentValue > e.majorHeadMoveThreshold() &&
+			!e.verifyChainIdOnMajorHeadMove(ctx, "latest", currentValue, blockNumber) {
+			e.logger.Warn().
+				Int64("blockNumber", blockNumber).
+				Int64("currentValue", currentValue).
+				Msg("dropping major latest block suggestion: chain-identity check did not pass")
+			return
+		}
+		newValue := e.latestBlockShared.TryUpdate(e.appCtx, blockNumber)
+		e.logger.Debug().
+			Int64("blockNumber", blockNumber).
+			Int64("previousValue", currentValue).
+			Int64("newValue", newValue).
+			Msg("verified major latest block suggestion applied")
+	}()
 }
 
 func (e *EvmStatePoller) LatestBlock() int64 {
@@ -554,14 +639,51 @@ func (e *EvmStatePoller) OnLatestBlock(cb func(int64)) {
 // probe drops the sample for this cycle only — the next poll re-observes the
 // same height seconds later.
 //
-// The out-of-band Suggest* paths are deliberately NOT gated: suggestion-driven
-// upward bursts are designed behavior (response enrichment, halted-chain
-// resumes — see networks_served_tip_test.go) and cannot be verified in those
-// hot paths. A bogus suggestion self-heals within one poll cycle: the next
-// verified poll observes the real head and the >tolerance rollback is
-// accepted as a correction by both the shared counter and the tracker.
+// The out-of-band Suggest* paths gate only MAJOR (> tolerance) forward jumps,
+// and do so OFF the hot path: SuggestLatestBlock hands a major jump to a single
+// background verification and SuggestFinalizedBlock already runs in its own
+// goroutine, so response enrichment never blocks on the live eth_chainId call.
+// Small keep-fresh advances stay ungated and inline. The gate is required
+// because a poisoned major suggestion does NOT reliably self-heal: a
+// cross-wired upstream that never returns a correct low sample (it errors out
+// or keeps serving the wrong chain) would otherwise leave the bogus head pinned
+// in the shared counter and skew lag-based routing until manually corrected.
+// majorHeadMoveThreshold is how far a head may move, in blocks, before the move
+// counts as major and is re-verified against eth_chainId.
+//
+// The question it answers — "does this move represent more chain than we could
+// plausibly have missed?" — is about TIME, so the threshold is
+// chainIdVerifyChainProgress of chain progress converted through the network's
+// measured block time. A fixed block count cannot ask it across a multi-chain
+// fleet: DefaultToleratedBlockHeadRollback's 1024 blocks is ~3.4 hours of a 12s
+// chain and ~4 minutes of a 4 blocks/s one, so the same constant gates almost
+// nothing on the slow chains and a fair amount on the fast ones. Two chains
+// cross-wired at similar heights therefore slip through on exactly the chains
+// where the check is loosest.
+//
+// Clamped to DefaultToleratedBlockHeadRollback at the top so this can only ever
+// ADD verification relative to the previous behaviour, never remove it —
+// including on a sub-60ms-block chain, where a raw window would derive a LOOSER
+// threshold than the old constant. While the block time is still unknown (cold
+// start) it falls back to that constant, so nothing changes until there is a
+// measurement to act on.
+func (e *EvmStatePoller) majorHeadMoveThreshold() int64 {
+	blockTime := e.tracker.GetNetworkBlockTime(e.upstream.NetworkId())
+	if blockTime <= 0 {
+		return common.DefaultToleratedBlockHeadRollback
+	}
+	blocks := int64(chainIdVerifyChainProgress / blockTime)
+	if blocks < chainIdVerifyMinBlocks {
+		return chainIdVerifyMinBlocks
+	}
+	if blocks > common.DefaultToleratedBlockHeadRollback {
+		return common.DefaultToleratedBlockHeadRollback
+	}
+	return blocks
+}
+
 func (e *EvmStatePoller) verifyChainIdOnMajorHeadMove(ctx context.Context, tag string, current, polled int64) bool {
-	if current <= 0 || absInt64(polled-current) <= common.DefaultToleratedBlockHeadRollback {
+	if current <= 0 || absInt64(polled-current) <= e.majorHeadMoveThreshold() {
 		return true
 	}
 	cfgChainId := int64(0)
@@ -729,6 +851,20 @@ func (e *EvmStatePoller) SuggestFinalizedBlock(blockNumber int64) {
 		// Create a timeout context to avoid blocking forever on Redis operations
 		ctx, cancel := context.WithTimeout(e.appCtx, 5*time.Second)
 		defer cancel()
+
+		// Gate a major forward jump behind a fresh chain-identity check, the same
+		// protection the verified poll path and SuggestLatestBlock apply: a
+		// cross-wired endpoint reporting another chain's height must not enter the
+		// shared finalized counter. Already off the hot path here (own goroutine),
+		// so the live eth_chainId call is safe to make.
+		if blockNumber-currentValue > e.majorHeadMoveThreshold() &&
+			!e.verifyChainIdOnMajorHeadMove(ctx, "finalized", currentValue, blockNumber) {
+			e.logger.Warn().
+				Int64("blockNumber", blockNumber).
+				Int64("currentValue", currentValue).
+				Msg("dropping major finalized block suggestion: chain-identity check did not pass")
+			return
+		}
 
 		e.finalizedBlockShared.TryUpdate(ctx, blockNumber)
 		e.logger.Trace().
@@ -965,6 +1101,46 @@ func (e *EvmStatePoller) runPeriodicEarliestBlockBoundUpdateLoop(probe common.Ev
 	}
 }
 
+// fallbackFinalityMinAge is the minimum WALL-CLOCK age a block must reach
+// before the SYNTHETIC finalized head can cover it. It applies only on the
+// fallback path — when an upstream reports no finalized block at all — and only
+// ever DEEPENS the configured block depth, never shortens it.
+//
+// A block count alone cannot express "old enough that a reorg is implausible".
+// DefaultEvmFinalityDepth's 1024 blocks is ~3.4 hours of a 12s chain but only a
+// couple of minutes of a sub-second one, so the same constant is far more
+// conservative than needed on slow chains and potentially SHALLOWER than the
+// chain's real reorg risk on fast ones — and this value decides what erpc
+// treats as immutable and therefore permanently cacheable. Getting it wrong in
+// the shallow direction caches data that can still be reorged away.
+//
+// 30 minutes sits comfortably beyond Ethereum's ~13-minute finality and beyond
+// the unsafe-head reorg windows typical L2s expose. On any chain where the
+// configured block depth already represents more than this, nothing changes.
+const fallbackFinalityMinAge = 30 * time.Minute
+
+// fallbackFinalityDepth is how far below the head the synthetic finalized block
+// sits: the DEEPER of the configured block count and fallbackFinalityMinAge of
+// chain progress. Taking the deeper of the two is what makes this safe to ship
+// unconditionally — the synthetic finalized head can only ever move further
+// from the tip, never closer, so no block becomes "final" earlier than it does
+// today. While the block time is unknown the configured count stands alone.
+func (e *EvmStatePoller) fallbackFinalityDepth() int64 {
+	e.stateMu.RLock()
+	depth := int64(common.DefaultEvmFinalityDepth)
+	if e.cfg != nil && e.cfg.FallbackFinalityDepth > 0 {
+		depth = e.cfg.FallbackFinalityDepth
+	}
+	e.stateMu.RUnlock()
+
+	if blockTime := e.tracker.GetNetworkBlockTime(e.upstream.NetworkId()); blockTime > 0 {
+		if byAge := int64(fallbackFinalityMinAge / blockTime); byAge > depth {
+			depth = byAge
+		}
+	}
+	return depth
+}
+
 func (e *EvmStatePoller) IsBlockFinalized(blockNumber int64) (bool, error) {
 	finalizedBlock := e.finalizedBlockShared.GetValue()
 	latestBlock := e.latestBlockShared.GetValue()
@@ -992,24 +1168,14 @@ func (e *EvmStatePoller) IsBlockFinalized(blockNumber int64) (bool, error) {
 	}
 
 	var fb int64
-	e.stateMu.RLock()
-	defer e.stateMu.RUnlock()
-	if e.cfg != nil && e.cfg.FallbackFinalityDepth > 0 {
-		if latestBlock > e.cfg.FallbackFinalityDepth {
-			fb = latestBlock - e.cfg.FallbackFinalityDepth
-		} else {
-			fb = 0
-		}
-	} else {
-		if latestBlock > common.DefaultEvmFinalityDepth {
-			fb = latestBlock - common.DefaultEvmFinalityDepth
-		} else {
-			fb = 0
-		}
+	depth := e.fallbackFinalityDepth()
+	if latestBlock > depth {
+		fb = latestBlock - depth
 	}
 
 	e.logger.Debug().
 		Int64("inferredFinalizedBlock", fb).
+		Int64("fallbackFinalityDepth", depth).
 		Int64("latestBlock", latestBlock).
 		Int64("blockNumber", blockNumber).
 		Msgf("calculating block finality using inferred finalized block")
@@ -1063,8 +1229,14 @@ func (e *EvmStatePoller) GetDiagnostics() *common.EvmStatePollerDiagnostics {
 		FinalizedBlockSuccessfulOnce: e.finalizedBlockSuccessfulOnce,
 	}
 
+	// Also reflect operator-configured skip in diagnostics.
+	upsCfg := e.upstream.Config()
+	if upsCfg.Evm != nil && upsCfg.Evm.SkipSyncingCheck != nil && *upsCfg.Evm.SkipSyncingCheck {
+		diag.SkipSyncingCheck = true
+	}
+
 	// Build detection issue messages
-	skipSyncingCheck := e.skipSyncingCheck
+	skipSyncingCheck := e.skipSyncingCheck || diag.SkipSyncingCheck
 	syncingSuccessfulOnce := e.syncingSuccessfulOnce
 	skipLatestBlockCheck := e.skipLatestBlockCheck
 	latestBlockSuccessfulOnce := e.latestBlockSuccessfulOnce

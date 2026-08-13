@@ -1286,3 +1286,20 @@ func TestNetworkConfig_SetDefaults_FailoverInheritsFromDefaults(t *testing.T) {
 	assert.NotNil(t, n.Failover)
 	assert.True(t, n.Failover.Enabled())
 }
+
+func TestUpstreamConfig_ValidateRateLimitCountMode(t *testing.T) {
+	cfg := &Config{}
+	base := func(mode RateLimitCountMode) *UpstreamConfig {
+		return &UpstreamConfig{Endpoint: "http://localhost", RateLimitCountMode: mode}
+	}
+
+	// Empty (default) and both valid modes pass.
+	assert.NoError(t, base("").Validate(cfg, false))
+	assert.NoError(t, base(RateLimitCountModeRequest).Validate(cfg, false))
+	assert.NoError(t, base(RateLimitCountModeCredit).Validate(cfg, false))
+
+	// Anything else is rejected with a helpful message.
+	err := base("credits").Validate(cfg, false)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "rateLimitCountMode")
+}

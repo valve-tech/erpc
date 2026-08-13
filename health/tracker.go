@@ -292,7 +292,7 @@ type Tracker struct {
 	headLagGaugeCache             sync.Map // map[ubKey]prometheus.Gauge
 	finalizationLagGaugeCache     sync.Map // map[ubKey]prometheus.Gauge
 	cordonedGaugeCache            sync.Map // map[cordKey]prometheus.Gauge
-	rollbackGaugeCache            sync.Map // map[ubKey]prometheus.Gauge
+	rollbackGaugeCache            sync.Map // map[rbKey]prometheus.Gauge
 }
 
 // urdoKey uniquely identifies a MetricUpstreamRequestDuration time series.
@@ -466,13 +466,25 @@ func (t *Tracker) getCordonedGauge(up common.Upstream, method, reason string) pr
 	return actual.(prometheus.Gauge)
 }
 
-func (t *Tracker) getRollbackGauge(up common.Upstream) prometheus.Gauge {
-	key := ubKey{t.projectId, up.VendorName(), up.NetworkLabel(), up.Id()}
+// rbKey is ubKey plus the block-head axis. The latest and finalized state
+// pollers both record rollbacks for the same upstream, so the axis has to be
+// part of the key or the two would share one gauge and overwrite each other.
+type rbKey struct {
+	project  string
+	vendor   string
+	network  string
+	upstream string
+	finality string
+}
+
+// finality is the head axis that rolled back: "latest" or "finalized".
+func (t *Tracker) getRollbackGauge(up common.Upstream, finality string) prometheus.Gauge {
+	key := rbKey{t.projectId, up.VendorName(), up.NetworkLabel(), up.Id(), finality}
 	if v, ok := t.rollbackGaugeCache.Load(key); ok {
 		return v.(prometheus.Gauge)
 	}
 	g := telemetry.MetricUpstreamBlockHeadLargeRollback.WithLabelValues(
-		t.projectId, up.VendorName(), up.NetworkLabel(), up.Id(),
+		key.project, key.vendor, key.network, key.upstream, key.finality,
 	)
 	actual, _ := t.rollbackGaugeCache.LoadOrStore(key, g)
 	return actual.(prometheus.Gauge)
@@ -664,6 +676,14 @@ func (t *Tracker) sweepIdleObservers(cutoffMs int64) {
 		)
 		return true
 	})
+
+	// Direct counter emissions (upstream/erpc hot paths) route through
+	// telemetry.CounterHandle; sweep their idle label-sets so
+	// caller-controlled label combinations (method, userId, agentName, ...)
+	// don't accumulate in the registry forever. The counter sweep has its
+	// own, more conservative threshold (metrics.counterIdleEvictionAfter,
+	// default 24h) — only the cadence is shared with this observer sweep.
+	telemetry.SweepIdleCounterHandles()
 }
 
 // getUpsKeys expands a (upstream, method, finality) record into the
@@ -749,7 +769,17 @@ func (t *Tracker) getMetadata(mtdKey metadataKey) *NetworkMetadata {
 	return actual.(*NetworkMetadata)
 }
 
-// getUpsMetrics fetches or creates *TrackedMetrics from sync.Map
+// loadOrStoreUpsMetrics is like getUpsMetrics but does not register the key in
+// the upstreamsByNetwork index. Use for buckets (e.g. the {*,All} wildcard
+// aggregate) that must not appear as iterable index entries.
+func (t *Tracker) loadOrStoreUpsMetrics(k upstreamKey) *TrackedMetrics {
+	if v, ok := t.upsMetrics.Load(k); ok {
+		return v.(*TrackedMetrics)
+	}
+	v, _ := t.upsMetrics.LoadOrStore(k, newTrackedMetrics(t.logger))
+	return v.(*TrackedMetrics)
+}
+
 func (t *Tracker) getUpsMetrics(k upstreamKey) *TrackedMetrics {
 	if v, ok := t.upsMetrics.Load(k); ok {
 		return v.(*TrackedMetrics)
@@ -1182,6 +1212,10 @@ func (t *Tracker) updateNetworkLagMetrics(
 			}
 			lag := networkValue - upsValue
 			setLag(tm, lag)
+			if k.finality != common.DataFinalityStateAll {
+				setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
+			}
+			setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 			gauge := getGauge(t.projectId, k.ups.VendorName(), k.ups.NetworkLabel(), k.ups.Id())
 			gauge.Set(float64(lag))
 			return true
@@ -1213,10 +1247,17 @@ func (t *Tracker) updateNetworkLagMetrics(
 				// predicates/scoring silently no-op. Mirror onto the All rollup
 				// (which getUpsKeys always populates) so lag is seen at every grain.
 				if k.finality != common.DataFinalityStateAll {
-					if av, ok := t.upsMetrics.Load(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}); ok {
-						setLag(av.(*TrackedMetrics), lag)
-					}
+					setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
 				}
+				// Also mirror onto the {*, All} wildcard-method aggregate. Policies
+				// with evalScope:network evaluate at method="*" and read this bucket
+				// directly. SetLatestBlockNumber writes it for the upstream whose
+				// poller fires, but never for peer upstreams processed here — so a
+				// CB-open upstream whose poller is stale or absent would read lag=0
+				// and bypass blockNumberLagAbove silently. Write it unconditionally
+				// so the predicate fires regardless of whether the upstream's own
+				// poller last wrote to it.
+				setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 				gauge := getGauge(t.projectId, k.ups.VendorName(), k.ups.NetworkLabel(), k.ups.Id())
 				gauge.Set(float64(lag))
 			}
@@ -1246,6 +1287,10 @@ func (t *Tracker) updateSingleUpstreamLag(
 			if k.ups.Id() == id && k.ups.NetworkId() == net {
 				tm := value.(*TrackedMetrics)
 				setLag(tm, lag)
+				if k.finality != common.DataFinalityStateAll {
+					setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
+				}
+				setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 			}
 			return true
 		})
@@ -1261,10 +1306,11 @@ func (t *Tracker) updateSingleUpstreamLag(
 				// a per-finality slot rather than the {method, All} one (see
 				// updateNetworkLagMetrics) — so per-method-grain reads see the lag.
 				if k.finality != common.DataFinalityStateAll {
-					if av, ok := t.upsMetrics.Load(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}); ok {
-						setLag(av.(*TrackedMetrics), lag)
-					}
+					setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
 				}
+				// Mirror onto the {*, All} wildcard-method aggregate for evalScope:network
+				// policies (same reasoning as in updateNetworkLagMetrics above).
+				setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 			}
 		}
 	}
@@ -1440,7 +1486,7 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 	// {*, All} bucket — the one network-scope selection policies read — at 0,
 	// so blockNumberLagAbove silently never fires. Write it directly here, the
 	// same way request metrics always reach {*, All} via getUpsKeys.
-	t.getUpsMetrics(upstreamKey{upstream, "*", common.DataFinalityStateAll}).BlockHeadLag.Store(upsLag)
+	t.loadOrStoreUpsMetrics(upstreamKey{upstream, "*", common.DataFinalityStateAll}).BlockHeadLag.Store(upsLag)
 }
 
 func (t *Tracker) SetLatestBlockNumberForNetwork(network string, blockNumber int64) {
@@ -1649,7 +1695,7 @@ func (t *Tracker) SetFinalizedBlockNumber(upstream common.Upstream, blockNumber 
 	// Same {*, All} wildcard-aggregate guarantee as SetLatestBlockNumber (see
 	// the comment there): the dedup index may not carry the "*" rollup, so
 	// write it directly to keep finalization-lag-based scoring/predicates honest.
-	t.getUpsMetrics(upstreamKey{upstream, "*", common.DataFinalityStateAll}).FinalizationLag.Store(upsLag)
+	t.loadOrStoreUpsMetrics(upstreamKey{upstream, "*", common.DataFinalityStateAll}).FinalizationLag.Store(upsLag)
 }
 
 func (t *Tracker) RecordBlockHeadLargeRollback(upstream common.Upstream, finality string, currentVal, newVal int64) {
@@ -1658,10 +1704,11 @@ func (t *Tracker) RecordBlockHeadLargeRollback(upstream common.Upstream, finalit
 	net := upstream.NetworkId()
 	lg := upstream.Logger().With().Str("networkId", net).Logger()
 	lg.Debug().
+		Str("finality", finality).
 		Int64("currentValue", currentVal).
 		Int64("newValue", newVal).
 		Int64("rollback", rollback).
 		Msgf("recording block rollback in tracker")
 
-	t.getRollbackGauge(upstream).Set(float64(rollback))
+	t.getRollbackGauge(upstream, finality).Set(float64(rollback))
 }

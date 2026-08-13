@@ -58,6 +58,22 @@ type RateLimiterBudget struct {
 
 type RateLimitRule struct {
 	Config *common.RateLimitRuleConfig
+
+	// key isolates this rule's counter from other rules in the budget. The envoy
+	// cache key excludes the limit value, so overlapping rules would otherwise
+	// share one counter and each increment it.
+	key string
+}
+
+// ruleKeyFor returns a stable identity for a rule. Two byte-identical rules map
+// to the same key, which is correct: they are the same limit. Resolved once at
+// construction so an autotuned MaxCount does not move the key mid-window.
+func ruleKeyFor(c *common.RateLimitRuleConfig) string {
+	scope := c.ScopeString()
+	if scope == "" {
+		scope = "global"
+	}
+	return fmt.Sprintf("method:%s scope:%s maxCount:%d period:%s", c.Method, scope, c.MaxCount, c.Period)
 }
 
 func (b *RateLimiterBudget) GetRulesByMethod(method string) ([]*RateLimitRule, error) {
@@ -152,7 +168,22 @@ func (b *RateLimiterBudget) getCache() limiter.RateLimitCache {
 
 // TryAcquirePermit evaluates all matching rules for the given method using Envoy's DoLimit.
 // Rules are evaluated in parallel for lower latency. Returns true if allowed, false if rate limited.
-func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId string, req *common.NormalizedRequest, method string, vendor string, upstreamId string, authLabel string, origin string) (bool, error) {
+//
+// hitsAddend is an optional hit weight for this acquisition (only the first
+// value is read; default 1). It is 1 in the default request-count mode and
+// the request's estimated vendor credit-unit cost when the upstream opts
+// into credit counting (UpstreamConfig.RateLimitCountMode == "credit"). A
+// 0-weight call — a 0-CU method under credit counting — is admitted without
+// consuming budget.
+func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId string, req *common.NormalizedRequest, method string, vendor string, upstreamId string, authLabel string, origin string, hitsAddend ...uint32) (bool, error) {
+	hits := uint32(1)
+	if len(hitsAddend) > 0 {
+		hits = hitsAddend[0]
+	}
+	if hits == 0 {
+		return true, nil // 0-cost call: admit without consuming budget
+	}
+
 	cache := b.getCache()
 	if cache == nil {
 		return true, nil // Fail-open when no cache is available
@@ -193,7 +224,7 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 
 	// Single rule: evaluate directly without goroutine overhead
 	if len(rules) == 1 {
-		allowed := b.evaluateRule(ctx, rules[0], method, clientIP, userLabel, networkLabel)
+		allowed := b.evaluateRule(ctx, rules[0], method, clientIP, userLabel, networkLabel, hits)
 		if !allowed {
 			telemetry.CounterHandle(
 				telemetry.MetricRateLimitsTotal,
@@ -215,7 +246,7 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 				resultCh <- ruleResult{rule: r, allowed: true}
 				return
 			}
-			allowed := b.evaluateRule(ctx, r, method, clientIP, userLabel, networkLabel)
+			allowed := b.evaluateRule(ctx, r, method, clientIP, userLabel, networkLabel, hits)
 			if !allowed {
 				blocked.Store(true)
 			}
@@ -245,14 +276,18 @@ func (b *RateLimiterBudget) TryAcquirePermit(ctx context.Context, projectId stri
 
 // evaluateRule checks a single rate limit rule against the cache.
 // Returns true if allowed, false if over limit.
-func (b *RateLimiterBudget) evaluateRule(ctx context.Context, rule *RateLimitRule, method, clientIP, userLabel, networkLabel string) bool {
+func (b *RateLimiterBudget) evaluateRule(ctx context.Context, rule *RateLimitRule, method, clientIP, userLabel, networkLabel string, hits uint32) bool {
 	cache := b.getCache()
 	if cache == nil {
 		return true // Fail-open when no cache is available
 	}
 
-	// Build descriptor entries
-	entries := []*pb_struct.RateLimitDescriptor_Entry{{Key: "method", Value: method}}
+	// Build descriptor entries. "rule" gives each rule its own counter; without it
+	// rules resolving to the same {method, scope} at the same period collide.
+	entries := []*pb_struct.RateLimitDescriptor_Entry{
+		{Key: "rule", Value: rule.key},
+		{Key: "method", Value: method},
+	}
 	if rule.Config.PerIP && clientIP != "" && clientIP != "n/a" {
 		entries = append(entries, &pb_struct.RateLimitDescriptor_Entry{Key: "ip", Value: clientIP})
 	}
@@ -266,7 +301,7 @@ func (b *RateLimiterBudget) evaluateRule(ctx context.Context, rule *RateLimitRul
 	rlReq := &pb.RateLimitRequest{
 		Domain:      b.Id,
 		Descriptors: []*pb_struct.RateLimitDescriptor{{Entries: entries}},
-		HitsAddend:  1,
+		HitsAddend:  hits,
 	}
 
 	// Build stats key
