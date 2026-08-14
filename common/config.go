@@ -887,9 +887,16 @@ func (p *ProviderConfig) MarshalYAML() (interface{}, error) {
 
 // TagTierFallback marks an upstream as part of the fallback tier (via the
 // `tier:fallback` tag convention): used only when all non-fallback upstreams
-// are unavailable. Referenced by default selection policies and by
-// network-level block-number aggregation so that a more-advanced fallback
-// doesn't drag the shared counter ahead of what primaries can actually serve.
+// are unavailable.
+//
+// THE SELECTION POLICY IS THE ONLY PLACE THAT READS THIS TAG. The default
+// program's `preferTag('!tier:fallback', { minHealthy: 1, fallback:
+// 'tier:fallback' })` is a hard filter, so one healthy primary removes every
+// fallback from the eligible list. Block-number aggregation inherits that for
+// free: every tip accessor sources its candidate set from the same eligible
+// list (Network.tipCandidateUpstreams), so an ahead fallback cannot drag the
+// served `latest`/`finalized` past what the primaries can serve. Do not add a
+// second tier check in Go — see erpc/networks_fallback_tier_tip_test.go.
 const TagTierFallback = "tier:fallback"
 
 // RateLimitCountMode selects the accounting unit an upstream's rate-limit
