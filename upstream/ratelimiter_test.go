@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
@@ -274,4 +275,79 @@ func TestTryAcquirePermit_CreditWeight(t *testing.T) {
 	ok, err = budget.TryAcquirePermit(ctx, "", nil, "eth_chainId", "", "", "", "upstream", 0)
 	require.NoError(t, err)
 	assert.True(t, ok, "0-weight call bypasses the budget")
+}
+
+// fixedTimeSource is a controllable clock for the rate limit window. The memory
+// cache derives its window from UnixNow(), so moving this forward by a whole
+// period simulates a window rollover at an exact point in a burst.
+type fixedTimeSource struct{ now int64 }
+
+func (f *fixedTimeSource) UnixNow() int64 { return f.now }
+
+// TestRateLimiterBudget_WindowRolloverDuringBurst pins down the property that
+// erpc/projects_test.go and erpc/ws_server_test.go rely on instead of sleeping
+// until the next wall-clock minute.
+//
+// A rate limit window is aligned to real time, so a burst can straddle a
+// boundary and split across two counters. A burst of 2*maxCount+1 requests that
+// crosses at most one boundary always puts at least maxCount+1 requests into one
+// window, so the budget always rejects at least one request. A burst of
+// 2*maxCount-1 does not: a rollover in the middle lets every request through.
+func TestRateLimiterBudget_WindowRolloverDuringBurst(t *testing.T) {
+	const maxCount = 3
+
+	rejectedWithRolloverAt := func(t *testing.T, burst, rolloverAfter int) int {
+		t.Helper()
+		logger := zerolog.Nop()
+		cfg := &common.RateLimiterConfig{
+			Store: &common.RateLimitStoreConfig{Driver: "memory"},
+			Budgets: []*common.RateLimitBudgetConfig{
+				{
+					Id: "rollover-budget",
+					Rules: []*common.RateLimitRuleConfig{
+						{Method: "*", MaxCount: maxCount, Period: common.RateLimitPeriodMinute},
+					},
+				},
+			},
+		}
+		registry, err := NewRateLimitersRegistry(context.Background(), cfg, &logger)
+		require.NoError(t, err)
+
+		// Replace the real clock so the rollover point is exact.
+		clock := &fixedTimeSource{now: 1_700_000_000}
+		registry.envoyCache = NewMemoryRateLimitCache(clock, rand.New(rand.NewSource(1)), 0, 0.8, "erpc_rl_", registry.statsManager)
+
+		budget, err := registry.GetBudget("rollover-budget")
+		require.NoError(t, err)
+		require.NotNil(t, budget)
+
+		rejected := 0
+		for i := 0; i < burst; i++ {
+			if i == rolloverAfter {
+				clock.now += 60 // move into the next minute window
+			}
+			ok, err := budget.TryAcquirePermit(context.Background(), "", nil, "eth_chainId", "", "", "", "test")
+			require.NoError(t, err)
+			if !ok {
+				rejected++
+			}
+		}
+		return rejected
+	}
+
+	t.Run("burst of 2*maxCount+1 always rejects at least one", func(t *testing.T) {
+		const burst = 2*maxCount + 1
+		for rolloverAfter := 0; rolloverAfter <= burst; rolloverAfter++ {
+			rejected := rejectedWithRolloverAt(t, burst, rolloverAfter)
+			assert.GreaterOrEqual(t, rejected, 1,
+				"burst of %d with a window rollover after request %d must still reject at least one", burst, rolloverAfter)
+		}
+	})
+
+	t.Run("burst of 2*maxCount-1 can reject nothing", func(t *testing.T) {
+		// Shows why the shorter burst used before needed wall-clock alignment.
+		const burst = 2*maxCount - 1
+		assert.Equal(t, 0, rejectedWithRolloverAt(t, burst, maxCount),
+			"a rollover in the middle of a short burst lets every request through")
+	})
 }
