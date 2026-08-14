@@ -2273,6 +2273,16 @@ type NetworkConfig struct {
 	// Integrity overrides the project-wide data-integrity configuration for this
 	// network. Merges over the project block (network wins).
 	Integrity *IntegrityConfig `yaml:"integrity,omitempty" json:"integrity,omitempty"`
+
+	// Chain names the network for architectures that have no config block of
+	// their own — "mainnet" in "btc:mainnet". It is the body of the network ID,
+	// and the chain family validates it (see NetworkId below).
+	//
+	// evm and svm ignore this field: their identity already lives in
+	// evm.chainId and svm.cluster, and moving it would rewrite every existing
+	// config and cache key. One shared field, rather than one config block per
+	// chain, is what keeps adding a chain a config exercise.
+	Chain string `yaml:"chain,omitempty" json:"chain,omitempty"`
 }
 
 // StaticResponseConfig declares a canned JSON-RPC response for a specific
@@ -3060,7 +3070,15 @@ func (c *NetworkConfig) NetworkId() string {
 		}
 		return util.SvmNetworkId(c.Svm.Chain, c.Svm.Cluster)
 	default:
-		return ""
+		// Any other architecture names its network in `chain:` and the family
+		// says whether that name is real. Returning "" for an unregistered
+		// architecture is what keeps a typo'd `architecture:` from minting an
+		// id that no upstream will ever match.
+		family, known := LookupChainFamily(c.Architecture)
+		if !known || !family.ValidateNetworkId(c.Chain) {
+			return ""
+		}
+		return string(c.Architecture) + ":" + c.Chain
 	}
 }
 

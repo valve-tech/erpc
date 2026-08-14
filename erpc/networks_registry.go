@@ -391,7 +391,15 @@ func (nr *NetworksRegistry) resolveNetworkConfig(networkId string) (*common.Netw
 			}
 			nwCfg.Svm = &common.SvmNetworkConfig{Chain: chain, Cluster: cluster}
 		default:
-			return nil, common.NewErrInvalidEvmChainId(networkId)
+			// Any other architecture keeps its network name in `chain:`, and
+			// the family says whether the name is real. An unregistered
+			// architecture, or a body the family rejects, must not produce a
+			// config — that would build a network no upstream can match.
+			family, known := common.LookupChainFamily(nwCfg.Architecture)
+			if !known || !family.ValidateNetworkId(s[1]) {
+				return nil, common.NewErrInvalidEvmChainId(networkId)
+			}
+			nwCfg.Chain = s[1]
 		}
 		if err := nwCfg.SetDefaults(prj.Config.Upstreams, prj.Config.NetworkDefaults); err != nil {
 			return nil, fmt.Errorf("failed to set defaults for network config: %w", err)

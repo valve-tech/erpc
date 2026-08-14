@@ -4,6 +4,8 @@ import (
 	"context"
 	"sort"
 	"sync"
+
+	"github.com/erpc/erpc/util"
 )
 
 // ChainFamily is the fork's pluggable chain pattern: everything eRPC needs to
@@ -29,6 +31,7 @@ import (
 //     report?
 //  2. Classify — does this response mean "serve it" or "try another upstream"?
 //  3. Transport — how is a call shaped (JSON-RPC body vs REST path)?
+//  4. ValidateNetworkId — what does one of this chain's network IDs look like?
 type ChainFamily interface {
 	// Family is the architecture name this pattern serves ("evm", "btc").
 	// Must match the `architecture:` value used in config and URLs.
@@ -57,6 +60,21 @@ type ChainFamily interface {
 	// for some methods an empty answer IS the answer, and rotating on it
 	// re-asks every other upstream for the same empty result.
 	Classify(in ClassifyInput) RotateVerdict
+
+	// ValidateNetworkId reports whether `body` is a well-formed network ID for
+	// this family. `body` is everything AFTER the "<family>:" prefix — "1" in
+	// "evm:1", "mainnet-beta" in "svm:mainnet-beta", "mainnet" in
+	// "btc:mainnet".
+	//
+	// The shape is genuinely per-chain, so the family owns it: an integer
+	// chain id means nothing to Bitcoin and a cluster name means nothing to
+	// EVM. Registration forwards this method to util (see
+	// util/network_id_shape.go), which is what util.IsValidNetworkId — the
+	// gate the networks registry runs before it reads any config — consults.
+	//
+	// Be strict. Every id this accepts is one the request path will try to
+	// build a network for.
+	ValidateNetworkId(body string) bool
 }
 
 // ChainTransport names how a request is carried to an upstream.
@@ -222,6 +240,16 @@ func RegisterChainFamily(f ChainFamily) error {
 	if _, dup := chainFamilies[name]; dup {
 		return NewErrInvalidConfig("chain family " + string(name) + " is already registered")
 	}
+	// Teach util the family's network-ID shape in the same call. util sits
+	// BELOW common in the import graph and cannot hold a ChainFamily, so this
+	// bridge is how util.IsValidNetworkId learns about a new chain. Doing it
+	// here rather than leaving it to the family author is deliberate: a family
+	// that registered here but not there would be probeable and unroutable at
+	// once, and the request would 404 with nothing to explain it.
+	if err := util.RegisterNetworkIdShape(string(name), f.ValidateNetworkId); err != nil {
+		return NewErrInvalidConfig("chain family " + string(name) +
+			" could not register its network id shape: " + err.Error())
+	}
 	chainFamilies[name] = f
 	return nil
 }
@@ -232,6 +260,45 @@ func LookupChainFamily(a NetworkArchitecture) (ChainFamily, bool) {
 	defer chainFamiliesMu.RUnlock()
 	f, ok := chainFamilies[a]
 	return f, ok
+}
+
+// LookupChainFamilyForUpstreamType resolves an upstream's `type:` to its chain
+// family.
+//
+// UpstreamType and NetworkArchitecture are separate types upstream, but they
+// are not independent values: `type: evm` means the EVM architecture and
+// `type: svm` means SVM. Every call site that compares them already relies on
+// that — the extractors, the state pollers and the client factory all read
+// cfg.Type to decide architecture-specific behaviour. The mapping is therefore
+// the identity on the string, and this helper is where the fact is stated once
+// instead of being re-derived. If an upstream type ever names something that is
+// NOT an architecture, this function is the single place to teach it.
+func LookupChainFamilyForUpstreamType(t UpstreamType) (ChainFamily, bool) {
+	return LookupChainFamily(NetworkArchitecture(t))
+}
+
+// EndpointSchemeGate is the OPTIONAL surface a family implements when it must
+// refuse a URL scheme eRPC could otherwise carry.
+//
+// Optional and asserted narrowly, in the EvmStateProvenReader pattern: a family
+// that can use every client eRPC has implements nothing. SVM is the only
+// implementor today — it is http/https-only because nothing in the SVM path has
+// been run against the WebSocket or gRPC clients.
+type EndpointSchemeGate interface {
+	// SupportsEndpointScheme reports whether this family's upstreams may use
+	// `scheme`, and when they may not, a short operator-facing reason.
+	SupportsEndpointScheme(scheme string) (ok bool, reason string)
+}
+
+// EndpointSchemeSupported asks f about a URL scheme. A family that does not
+// implement EndpointSchemeGate allows every scheme the client factory knows —
+// the factory still rejects the ones it has no client for, so an unhandled
+// scheme cannot slip through as a working upstream.
+func EndpointSchemeSupported(f ChainFamily, scheme string) (bool, string) {
+	if gate, ok := f.(EndpointSchemeGate); ok {
+		return gate.SupportsEndpointScheme(scheme)
+	}
+	return true, ""
 }
 
 // RegisteredChainFamilies lists registered architecture names, sorted so
@@ -247,10 +314,19 @@ func RegisteredChainFamilies() []NetworkArchitecture {
 	return out
 }
 
-// unregisterChainFamilyForTest removes a family. Test-only: the registry is
-// process-global, so a test that registers a fake must put the map back.
-func unregisterChainFamilyForTest(name NetworkArchitecture) {
+// UnregisterChainFamilyForTest removes a family and its network-id shape.
+//
+// Test-only, and exported because the tests that need it live in OTHER
+// packages: the client factory and the pipeline gates are registry-driven now,
+// so a test for them registers a fake family and must put both registries back.
+// The registries are process-global; a leaked fake decides the next test's
+// answers.
+func UnregisterChainFamilyForTest(name NetworkArchitecture) {
 	chainFamiliesMu.Lock()
 	defer chainFamiliesMu.Unlock()
 	delete(chainFamilies, name)
+	// Both registries are written by RegisterChainFamily, so both are cleared
+	// here. A leftover shape would keep validating ids for a family that no
+	// longer resolves.
+	util.UnregisterNetworkIdShape(string(name))
 }

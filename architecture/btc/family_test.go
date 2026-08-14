@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/util"
 )
 
 // cannedCaller answers one JSON-RPC method with a fixed payload. Using the
@@ -229,6 +230,42 @@ func TestClassify_MethodMatchIsCaseInsensitive(t *testing.T) {
 	// reintroduce the missing-transaction bug.
 	if got := New().Classify(common.ClassifyInput{Method: "GetRawTransaction", IsEmpty: true}); got != common.VerdictRotate {
 		t.Fatalf("Classify(GetRawTransaction, empty) = %v, want rotate", got)
+	}
+}
+
+func TestValidateNetworkId_AcceptsChainNamesRejectsIdBreakers(t *testing.T) {
+	f := New()
+	// Accepted: the names bitcoind itself reports, plus the private signets
+	// and bitcoind-compatible chains eRPC has never heard of. Rejecting an
+	// unknown-but-well-formed name would refuse a working node for not being
+	// on a list.
+	for _, body := range []string{"mainnet", "testnet", "testnet4", "signet", "regtest", "my-signet_2.0"} {
+		if !f.ValidateNetworkId(body) {
+			t.Errorf("ValidateNetworkId(%q) = false; a well-formed chain name must route", body)
+		}
+	}
+	// Rejected: anything that cannot survive being half of a network ID. A
+	// colon would re-split "btc:a:b" downstream and point the request at a
+	// different network than the one that was validated; the rest would land
+	// in metric labels and cache keys.
+	for _, body := range []string{"", "main:net", "main net", "main/net", "main?net", "mainnet\n"} {
+		if f.ValidateNetworkId(body) {
+			t.Errorf("ValidateNetworkId(%q) = true; this id cannot be carried safely", body)
+		}
+	}
+}
+
+func TestValidateNetworkId_ReachesUtilThroughRegistration(t *testing.T) {
+	// The end the request path actually calls. util.IsValidNetworkId is the
+	// first gate on every network lookup, and it must answer for btc without
+	// util knowing anything about Bitcoin.
+	if !util.IsValidNetworkId("btc:mainnet") {
+		t.Fatal("util.IsValidNetworkId(btc:mainnet) = false; the network lookup " +
+			"rejects the id before any btc config is read")
+	}
+	if util.IsValidNetworkId("btc:") {
+		t.Fatal("util.IsValidNetworkId(btc:) = true; an empty chain name would " +
+			"build a network keyed on nothing")
 	}
 }
 

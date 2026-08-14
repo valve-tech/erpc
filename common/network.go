@@ -79,12 +79,17 @@ func EvmLeaderUpstream(n Network, ctx context.Context) Upstream {
 	return nil
 }
 
+// IsValidArchitecture reports whether eRPC serves this architecture. It is the
+// URL gate: /<project>/<architecture>/<chain> is rejected here before any
+// network is looked up.
+//
+// The answer comes from the chain-family registry (chain_family.go), not from
+// a list of names. Every architecture eRPC serves registers a family in its
+// package init(), so adding a chain does not touch this function — and a chain
+// that is registered can never be probeable and unroutable at the same time.
 func IsValidArchitecture(architecture string) bool {
-	switch NetworkArchitecture(architecture) {
-	case ArchitectureEvm, ArchitectureSvm:
-		return true
-	}
-	return false
+	_, ok := LookupChainFamily(NetworkArchitecture(architecture))
+	return ok
 }
 
 func IsValidNetwork(network string) bool {
