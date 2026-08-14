@@ -308,7 +308,27 @@ func upstreamHostFromID(id string) string { return "http://" + id + ".localhost"
 // `chainId` is the network's chain ID as hex (e.g. "0x7b" for 123).
 // All other returned blocks/state are dummy values — the test cares
 // about routing decisions, not block contents.
+// statePollerHeads pins the heads mockStatePollerForHost serves for one host.
+//
+// Set it BEFORE calling setupSelectionPolicyNetwork, and clear it in cleanup.
+//
+// A test that needs per-upstream heads must ALSO keep its Suggest*Block calls.
+// The two do different jobs. Suggest sets the value immediately, because the
+// poller may not poll again for the life of the test. The mock decides what a
+// poll that DOES land will write. If they disagree, the poll wins and the
+// seeded value is gone for good: the poller writes the lower number, and
+// SuggestFinalizedBlock then refuses to re-raise it because
+// evm_state_poller.go:541 drops anything not strictly newer. That is a flake no
+// timeout can fix — the value does not arrive late, it never arrives.
+//
+// These tests do not call t.Parallel, so a plain map is safe here.
+var statePollerHeads = map[string][2]int64{}
+
 func mockStatePollerForHost(host string) {
+	latest, finalized := int64(1000), int64(900) // 0x3e8 / 0x384
+	if pinned, ok := statePollerHeads[host]; ok {
+		latest, finalized = pinned[0], pinned[1]
+	}
 	chainId := "0x7b" // chainId 123 — matches setupSelectionPolicyNetwork's networkConfig
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool { return strings.Contains(util.SafeReadBody(r), "eth_chainId") }).
@@ -320,14 +340,14 @@ func mockStatePollerForHost(host string) {
 			return strings.Contains(body, "eth_getBlockByNumber") && strings.Contains(body, "latest")
 		}).
 		Reply(200).
-		JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x3e8","timestamp":"0x6702a8f0"}}`))
+		JSON([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","timestamp":"0x6702a8f0"}}`, latest)))
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool {
 			body := util.SafeReadBody(r)
 			return strings.Contains(body, "eth_getBlockByNumber") && strings.Contains(body, "finalized")
 		}).
 		Reply(200).
-		JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x384","timestamp":"0x6702a8e0"}}`))
+		JSON([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","timestamp":"0x6702a8e0"}}`, finalized)))
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool {
 			return strings.Contains(util.SafeReadBody(r), "eth_syncing")

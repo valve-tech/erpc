@@ -61,6 +61,18 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		// Pin what a poll will WRITE to match what the Suggest calls below SET.
+		//
+		// setupSelectionPolicyNetwork seeds every upstream to latest=1000 /
+		// finalized=900, and ups.Bootstrap starts a poll that can land after
+		// this test's own seeding. When the poll disagreed it wrote finalized
+		// back to 900, and SuggestFinalizedBlock could not re-raise it — see
+		// statePollerHeads. That cost this test roughly one run in ten under the
+		// load of six concurrent test-fast shards.
+		statePollerHeads["http://primary.localhost"] = [2]int64{1000, 1000}
+		statePollerHeads["http://fallback.localhost"] = [2]int64{1010, 1010}
+		t.Cleanup(func() { statePollerHeads = map[string][2]int64{} })
+
 		network := setupSelectionPolicyNetwork(t, ctx, []*common.UpstreamConfig{
 			{
 				Type:     common.UpstreamTypeEvm,
@@ -88,7 +100,7 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return primaryUp.EvmEffectiveFinalizedBlock() == 1000 &&
 				fallbackUp.EvmEffectiveFinalizedBlock() == 1010
-		}, 2*time.Second, 10*time.Millisecond,
+		}, 20*time.Second, 10*time.Millisecond,
 			"seeded heads should settle before the tip is read")
 
 		policy.TickForTest(network.policyEngine, network.networkId, "*")
@@ -205,7 +217,7 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return primaryUp.EvmEffectiveFinalizedBlock() == 1000 &&
 				fallbackUp.EvmEffectiveFinalizedBlock() == 1050
-		}, 2*time.Second, 10*time.Millisecond,
+		}, 20*time.Second, 10*time.Millisecond,
 			"seeded heads should settle before the tip is read")
 
 		assert.Equal(t, int64(1000), network.EvmHighestFinalizedBlockNumber(ctx),
