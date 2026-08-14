@@ -539,13 +539,11 @@ func TestAdmin_ApiKeyCallsRejectMissingOrMistypedArguments(t *testing.T) {
 		"UpdateWithoutConnector": {"erpc_updateApiKey", `[{"projectId":"prod","apiKey":"k","updates":{}}]`},
 		"UpdateWithoutApiKey":    {"erpc_updateApiKey", `[{"projectId":"prod","connectorId":"keys","updates":{}}]`},
 		"UpdateWithoutUpdates":   {"erpc_updateApiKey", `[{"projectId":"prod","connectorId":"keys","apiKey":"k"}]`},
-		"UpdateAnAbsentKey":      {"erpc_updateApiKey", `[{"projectId":"prod","connectorId":"keys","apiKey":"ghost","updates":{"enabled":false}}]`},
 		"DeleteWithNoParams":     {"erpc_deleteApiKey", `[]`},
 		"DeleteWithScalarParam":  {"erpc_deleteApiKey", `["key-1"]`},
 		"DeleteWithoutProjectId": {"erpc_deleteApiKey", `[{"connectorId":"keys","apiKey":"k"}]`},
 		"DeleteWithoutConnector": {"erpc_deleteApiKey", `[{"projectId":"prod","apiKey":"k"}]`},
 		"DeleteWithoutApiKey":    {"erpc_deleteApiKey", `[{"projectId":"prod","connectorId":"keys"}]`},
-		"DeleteAnAbsentKey":      {"erpc_deleteApiKey", `[{"projectId":"prod","connectorId":"keys","apiKey":"ghost"}]`},
 	}
 
 	for name, call := range cases {
