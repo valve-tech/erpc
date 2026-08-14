@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/erpc/erpc/util"
 )
 
 // These tests pin the ChainFamily CONTRACT, not any architecture switch.
@@ -20,6 +22,9 @@ type fakeFamily struct {
 	probe     ChainProbe
 	verdict   RotateVerdict
 	probeCall func(ProbeCaller) // records that Probe actually used the caller
+	// validId decides which network-id bodies this family owns. nil accepts
+	// everything, so tests that do not care about ids stay short.
+	validId func(body string) bool
 }
 
 func (f *fakeFamily) Family() NetworkArchitecture { return f.name }
@@ -31,6 +36,12 @@ func (f *fakeFamily) Probe(_ context.Context, c ProbeCaller) ChainProbe {
 	return f.probe
 }
 func (f *fakeFamily) Classify(ClassifyInput) RotateVerdict { return f.verdict }
+func (f *fakeFamily) ValidateNetworkId(body string) bool {
+	if f.validId == nil {
+		return true
+	}
+	return f.validId(body)
+}
 
 // registerForTest registers f and removes it when the test ends. The registry
 // is process-global; without the cleanup one test leaks into the next.
@@ -39,7 +50,7 @@ func registerForTest(t *testing.T, f ChainFamily) {
 	if err := RegisterChainFamily(f); err != nil {
 		t.Fatalf("RegisterChainFamily(%s): %v", f.Family(), err)
 	}
-	t.Cleanup(func() { unregisterChainFamilyForTest(f.Family()) })
+	t.Cleanup(func() { UnregisterChainFamilyForTest(f.Family()) })
 }
 
 func TestRegisterChainFamily_RoundTrip(t *testing.T) {
@@ -89,7 +100,7 @@ func TestRegisterChainFamily_RejectsRESTTransport(t *testing.T) {
 	// one must fail loudly rather than resolve and then drop every request.
 	err := RegisterChainFamily(&fakeFamily{name: "beaconish", transport: TransportREST})
 	if err == nil {
-		unregisterChainFamilyForTest("beaconish")
+		UnregisterChainFamilyForTest("beaconish")
 		t.Fatal("registering a REST-transport family succeeded; it would resolve " +
 			"but silently fail to serve")
 	}
@@ -118,6 +129,77 @@ func TestRegisteredChainFamilies_SortedAndComplete(t *testing.T) {
 	}
 	if !sawAlpha || !sawZeta {
 		t.Fatalf("registered families missing from listing (alpha=%v zeta=%v)", sawAlpha, sawZeta)
+	}
+}
+
+func TestRegisterChainFamily_TeachesUtilTheNetworkIdShape(t *testing.T) {
+	// Registration must reach util too. util.IsValidNetworkId is the gate the
+	// networks registry runs BEFORE it looks at any config, so a family that
+	// registers here but not there is probeable and unroutable at the same
+	// time — the request 404s and nothing explains why.
+	registerForTest(t, &fakeFamily{
+		name:      "shapefam",
+		transport: TransportJsonRpc,
+		validId:   func(body string) bool { return body == "mainnet" },
+	})
+
+	if !util.IsValidNetworkId("shapefam:mainnet") {
+		t.Fatal("a registered family's network id is not valid in util; the " +
+			"request path rejects the id before any config is read")
+	}
+	if util.IsValidNetworkId("shapefam:bogus") {
+		t.Fatal("util accepted a body the family rejects; the family owns its " +
+			"own id shape or it owns nothing")
+	}
+}
+
+func TestUnregisterChainFamily_AlsoRemovesTheNetworkIdShape(t *testing.T) {
+	// The two registries are written together, so they must be cleared
+	// together. A leftover shape would keep validating ids for a family that
+	// no longer resolves — and in tests it would leak across cases.
+	f := &fakeFamily{name: "leakyfam", transport: TransportJsonRpc}
+	if err := RegisterChainFamily(f); err != nil {
+		t.Fatalf("RegisterChainFamily: %v", err)
+	}
+	UnregisterChainFamilyForTest("leakyfam")
+
+	if util.IsValidNetworkId("leakyfam:anything") {
+		t.Fatal("the id shape outlived the family registration")
+	}
+}
+
+func TestRegisterChainFamily_RejectedFamilyLeavesNoIdShape(t *testing.T) {
+	// A REST family is refused (see below). If the id shape were written
+	// first, a family eRPC cannot serve would still make its ids look valid,
+	// and requests for it would route to a network with no clients.
+	if err := RegisterChainFamily(&fakeFamily{name: "restfam", transport: TransportREST}); err == nil {
+		UnregisterChainFamilyForTest("restfam")
+		t.Fatal("REST family registration succeeded")
+	}
+	if util.IsValidNetworkId("restfam:mainnet") {
+		t.Fatal("a rejected family still taught util its id shape")
+	}
+}
+
+func TestIsValidArchitecture_AnswersFromTheRegistry(t *testing.T) {
+	// The URL gate. It used to name evm and svm in a switch, so a chain could
+	// be registered, probeable and still unreachable at /<project>/<arch>/…
+	// with no error that said why.
+	if IsValidArchitecture("archfam") {
+		t.Fatal("an unregistered architecture is valid before anyone registered it")
+	}
+	registerForTest(t, &fakeFamily{name: "archfam", transport: TransportJsonRpc})
+	if !IsValidArchitecture("archfam") {
+		t.Fatal("a registered family is not a valid architecture; its URLs 404 " +
+			"while its family answers probes")
+	}
+	// Negative control: the registry must not turn into "everything is valid".
+	if IsValidArchitecture("definitely-not-registered") {
+		t.Fatal("an unregistered architecture validated; every typo would then " +
+			"resolve to a network with no upstreams")
+	}
+	if IsValidArchitecture("") {
+		t.Fatal("the empty architecture validated")
 	}
 }
 

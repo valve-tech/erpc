@@ -2503,33 +2503,23 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	return resp, nil
 }
 
+// prepareRequest validates the inbound body and lets the architecture rewrite
+// it before the pipeline runs.
+//
+// Registry lookup, not a switch over architecture names: an architecture that
+// registered a handler is one eRPC serves, so adding a chain does not touch
+// this function. Two steps, in this order:
+//
+//  1. Parse the JSON-RPC body. Every architecture eRPC can serve speaks
+//     JSON-RPC over HTTP POST — a REST family is refused at registration
+//     (common/chain_family.go) precisely because NormalizedRequest carries no
+//     verb or path — so the parse is shared rather than repeated per family.
+//  2. Ask the handler to normalize. Only EVM does (hex padding, block-tag
+//     expansion); a handler with nothing to rewrite implements nothing and is
+//     skipped.
 func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedRequest) error {
-	switch n.Architecture() {
-	case common.ArchitectureEvm:
-		jsonRpcReq, err := nr.JsonRpcRequest(ctx)
-		if err != nil {
-			return common.NewErrJsonRpcExceptionInternal(
-				0,
-				common.JsonRpcErrorParseException,
-				"failed to unmarshal json-rpc request",
-				err,
-				nil,
-			)
-		}
-		evm.NormalizeHttpJsonRpc(ctx, nr, jsonRpcReq)
-	case common.ArchitectureSvm:
-		// SVM doesn't need any EVM-style normalization (hex padding, block tag expansion, etc.).
-		// Validate that the request parses as JSON-RPC and move on.
-		if _, err := nr.JsonRpcRequest(ctx); err != nil {
-			return common.NewErrJsonRpcExceptionInternal(
-				0,
-				common.JsonRpcErrorParseException,
-				"failed to unmarshal json-rpc request",
-				err,
-				nil,
-			)
-		}
-	default:
+	handler, err := common.GetArchitectureHandler(n.Architecture())
+	if err != nil {
 		return common.NewErrJsonRpcExceptionInternal(
 			0,
 			common.JsonRpcErrorServerSideException,
@@ -2539,6 +2529,19 @@ func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedReque
 		)
 	}
 
+	if _, err := nr.JsonRpcRequest(ctx); err != nil {
+		return common.NewErrJsonRpcExceptionInternal(
+			0,
+			common.JsonRpcErrorParseException,
+			"failed to unmarshal json-rpc request",
+			err,
+			nil,
+		)
+	}
+
+	if normalizer, ok := handler.(common.RequestNormalizer); ok {
+		return normalizer.NormalizeRequest(ctx, nr)
+	}
 	return nil
 }
 

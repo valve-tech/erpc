@@ -95,10 +95,31 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 		lg := manager.logger.With().Str("upstreamId", cfg.Id).Logger()
 		var c ClientInterface
 		var cerr error
-		switch cfg.Type {
-		case common.UpstreamTypeEvm:
+		// The client is chosen by URL SCHEME, not by chain: every architecture
+		// eRPC serves speaks JSON-RPC, so the same three clients carry all of
+		// them. What is per-chain is only (a) whether eRPC serves this
+		// upstream type at all, and (b) whether the chain can use a given
+		// transport. Both answers come from the chain-family registry, so a new
+		// chain needs no case here.
+		family, known := common.LookupChainFamilyForUpstreamType(cfg.Type)
+		switch {
+		case !known:
+			cerr = fmt.Errorf("unsupported upstream type: %v for upstream: %v", cfg.Type, cfg.Id)
+		default:
+			if ok, reason := common.EndpointSchemeSupported(family, parsedUrl.Scheme); !ok {
+				// The family refused a transport eRPC could otherwise build —
+				// SVM's http-only rule is the case this exists for. Carry the
+				// family's own reason: "unsupported scheme" alone sends the
+				// operator looking for a typo that is not there.
+				cerr = fmt.Errorf("unsupported endpoint scheme for %s upstream %v: %v (%s)",
+					family.Family(), cfg.Id, parsedUrl.Scheme, reason)
+				break
+			}
 			switch parsedUrl.Scheme {
 			case "http", "https":
+				// The extractor is the composite one — it dispatches by
+				// architecture, so each family's errors are normalized by its
+				// own normalizer on this one shared client path.
 				c, cerr = NewGenericHttpJsonRpcClient(
 					appCtx,
 					&lg,
@@ -142,33 +163,12 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					cerr = fmt.Errorf("failed to create gRPC BDS client for upstream: %v: %w", cfg.Id, cerr)
 				}
 			default:
+				// A scheme eRPC has no client for. This is the last line of
+				// defence: a family that implements no scheme gate allows
+				// everything, so without this a typo'd endpoint would return a
+				// nil client and no error.
 				cerr = fmt.Errorf("unsupported endpoint scheme: %v for upstream: %v", parsedUrl.Scheme, cfg.Id)
 			}
-
-		case common.UpstreamTypeSvm:
-			switch parsedUrl.Scheme {
-			case "http", "https":
-				// Reuse the composite extractor — it dispatches by architecture so SVM
-				// errors are handled by the SVM normalizer and EVM errors fall through
-				// untouched on this same client path.
-				c, cerr = NewGenericHttpJsonRpcClient(
-					appCtx,
-					&lg,
-					manager.projectId,
-					ups,
-					parsedUrl,
-					cfg.JsonRpc,
-					proxyPool,
-					manager.evmExtractor,
-				)
-				if cerr != nil {
-					cerr = fmt.Errorf("failed to create HTTP client for upstream: %v: %w", cfg.Id, cerr)
-				}
-			default:
-				cerr = fmt.Errorf("unsupported endpoint scheme for svm upstream %v: %v (only http/https supported)", cfg.Id, parsedUrl.Scheme)
-			}
-		default:
-			cerr = fmt.Errorf("unsupported upstream type: %v for upstream: %v", cfg.Type, cfg.Id)
 		}
 		creation.client = c
 		creation.err = cerr

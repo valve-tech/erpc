@@ -57,6 +57,31 @@ func (f *Family) Family() common.NetworkArchitecture { return Architecture }
 
 func (f *Family) Transport() common.ChainTransport { return common.TransportJsonRpc }
 
+// ValidateNetworkId accepts a bitcoind network name — the body of "btc:mainnet",
+// "btc:testnet", "btc:signet", "btc:regtest".
+//
+// The list is NOT enumerated. bitcoind's own `chain` field is free text, the
+// same RPC surface serves Dogecoin and Litecoin, and operators run private
+// signets with their own names — an enumeration would reject a working node
+// for not being on a list eRPC happens to know. The real constraint is that
+// the name has to survive being half of a network ID, a metric label and a
+// cache key, so it must be a single identifier segment: no colon (which would
+// re-split the id), no empty value, nothing exotic.
+func (f *Family) ValidateNetworkId(body string) bool {
+	if body == "" {
+		return false
+	}
+	for _, r := range body {
+		if !(r == '-' || r == '_' || r == '.' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
 // Probe issues one getblockchaininfo and derives liveness and tip from it.
 //
 // One call answers everything: `blocks` is the tip, and

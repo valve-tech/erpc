@@ -1085,7 +1085,11 @@ func (s *HttpServer) parseUrlPath(
 	}
 
 	if (chainId != "" || architecture != "") && !common.IsValidArchitecture(architecture) {
-		return "", "", "", false, false, common.NewErrInvalidUrlPath("architecture is not valid (must be 'evm' or 'svm')", ps)
+		// List what this build actually serves. A hardcoded "evm or svm" goes
+		// stale the moment a chain family is added, and it points the operator
+		// at the wrong problem.
+		return "", "", "", false, false, common.NewErrInvalidUrlPath(
+			fmt.Sprintf("architecture is not valid (must be one of: %v)", common.RegisteredChainFamilies()), ps)
 	}
 
 	// Anything non-POST that is not an upgrade is treated as a healthcheck, so
