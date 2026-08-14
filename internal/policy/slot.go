@@ -194,6 +194,9 @@ func (s *Slot) tickOnce() {
 		TickCount:        s.tickCount,
 	}
 	evalCtx := buildEvalContext(s.networkID, s.method, state)
+	// Network-level `failover.onDefaultsExhausted`, published to the eval
+	// as `ctx.failoverOnDefaultsExhausted`.
+	evalCtx.FailoverOnDefaultsExhausted = s.cfg != nil && s.cfg.FailoverOnDefaultsExhausted
 	// For per-finality slots `s.finality` carries the bucket value
 	// (`realtime`/`unfinalized`/`finalized`/`unknown`); for wildcard
 	// slots it stays `"*"` and we fall back to the legacy default

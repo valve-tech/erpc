@@ -21,6 +21,13 @@ type EvalContext struct {
 	PreviousOrder []string `json:"previousOrder,omitempty"`
 	LastSwitchAt  *int64   `json:"lastSwitchAt,omitempty"`
 	TickCount     uint64   `json:"tickCount"`
+	// FailoverOnDefaultsExhausted publishes the network's
+	// `failover.onDefaultsExhausted` to the eval. The bundled default
+	// policy reads it to keep `tier:fallback` upstreams in the tick's
+	// list, ranked last, so a request that exhausts the primary tier can
+	// still escalate. A custom evalFunc must read it itself — the engine
+	// warns at register time when it does not.
+	FailoverOnDefaultsExhausted bool `json:"failoverOnDefaultsExhausted"`
 }
 
 func buildEvalContext(networkID, method string, state DecisionState) EvalContext {

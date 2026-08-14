@@ -1227,9 +1227,16 @@ projects:
 // assigns nil and the failover suppression has nothing left to suppress.
 //
 // The assertions below therefore pin CURRENT behaviour: SetDefaults leaves
-// SelectionPolicy nil unless the user supplied one. The open question — does
-// the fork still need a per-request fallback escape now that the engine
-// handles the tier split — rides with the deferred fallback-escape commit.
+// SelectionPolicy nil unless the user supplied one.
+//
+// The open question the note used to carry — does the fork still need a
+// per-request fallback escape now that the engine handles the tier split —
+// is now answered, and answered inside the policy layer rather than here.
+// `Network.Bootstrap` copies `failover.onDefaultsExhausted` onto the
+// SelectionPolicyConfig it registers, and the default policy reads it as
+// `ctx.failoverOnDefaultsExhausted` to rank the fallback tier last instead
+// of dropping it. SetDefaults still attaches nothing, which is why these
+// assertions are unchanged.
 func TestNetworkConfig_SetDefaults_FailoverSkipsAutoSelectionPolicy(t *testing.T) {
 	upstreams := []*UpstreamConfig{
 		{Id: "a", Endpoint: "http://a", Type: UpstreamTypeEvm},

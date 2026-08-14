@@ -736,15 +736,31 @@ type NetworkDefaults struct {
 	Failover          *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
 }
 
-// FailoverConfig controls within-request escalation between upstream groups.
-// Independent of SelectionPolicy (which evaluates group membership
-// periodically across requests) — Failover operates per-request only.
+// FailoverConfig controls within-request escalation to the fallback
+// tier — the upstreams tagged `tier:fallback`.
 type FailoverConfig struct {
-	// OnDefaultsExhausted, when true, causes the network request loop to
-	// try upstreams with group "default" (or unset) first and only advance
-	// to group "fallback" if every default upstream returned a retryable
-	// error within the same request. Deterministic client errors still
-	// short-circuit without advancing.
+	// OnDefaultsExhausted, when true, lets one request escalate to the
+	// fallback tier after every default upstream has failed it. Default
+	// upstreams are simply the ones NOT tagged `tier:fallback`.
+	//
+	// HTTP requests. The network's selection policy ranks the fallback
+	// tier LAST instead of dropping it, so the request loop sweeps into
+	// the fallback tier once the defaults return retryable errors. A
+	// deterministic client error still short-circuits without advancing.
+	// This works through `ctx.failoverOnDefaultsExhausted`, which the
+	// bundled default selection policy reads. A network with a
+	// hand-written `selectionPolicy.evalFunc` must read that same ctx
+	// field itself; the policy engine logs a warning at startup when it
+	// does not.
+	//
+	// WebSocket subscribes. `tier:fallback` upstreams go into a separate
+	// ingress tier that the indexer only touches after every default
+	// ingress failed (erpc/subscription_manager.go).
+	//
+	// Cost. The escape makes the fallback tier reachable on a healthy
+	// tick, so failsafe policies that pick beyond the head of the list —
+	// hedge and consensus — can now send traffic to it. Leave the key
+	// off unless the fallback upstreams are meant to absorb that.
 	OnDefaultsExhausted *bool `yaml:"onDefaultsExhausted,omitempty" json:"onDefaultsExhausted"`
 }
 
@@ -2793,6 +2809,16 @@ type SelectionPolicyConfig struct {
 	// Signature: `(upstreams, ctx) => Upstream[]`.
 	// See specs/selection-policy/feature.md for the stdlib reference.
 	EvalFunc string `yaml:"evalFunc,omitempty" json:"evalFunc" tstype:"SelectionPolicyEvalFunction | string"`
+
+	// FailoverOnDefaultsExhausted mirrors the network's
+	// `failover.onDefaultsExhausted` (see FailoverConfig) into the policy
+	// engine. Derived, never parsed — `Network.Bootstrap` copies it in
+	// from NetworkConfig.Failover just before it registers the network.
+	// The engine publishes it to the eval as
+	// `ctx.failoverOnDefaultsExhausted`; the bundled default policy reads
+	// it to keep `tier:fallback` upstreams in the tick's list (ranked
+	// last) instead of dropping them.
+	FailoverOnDefaultsExhausted bool `yaml:"-" json:"-"`
 
 	// DisableTickerForTest skips spawning the per-slot ticker goroutine.
 	// Tests that don't need background re-eval set this to avoid
