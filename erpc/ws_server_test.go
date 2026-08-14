@@ -1103,6 +1103,8 @@ func TestWebSocket_RateLimiting(t *testing.T) {
 		setupGock()
 		defer util.ResetGock()
 
+		const maxCount = 3
+
 		cfg := &common.Config{
 			Server: &common.ServerConfig{
 				ListenV4: util.BoolPtr(true),
@@ -1136,7 +1138,7 @@ func TestWebSocket_RateLimiting(t *testing.T) {
 						Rules: []*common.RateLimitRuleConfig{
 							{
 								Method:   "*",
-								MaxCount: 3,
+								MaxCount: maxCount,
 								Period:   common.RateLimitPeriodMinute,
 							},
 						},
@@ -1151,13 +1153,26 @@ func TestWebSocket_RateLimiting(t *testing.T) {
 		conn := dialWs(t, addr)
 		defer conn.Close()
 
-		// Align to start of the next minute to avoid rate limit window rollover
-		now := time.Now()
-		time.Sleep(time.Until(now.Truncate(time.Minute).Add(time.Minute)))
+		// The budget above allows maxCount requests per wall-clock minute, and the
+		// window boundary is the real minute boundary. A burst that straddles the
+		// boundary therefore splits across two counters.
+		//
+		// Instead of sleeping up to a minute to align with the boundary, we send
+		// more than 2*maxCount requests. The burst takes milliseconds, so it
+		// crosses at most one boundary and splits into at most two windows. By the
+		// pigeonhole principle one of those windows receives at least maxCount+1
+		// requests, so the budget must reject at least one request. The elapsed
+		// check below asserts the premise: the burst is far shorter than the
+		// window.
+		//
+		// upstream.TestRateLimiterBudget_WindowRolloverDuringBurst proves both
+		// halves of this against the real limiter with a fake clock.
+		const burst = 2*maxCount + 4 // 10, comfortably above the 2*maxCount+1 floor
 
 		var lastResp map[string]interface{}
 		rateLimited := false
-		for i := 0; i < 10; i++ {
+		start := time.Now()
+		for i := 0; i < burst; i++ {
 			msg := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"eth_getBalance","params":["0xaaaa","latest"]}`, i)
 			err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
 			require.NoError(t, err)
@@ -1178,6 +1193,8 @@ func TestWebSocket_RateLimiting(t *testing.T) {
 			}
 		}
 
+		require.Less(t, time.Since(start), time.Minute,
+			"burst must be shorter than the rate limit window, otherwise it can span more than one window")
 		assert.True(t, rateLimited, "should hit rate limit when sending requests over WS")
 	})
 }
