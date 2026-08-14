@@ -2101,10 +2101,49 @@ type ErrEndpointTransportFailure struct{ BaseError }
 
 const ErrCodeEndpointTransportFailure = "ErrEndpointTransportFailure"
 
+// RedactedEndpointPlaceholder replaces the endpoint URL in a transport failure
+// message. Endpoint URLs carry API keys, so no rendered message may contain one.
+// The placeholder is visible on purpose: a reader (and a test) can tell a
+// redaction apart from an empty message.
+const RedactedEndpointPlaceholder = "<redacted-endpoint>"
+
+// redactedCauseError hides the endpoint URL in an error message but keeps the
+// original error reachable. Error() returns the redacted text, so every surface
+// that prints a cause stays free of credentials: BaseError.Error,
+// BaseError.DeepestMessage, BaseError.MarshalJSON, BaseError.MarshalZerologObject
+// and ErrorSummary all render a non-StandardError cause through Error().
+// Unwrap() returns the untouched original, so errors.Is and errors.As still
+// reach sentinels such as context.DeadlineExceeded, io.EOF and net.ErrClosed.
+//
+// The type deliberately does not implement StandardError. The marshalling code
+// in BaseError renders a non-StandardError cause through Error(), which is the
+// redacted path we want.
+type redactedCauseError struct {
+	cause   error
+	message string
+}
+
+func (e *redactedCauseError) Error() string { return e.message }
+
+func (e *redactedCauseError) Unwrap() error { return e.cause }
+
+// redactEndpointInCause wraps cause so its message no longer shows the endpoint
+// URL. A nil or empty URL is a no-op on the message: strings.ReplaceAll with an
+// empty needle would insert the placeholder between every character.
+func redactEndpointInCause(u *url.URL, cause error) error {
+	message := cause.Error()
+	if u != nil {
+		if raw := u.String(); raw != "" {
+			message = strings.ReplaceAll(message, raw, RedactedEndpointPlaceholder)
+		}
+	}
+	return &redactedCauseError{cause: cause, message: message}
+}
+
 var NewErrEndpointTransportFailure = func(url *url.URL, cause error) error {
 	if cause != nil {
 		if _, ok := cause.(StandardError); !ok {
-			cause = errors.New(strings.ReplaceAll(cause.Error(), url.String(), ""))
+			cause = redactEndpointInCause(url, cause)
 		}
 	}
 	return &ErrEndpointTransportFailure{
