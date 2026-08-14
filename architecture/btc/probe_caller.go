@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/erpc/erpc/common"
 )
 
 // maxProbeBody caps how much of a probe response is read.
@@ -31,6 +33,17 @@ type HttpProbeCaller struct {
 	// Client is the HTTP client to use. Required — the caller owns the
 	// timeout, and a probe without one can hang a poll loop forever.
 	Client *http.Client
+}
+
+// NewProbeCaller builds the probe transport for a bitcoind endpoint, which is
+// how Family satisfies common.ProbeTransportFactory.
+//
+// The upstream layer owns the HTTP client (and therefore the timeout) but must
+// not own the DIALECT — the JSON-RPC 1.0 envelope and the HTTP-500-with-an-
+// error-body rule below are bitcoind's, not eRPC's. Building the caller here is
+// what keeps them out of chain-agnostic code.
+func (f *Family) NewProbeCaller(endpoint string, client *http.Client) common.ProbeCaller {
+	return &HttpProbeCaller{Endpoint: endpoint, Client: client}
 }
 
 // jsonRpcEnvelope is bitcoind's response shape.

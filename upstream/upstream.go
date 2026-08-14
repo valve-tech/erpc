@@ -1397,7 +1397,7 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 		// the client and networkId are in place, so it can go through the
 		// upstream's normal Forward path.
 	} else {
-		return fmt.Errorf("upstream type not supported: %s", cfg.Type)
+		return u.detectChainFamilyFeatures(ctx, cfg)
 	}
 
 	return nil

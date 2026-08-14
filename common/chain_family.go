@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"net/http"
 	"sort"
 	"sync"
 
@@ -275,6 +276,39 @@ func LookupChainFamily(a NetworkArchitecture) (ChainFamily, bool) {
 // NOT an architecture, this function is the single place to teach it.
 func LookupChainFamilyForUpstreamType(t UpstreamType) (ChainFamily, bool) {
 	return LookupChainFamily(NetworkArchitecture(t))
+}
+
+// ProbeTransportFactory is the OPTIONAL surface a family implements to build
+// the ProbeCaller its own Probe expects.
+//
+// Optional and asserted narrowly, in the EndpointSchemeGate pattern. It exists
+// because the probe wire shape is per-chain even when the transport is "HTTP
+// POST with a JSON body": bitcoind wants a JSON-RPC 1.0 envelope and answers an
+// RPC failure with HTTP 500 carrying the error, which is not what an EVM node
+// does. Letting the upstream layer build one generic caller would bake one
+// chain's dialect into chain-agnostic code — so the family that knows the
+// dialect builds the caller instead.
+//
+// A family that does not implement it cannot be probed, and upstream bootstrap
+// refuses such an upstream with a message naming the family. That is the honest
+// outcome: without a probe there is no tip, no lag, and no way to tell a synced
+// node from a stalled one, so the upstream would join the pool and route traffic
+// on no evidence at all.
+type ProbeTransportFactory interface {
+	// NewProbeCaller returns a caller bound to `endpoint`, using `client` for
+	// every request. The caller owns the client's timeout — a probe without one
+	// can hang a poll loop forever.
+	NewProbeCaller(endpoint string, client *http.Client) ProbeCaller
+}
+
+// NewFamilyProbeCaller asks `f` for a probe transport. `ok` is false when the
+// family provides none.
+func NewFamilyProbeCaller(f ChainFamily, endpoint string, client *http.Client) (ProbeCaller, bool) {
+	factory, implements := f.(ProbeTransportFactory)
+	if !implements {
+		return nil, false
+	}
+	return factory.NewProbeCaller(endpoint, client), true
 }
 
 // EndpointSchemeGate is the OPTIONAL surface a family implements when it must
