@@ -50,6 +50,14 @@ type chainInfo struct {
 // chains (Dogecoin, Litecoin — same RPC surface).
 type Family struct{}
 
+// Family also builds its own probe transport. Without it eRPC cannot tell a
+// synced node from a stalled one, and upstream bootstrap refuses every btc
+// upstream — so the assertion is stated here rather than discovered at runtime.
+var (
+	_ common.ChainFamily           = (*Family)(nil)
+	_ common.ProbeTransportFactory = (*Family)(nil)
+)
+
 // New returns the Bitcoin family.
 func New() *Family { return &Family{} }
 
