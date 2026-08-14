@@ -359,9 +359,15 @@ func (sm *SubscriptionManager) bootstrapNetwork(ctx context.Context, nw *Network
 
 // subIngressSelector routes filter subscribes through the same upstream
 // selector used by the HTTP request path: score-ordered, circuit-breaker
-// aware, and group-tiered when failover.onDefaultsExhausted is set. The
+// aware, and tier-split when failover.onDefaultsExhausted is set. The
 // output is a list of EventIngress names (matching wsupstream.Adapter.Name()
 // == "ws:" + upstreamId).
+//
+// The key means the same thing here as it does on HTTP — "after every
+// default upstream fails this request, escalate to the tier:fallback
+// upstreams". The mechanism differs: HTTP gets it from the selection
+// policy (see common.FailoverConfig), subscribes get it from the two
+// tiers below, which the indexer consumes in order.
 type subIngressSelector struct {
 	nw        *Network
 	networkID string
@@ -369,10 +375,12 @@ type subIngressSelector struct {
 
 // Select returns (defaults, fallbacks) for a filter subscribe. Both tiers
 // are ordered by the upstream registry's score for eth_subscribe; upstreams
-// whose circuit breaker is open are skipped. Fallback-group upstreams only
-// populate the fallback tier when network-level failover.onDefaultsExhausted
-// is enabled — otherwise they mix into the defaults, matching the HTTP
-// selector's behaviour for non-failover networks.
+// whose circuit breaker is open are skipped. A `tier:fallback` upstream
+// only populates the fallback tier when network-level
+// failover.onDefaultsExhausted is enabled — otherwise it mixes into the
+// defaults. Note this path reads the registry directly, not the selection
+// policy, so with the key off a subscribe still reaches a `tier:fallback`
+// upstream where an HTTP request would not.
 func (s *subIngressSelector) Select(_networkId, _subType string, _params []interface{}) (defaults, fallbacks []string) {
 	if s == nil || s.nw == nil || s.nw.upstreamsRegistry == nil {
 		return nil, nil

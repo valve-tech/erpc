@@ -6,7 +6,30 @@ import (
 	"strings"
 
 	"github.com/erpc/erpc/common"
+	"github.com/rs/zerolog"
 )
+
+// failoverCtxKey is the JS name of the eval-context field that carries
+// `failover.onDefaultsExhausted` into the policy program.
+const failoverCtxKey = "failoverOnDefaultsExhausted"
+
+// warnIfFailoverIgnored tells the operator when `failover.onDefaultsExhausted`
+// cannot take effect on the HTTP path. The bundled default policy reads
+// `ctx.failoverOnDefaultsExhausted`; a hand-written evalFunc that never
+// mentions it silently ignores the key, and a config surface that
+// silently does nothing is worse than one that does not exist.
+func warnIfFailoverIgnored(logger *zerolog.Logger, networkID string, cfg *common.SelectionPolicyConfig) {
+	if logger == nil || cfg == nil || !cfg.FailoverOnDefaultsExhausted {
+		return
+	}
+	if strings.Contains(cfg.EvalFunc, failoverCtxKey) {
+		return
+	}
+	logger.Warn().
+		Str("networkId", networkID).
+		Msgf("failover.onDefaultsExhausted is set, but this network's custom selectionPolicy.evalFunc never reads ctx.%s. "+
+			"HTTP requests will not escalate to the tier:fallback upstreams. WebSocket subscribes are not affected", failoverCtxKey)
+}
 
 //go:embed default_policy.js
 var defaultPolicyJS string

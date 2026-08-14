@@ -235,6 +235,11 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 		cfg = &common.SelectionPolicyConfig{}
 		n.cfg.SelectionPolicy = cfg
 	}
+	// `failover.onDefaultsExhausted` reaches the HTTP path through the
+	// selection policy: the engine publishes this to the eval as
+	// `ctx.failoverOnDefaultsExhausted`, and the bundled default policy
+	// reads it to rank the fallback tier last instead of dropping it.
+	cfg.FailoverOnDefaultsExhausted = n.cfg.Failover.Enabled()
 	// Defensive: callers may have set Eval but skipped SetDefaults (common
 	// in tests that build Config as Go struct literals). Compile here so
 	// the engine never sees a nil program.
