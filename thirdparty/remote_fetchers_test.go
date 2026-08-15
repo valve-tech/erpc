@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	stdlog "log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -127,6 +128,11 @@ func TestFetchRemoteData_ATruncatedBodyIsAnErrorNotAnEmptyMap(t *testing.T) {
 
 	require.Error(t, err, "a half-delivered body must never read as a successful empty fetch")
 	assert.Nil(t, data)
+	// The read must fail on its own. If the fetcher ignored the read error and
+	// let the partial bytes reach the parser, the operator would be told the
+	// vendor sent bad JSON rather than that the connection dropped.
+	assert.Contains(t, err.Error(), "unexpected EOF")
+	assert.NotContains(t, err.Error(), "failed to parse remote repository data")
 }
 
 func TestFetchRemoteData_HonoursTheCallersDeadline(t *testing.T) {
@@ -161,7 +167,8 @@ func TestFetchConduitNetworks_KeepsOnlyUsableEntries(t *testing.T) {
 		{"id":"b","chainId":"not-a-number","httpEndpoint":"https://bad.example"},
 		{"id":"c","chainId":"0","httpEndpoint":"https://zero.example"},
 		{"id":"d","chainId":"-5","httpEndpoint":"https://negative.example"},
-		{"id":"e","chainId":"10","httpEndpoint":""}
+		{"id":"e","chainId":"10","httpEndpoint":""},
+		{"id":"f","chainId":"99999999999999999999","httpEndpoint":"https://overflow.example"}
 	]}`)
 	v := CreateConduitVendor().(*ConduitVendor)
 	logger := zerolog.Nop()
@@ -174,6 +181,10 @@ func TestFetchConduitNetworks_KeepsOnlyUsableEntries(t *testing.T) {
 	require.NotNil(t, data[8453])
 	assert.Equal(t, "https://base.example", data[8453].HttpEndpoint)
 	assert.Equal(t, "a", data[8453].ID)
+	// A chain ID too large for int64 parses to MaxInt64 with a range error.
+	// Only the error check keeps it out; the positive-value check would let
+	// it through and register a phantom chain.
+	assert.NotContains(t, data, int64(math.MaxInt64), "an out-of-range chain ID must be skipped, not clamped")
 }
 
 func TestFetchConduitNetworks_ReportsTheStatusCodeOnANon2xx(t *testing.T) {
@@ -400,15 +411,24 @@ func TestQuicknodeFetchChainIDs_FillsTheChainIdFromTheProbe(t *testing.T) {
 	assert.Equal(t, int64(8453), ep.ChainID)
 }
 
-func TestQuicknodeFetchChainIDs_SkipsEndpointsWithNoHttpUrl(t *testing.T) {
-	v := CreateQuicknodeVendor().(*QuicknodeVendor)
+// A JSON-RPC response that carries both an error and a result is malformed,
+// but vendors do send it. The error must win: trusting the result would route
+// traffic to a node whose own answer says the call failed.
+func TestChainIdProbe_AnErrorBesideAResultMustWin(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"result":"0x1","error":{"code":-32000,"message":"node syncing"}}`
 	logger := zerolog.Nop()
-	ep := &QuicknodeEndpoint{ID: "e1"}
 
-	err := v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep})
+	csSrv, _ := chainIdServer(t, body)
+	cs := CreateChainstackVendor().(*ChainstackVendor)
+	node := &ChainstackNode{ID: "n1", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: csSrv.URL}}
+	require.NoError(t, cs.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node}))
+	assert.Equal(t, int64(0), node.ChainID, "chainstack must not accept a result that came with an error")
 
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), ep.ChainID)
+	qnSrv, _ := chainIdServer(t, body)
+	qn := CreateQuicknodeVendor().(*QuicknodeVendor)
+	ep := &QuicknodeEndpoint{ID: "e1", HttpUrl: qnSrv.URL}
+	require.NoError(t, qn.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep}))
+	assert.Equal(t, int64(0), ep.ChainID, "quicknode must not accept a result that came with an error")
 }
 
 func TestQuicknodeFetchChainIDs_LeavesTheChainIdUnsetWhenTheProbeFails(t *testing.T) {

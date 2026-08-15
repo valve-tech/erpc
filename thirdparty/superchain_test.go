@@ -155,6 +155,27 @@ func TestSuperchainVendor_SupportsNetwork_AnswersFromTheRefreshedSnapshot(t *tes
 	assert.Equal(t, int32(1), hits.Load(), "a fresh snapshot must not re-hit the registry")
 }
 
+// The fetcher drops entries with no RPC, but SupportsNetwork guards again in
+// case the registry shape changes. Publishing straight into the cache is the
+// only way to reach that guard.
+func TestSuperchainVendor_SupportsNetwork_AChainWithNoRpcIsUnsupported(t *testing.T) {
+	v := CreateSuperchainVendor().(*SuperchainVendor)
+	logger := zerolog.Nop()
+	settings := common.VendorSettings{"registryUrl": "https://cache.only/list.json", "recheckInterval": time.Hour}
+	publishAndWait(t, v.cache, "https://cache.only/list.json", map[int64][]string{
+		10:  {"https://opt.example"},
+		999: {},
+	})
+
+	usable, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:10")
+	require.NoError(t, err)
+	assert.True(t, usable)
+
+	empty, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:999")
+	require.NoError(t, err)
+	assert.False(t, empty, "a chain listed with no RPC must never be reported as supported")
+}
+
 func TestSuperchainVendor_SupportsNetwork_RejectsAnUnparseableRegistrySpec(t *testing.T) {
 	v := CreateSuperchainVendor().(*SuperchainVendor)
 	logger := zerolog.Nop()

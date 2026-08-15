@@ -52,8 +52,9 @@ func TestAnkrVendor_GenerateConfigs_BuildsTheEndpointAndEscapesTheKey(t *testing
 
 	require.NoError(t, err)
 	require.Len(t, configs, 1)
-	assert.Contains(t, configs[0].Endpoint, "https://rpc.ankr.com/eth/")
-	assert.NotContains(t, configs[0].Endpoint, "a b/c", "the key must be escaped, not pasted into the path")
+	// Without the escape the slash in the key would split into an extra path
+	// segment and Ankr would receive a different key.
+	assert.Equal(t, "https://rpc.ankr.com/eth/a+b%2Fc", configs[0].Endpoint)
 	assert.Equal(t, common.UpstreamTypeEvm, configs[0].Type)
 }
 

@@ -67,6 +67,32 @@ func TestConduitVendor_SupportsNetwork_AnswersFromTheRefreshedSnapshot(t *testin
 	assert.Equal(t, int32(1), hits.Load(), "a warm, fresh snapshot must not re-hit the network")
 }
 
+// The fetcher drops entries with no endpoint, but SupportsNetwork guards
+// again in case the payload shape changes. Publishing straight into the cache
+// is the only way to reach that guard.
+func TestConduitVendor_SupportsNetwork_AnEntryWithNoEndpointIsUnsupported(t *testing.T) {
+	v := CreateConduitVendor().(*ConduitVendor)
+	logger := zerolog.Nop()
+	settings := common.VendorSettings{"networksUrl": "cache-only", "recheckInterval": time.Hour}
+	publishAndWait(t, v.cache, "cache-only", map[int64]*ConduitNetwork{
+		998: nil,
+		999: {ID: "no-endpoint", ChainID: "999"},
+		10:  {ID: "ok", ChainID: "10", HttpEndpoint: "https://opt.example"},
+	})
+
+	usable, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:10")
+	require.NoError(t, err)
+	assert.True(t, usable)
+
+	noEndpoint, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:999")
+	require.NoError(t, err)
+	assert.False(t, noEndpoint, "an entry with no endpoint must never be routed to")
+
+	nilEntry, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:998")
+	require.NoError(t, err)
+	assert.False(t, nilEntry, "a nil entry must never be routed to")
+}
+
 func TestConduitVendor_SupportsNetwork_IgnoresNonEvmNetworksWithoutTouchingTheNetwork(t *testing.T) {
 	v, settings, hits := conduitFixture(t)
 	logger := zerolog.Nop()

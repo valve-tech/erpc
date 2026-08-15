@@ -307,7 +307,8 @@ func TestSatelinkVendor_GetVendorSpecificErrorIfAny_ToleratesANilResponse(t *tes
 }
 
 // -----------------------------------------------------------------------------
-// Every normaliser must ignore a body it did not produce.
+// Every registered normaliser must ignore a body it did not produce. This
+// sweeps whatever the registry holds; it does not pin the membership list.
 // -----------------------------------------------------------------------------
 
 func TestEveryVendorNormaliser_IgnoresANonJsonRpcBody(t *testing.T) {
