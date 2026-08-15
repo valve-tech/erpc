@@ -283,33 +283,19 @@ func TestHttpServer_AnswersAnEmptyBodyWithoutForwardingIt(t *testing.T) {
 	require.Zero(t, up.count("eth_getBalance"))
 }
 
-// TestHttpServer_ABlockedMethodAnswersWithANullIdOverHttp pins a live defect,
-// not a design choice. When `ignoreMethods` blocks a call, the HTTP path builds
-// its refusal like this (http_server.go:580):
+// TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp covers the refusal
+// `ignoreMethods` produces. A refusal is only useful if the caller can pair it
+// with the call it made, and every JSON-RPC client pairs by id. A null id is
+// unpairable: the caller sits on the request until its own timeout instead of
+// reading the refusal that is right there in the body.
 //
-//	if jrr, err := nq.JsonRpcRequest(); err != nil {
-//	    jsonrpcVersion = jrr.JSONRPC
-//	    reqId = jrr.ID
-//	}
-//
-// The condition is inverted. The id is copied only when the lookup FAILED — on
-// failure JsonRpcRequest returns a nil pointer, so that body would panic if it
-// ever ran. It does not run, because Validate() has already cached the parse, so
-// the practical result is the branch never executes and `reqId` stays nil.
-//
-// The client therefore gets `"id": null`. Every JSON-RPC client pairs answers to
-// calls by id; a null id is unpairable, so the caller sits on the request until
-// its own timeout instead of reading the refusal that is right there in the
-// body. In a batch, nothing can be matched at all.
-//
-// The WebSocket path gets this right — see ws_server.go:501, which tests
-// `err == nil` — so today the same project config behaves differently over the
-// two transports. TestWebSocket_AppliesTheMethodFilterToBatchEntriesToo asserts
-// the correct behaviour on that side.
-//
-// The assertion below records what eRPC does today. When the condition is fixed
-// this test must go red and be updated to require the caller's id.
-func TestHttpServer_ABlockedMethodAnswersWithANullIdOverHttp(t *testing.T) {
+// The HTTP path used to test `err != nil` before copying the id from the parsed
+// request (http_server.go:580), which is inverted — and on failure
+// JsonRpcRequest returns a nil pointer, so that body would have panicked had it
+// ever run. It never ran, because Validate() caches the parse first, so the id
+// silently stayed nil. The WebSocket path always tested `err == nil`, so the
+// same project config behaved differently over the two transports.
+func TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
 
@@ -331,8 +317,59 @@ func TestHttpServer_ABlockedMethodAnswersWithANullIdOverHttp(t *testing.T) {
 	require.Zero(t, up.count("debug_traceTransaction"),
 		"a blocked method must never reach the node")
 
-	require.Nil(t, parsed["id"],
-		"pinning today's defect: the caller sent id 77 and gets id null back")
+	require.EqualValues(t, 77, parsed["id"],
+		"the caller sent id 77 and must get id 77 back, or it cannot pair the refusal")
+	require.Equal(t, "2.0", parsed["jsonrpc"])
+}
+
+// TestHttpServer_ABlockedMethodInABatchEchoesEachId is the discriminating half.
+// A single call still arrives on the connection the client is waiting on, so a
+// null id there is survivable. In a batch, the id is the ONLY link between an
+// entry and its answer: one blocked entry with a null id makes the whole batch
+// unmatchable. The batch below mixes a served call with two blocked ones, so
+// the test fails if the server echoes one id for all of them.
+func TestHttpServer_ABlockedMethodInABatchEchoesEachId(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+
+	up := newCountingUpstream(t)
+	cfg := transportTestConfig(up)
+	cfg.Projects[0].IgnoreMethods = []string{"debug_*"}
+	url := startTransportServer(t, cfg)
+
+	resp, body := postRaw(t, url, []byte(`[
+		{"jsonrpc":"2.0","id":11,"method":"debug_traceTransaction","params":["0xabc"]},
+		{"jsonrpc":"2.0","id":12,"method":"eth_getBalance","params":["0xaaaa","latest"]},
+		{"jsonrpc":"2.0","id":13,"method":"debug_traceBlock","params":["0xdef"]}
+	]`), nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body was %s", body)
+
+	var entries []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(body), &entries), "got %s", body)
+	require.Len(t, entries, 3, "a batch answers every entry; got %s", body)
+
+	byId := map[float64]map[string]interface{}{}
+	for _, e := range entries {
+		id, ok := e["id"].(float64)
+		require.True(t, ok, "every entry must carry back its own id; got %s", body)
+		byId[id] = e
+	}
+
+	for _, id := range []float64{11, 13} {
+		entry, ok := byId[id]
+		require.True(t, ok, "the refusal for id %v is unpairable; got %s", id, body)
+		errObj, isErr := entry["error"].(map[string]interface{})
+		require.True(t, isErr, "id %v must be refused; got %s", id, body)
+		require.Contains(t, errObj["message"], "method not supported")
+	}
+
+	served, ok := byId[12]
+	require.True(t, ok, "the allowed entry must keep its id too; got %s", body)
+	require.Equal(t, "0xabc123", served["result"],
+		"blocking two siblings must not disturb the entry that is allowed")
+	require.Equal(t, 1, up.count("eth_getBalance"))
+	require.Zero(t, up.count("debug_traceTransaction"))
+	require.Zero(t, up.count("debug_traceBlock"))
 }
 
 // TestGzipHandler_StepsAsideForAnUpgradeBeforeTouchingAnyHeader pins the order

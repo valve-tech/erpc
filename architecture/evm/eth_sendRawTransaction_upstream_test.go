@@ -82,12 +82,13 @@ func TestUpstreamPostForward_ethSendRawTransaction(t *testing.T) {
 		assert.Empty(t, up.allCalls())
 	})
 
-	t.Run("AWrappedNonceExceptionIsNotRecognised", func(t *testing.T) {
-		// Current behaviour, pinned: the gate uses common.HasErrorCode, which
-		// does not walk a plain fmt.Errorf("%w") chain, so a nonce exception
-		// wrapped anywhere above the endpoint layer never reaches the
-		// idempotency path — even though the errors.As below it would find it.
-		// See the report.
+	t.Run("AWrappedNonceExceptionReachesTheIdempotencyPath", func(t *testing.T) {
+		// The gate (common.HasErrorCode) and the details lookup (errors.As, a
+		// few lines below it) must agree on one chain. They did not:
+		// HasErrorCode stopped at a plain fmt.Errorf("%w") link, so a nonce
+		// exception wrapped
+		// anywhere above the endpoint layer fell through to the caller, which
+		// then re-broadcast a transaction already in the mempool.
 		up := newForwardingUpstream(1)
 		wrapped := fmt.Errorf("while broadcasting: %w",
 			nonceErr(common.NonceExceptionReasonAlreadyKnown, "already known"))
@@ -95,9 +96,13 @@ func TestUpstreamPostForward_ethSendRawTransaction(t *testing.T) {
 		resp, err := upstreamPostForward_eth_sendRawTransaction(
 			ctx, sendRawTxNetwork(nil), up, makeSendRawTxRequest(t), nil, wrapped)
 
-		assert.Same(t, wrapped, err, "the wrapped rejection reaches the caller unchanged")
-		assert.Nil(t, resp)
-		assert.Empty(t, up.allCalls())
+		require.NoError(t, err, "a wrapped already-known must be handled like an unwrapped one")
+		require.NotNil(t, resp)
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Contains(t, jrr.GetResultString(), sendRawTxFixtureHash,
+			"the caller must get back the hash of the transaction it signed")
+		assert.Empty(t, up.allCalls(), "already-known needs no verification round trip")
 	})
 
 	t.Run("NonceCodeWithoutTheTypedDetailsPassesThrough", func(t *testing.T) {
