@@ -36,6 +36,11 @@ func (f *scriptedFamily) Classify(common.ClassifyInput) common.RotateVerdict {
 	return common.VerdictServe
 }
 
+// MatchesConfiguredChain is exact equality — see fakeFamily's copy.
+func (f *scriptedFamily) MatchesConfiguredChain(configured, observed string) bool {
+	return configured == observed
+}
+
 func (f *scriptedFamily) Probe(ctx context.Context, _ common.ProbeCaller) common.ChainProbe {
 	f.mu.Lock()
 	p := f.probe

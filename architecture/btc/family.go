@@ -90,6 +90,38 @@ func (f *Family) ValidateNetworkId(body string) bool {
 	return true
 }
 
+// MatchesConfiguredChain reports whether the chain a node named is the chain
+// the operator configured.
+//
+// # THE RULE, AND WHY IT IS NOT A TABLE
+//
+// Two names mean the same chain when they are equal, or when the node's name is
+// the configured one with a trailing "net" dropped. That is the whole of what
+// today's evidence shows: bitcoind answers "main" where an operator writes
+// "mainnet", and "test" where an operator writes "testnet". Both pairs differ by
+// exactly that suffix, and every other name eRPC has seen — "regtest", "signet",
+// a private signet's own name — is identical on both sides.
+//
+// A lookup table from "mainnet" to "main" would decide the same cases and
+// commit to far more: it would name specific chains, so it would refuse a
+// bitcoind-compatible node whose network eRPC has never heard of, and it would
+// need an edit for every chain added. This rule names no chain at all, so
+// Dogecoin's "main" and a private signet both work without eRPC knowing them.
+//
+// A plain prefix test would be looser still, and wrongly so: "test" is a prefix
+// of "testnet4", and testnet3 and testnet4 are different chains carrying
+// different blocks. Requiring the remainder to be exactly "net" keeps them
+// apart.
+//
+// KNOWN LIMIT: eRPC cannot refuse a node whose name it never sees. A client
+// that omits `chain` is accepted — see ChainProbe.Chain — and the caller, not
+// this method, decides that. Compare case-insensitively, because the config is
+// hand-written and a capital letter is not a different chain.
+func (f *Family) MatchesConfiguredChain(configured, observed string) bool {
+	c, o := strings.ToLower(configured), strings.ToLower(observed)
+	return c == o || c == o+"net"
+}
+
 // Probe issues one getblockchaininfo and derives liveness and tip from it.
 //
 // One call answers everything: `blocks` is the tip, and
@@ -121,7 +153,11 @@ func (f *Family) Probe(ctx context.Context, c common.ProbeCaller) common.ChainPr
 	// Tip is reported even when syncing — an operator wants to watch it climb,
 	// and the tracker wants the real number rather than a zero that would read
 	// as "furthest behind".
-	probe := common.ChainProbe{Tip: info.Blocks}
+	//
+	// Chain travels with it, verbatim and on every verdict. A node on the wrong
+	// chain is worth refusing whether or not it is caught up, and the caller
+	// cannot ask the question if the probe drops the answer.
+	probe := common.ChainProbe{Tip: info.Blocks, Chain: info.Chain}
 
 	switch {
 	case info.Blocks <= 0:

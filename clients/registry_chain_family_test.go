@@ -35,6 +35,9 @@ func (f *fakeClientFamily) Classify(common.ClassifyInput) common.RotateVerdict {
 	return common.VerdictServe
 }
 func (f *fakeClientFamily) ValidateNetworkId(body string) bool { return body != "" }
+func (f *fakeClientFamily) MatchesConfiguredChain(configured, observed string) bool {
+	return configured == observed
+}
 func (f *fakeClientFamily) SupportsEndpointScheme(scheme string) (bool, string) {
 	if f.refuse != "" && scheme == f.refuse {
 		return false, "this family cannot speak " + f.refuse

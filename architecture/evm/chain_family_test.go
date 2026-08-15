@@ -209,3 +209,34 @@ func TestClassify_NonEmptyNeverRotates(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchesConfiguredChain_ComparesChainIdsNumerically(t *testing.T) {
+	// An EVM chain names itself with a number, and the same number arrives in
+	// two spellings: a node answers eth_chainId in hex while an operator
+	// configures decimal. Comparing the text would call those different chains.
+	// This is also why the comparison cannot be shared with Bitcoin: a rule
+	// loose enough to accept "main" for "mainnet" accepts chain 100 for chain 1.
+	f := &ChainFamily{}
+	for _, tc := range []struct {
+		name       string
+		configured string
+		observed   string
+		want       bool
+	}{
+		{"same id, same spelling", "1", "1", true},
+		{"hex node, decimal config", "1", "0x1", true},
+		{"decimal node, hex config", "0x2105", "8453", true},
+		{"uppercase hex", "137", "0X89", true},
+		{"different chains", "1", "10", false},
+		{"a prefix is not an identity", "1", "100", false},
+		{"a name is not a chain id", "1", "mainnet", false},
+		{"nothing observed names no chain", "1", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := f.MatchesConfiguredChain(tc.configured, tc.observed); got != tc.want {
+				t.Fatalf("MatchesConfiguredChain(%q, %q) = %v, want %v",
+					tc.configured, tc.observed, got, tc.want)
+			}
+		})
+	}
+}

@@ -33,6 +33,8 @@ import (
 //  2. Classify — does this response mean "serve it" or "try another upstream"?
 //  3. Transport — how is a call shaped (JSON-RPC body vs REST path)?
 //  4. ValidateNetworkId — what does one of this chain's network IDs look like?
+//  5. MatchesConfiguredChain — does the chain the node reports mean the same
+//     chain the operator configured?
 type ChainFamily interface {
 	// Family is the architecture name this pattern serves ("evm", "btc").
 	// Must match the `architecture:` value used in config and URLs.
@@ -76,6 +78,30 @@ type ChainFamily interface {
 	// Be strict. Every id this accepts is one the request path will try to
 	// build a network for.
 	ValidateNetworkId(body string) bool
+
+	// MatchesConfiguredChain reports whether `observed` — the chain a node says
+	// it is on, verbatim from ChainProbe.Chain — is the same chain as
+	// `configured`, the operator's `chain:` value.
+	//
+	// # WHY THE FAMILY ANSWERS THIS AND NOT A SHARED NORMALISER
+	//
+	// The two sides speak different vocabularies: bitcoind answers "main" where
+	// an operator writes "mainnet". Reconciling them in ONE chain-agnostic
+	// comparison would be wrong, not merely weak — Bitcoin's names are
+	// abbreviated words, while EVM's are numbers, and any relation loose enough
+	// to accept "main" for "mainnet" also accepts chain id 1 for chain id 100.
+	// A generic rule therefore cannot be both safe for EVM and useful for
+	// Bitcoin, so the family that knows its own wire vocabulary owns the answer.
+	//
+	// The caller asks only when the node actually reported a chain, so
+	// `observed` is never empty here. It is NOT normalized on the way in: a
+	// normaliser in the middle would be the mapping table this seam exists to
+	// avoid, and it would hide the node's real answer from the operator.
+	//
+	// Answer false only when the two names are certainly different chains. A
+	// false answer takes an upstream out of service, so a family that cannot
+	// tell must say true and leave the node serving.
+	MatchesConfiguredChain(configured, observed string) bool
 }
 
 // ChainTransport names how a request is carried to an upstream.
@@ -150,6 +176,20 @@ type ChainProbe struct {
 	// that one call is what buys head-lag exclusion and "prefer the most
 	// caught-up upstream" for free.
 	Tip int64
+	// Chain is the chain the node says it is on, VERBATIM — bitcoind's
+	// `getblockchaininfo.chain`, which reads "main" on mainnet and "test" on
+	// testnet. Empty when the node reported none.
+	//
+	// Carried, never translated. It is the evidence for
+	// ChainFamily.MatchesConfiguredChain, which is what stops a testnet node
+	// from serving a mainnet pool, and it is what an operator reads when the
+	// two disagree. Rewriting it here would destroy the only fact the node
+	// actually stated.
+	//
+	// Empty means "no evidence", not "wrong chain". An older or unusual client
+	// may omit the field, and refusing such a node would take a working
+	// upstream out of service on the strength of a missing string.
+	Chain string
 	// Detail is a short operator-facing reason ("verificationprogress 0.97").
 	// Shown in health output; never parsed.
 	Detail string

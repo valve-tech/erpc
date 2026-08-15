@@ -55,6 +55,21 @@ func (f *ChainFamily) SupportsEndpointScheme(scheme string) (bool, string) {
 	return false, "only http/https supported"
 }
 
+// MatchesConfiguredChain compares two SVM cluster names EXACTLY.
+//
+// Solana has no short form: a node and an operator both write "mainnet-beta",
+// "devnet" or "testnet" in full, so there is nothing to reconcile and equality
+// decides every case. Accepting anything looser would let "testnet" pass for a
+// devnet pool on a resemblance the cluster names do not have.
+//
+// The real SVM identity check is the genesis hash, which Bootstrap already
+// compares (upstream/upstream.go) — a name is a label an operator chose, while
+// the genesis hash is the chain itself. This method exists so the
+// chain-agnostic seam has an honest SVM answer, not to replace that check.
+func (f *ChainFamily) MatchesConfiguredChain(configured, observed string) bool {
+	return configured == observed
+}
+
 // Probe answers liveness and tip for a generic caller — a health endpoint, or
 // an operator asking "is this node serving?".
 //
