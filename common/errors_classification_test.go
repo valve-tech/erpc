@@ -449,12 +449,6 @@ func TestErrUpstreamsExhausted_UpstreamIdsComeFromTheCauses(t *testing.T) {
 
 // ErrUpstreamRequest carries the per-attempt counters an operator reads in the
 // X-ERPC-* response headers.
-//
-// BUG (reported, not fixed here): it implements every ResponseMetadata method
-// except the variadic-context form of IsObjectNull (common/errors.go:810), so
-// it does NOT satisfy common.ResponseMetadata. LookupResponseMetadata therefore
-// returns nil for it, and erpc/http_server.go:1316 emits no counter headers on
-// an error response — the case where they matter most.
 func TestErrUpstreamRequest_ExposesAttemptCounters(t *testing.T) {
 	up := NewFakeUpstream("up1")
 	cause := NewErrEndpointServerSideException(errors.New("boom"), nil, 500)
@@ -475,10 +469,54 @@ func TestErrUpstreamRequest_ExposesAttemptCounters(t *testing.T) {
 	require.Same(t, cause, e.GetCause())
 }
 
-// metadataCarrier is an error that DOES satisfy ResponseMetadata. It exists
-// because no error type in this package currently does — see the bug note in
-// TestErrUpstreamRequest_ExposesAttemptCounters. Using a local carrier keeps
-// this test about the traversal, not about which types happen to qualify.
+// The error types that carry the per-attempt counters must satisfy
+// ResponseMetadata. A method whose signature drifts from the interface
+// (IsObjectNull without the variadic context) makes LookupResponseMetadata
+// return nil, and the HTTP layer then writes no X-ERPC-Cache and no
+// X-ERPC-Upstream header on an error response — the case where an operator
+// most wants to know which upstream failed.
+func TestLookupResponseMetadata_FindsTheUpstreamErrorTypes(t *testing.T) {
+	up := NewFakeUpstream("up1")
+	reqErr := NewErrUpstreamRequest(errors.New("boom"), up, "evm:1", "eth_call", time.Second, 3, 2, 1)
+
+	md := LookupResponseMetadata(reqErr)
+	require.NotNil(t, md, "ErrUpstreamRequest must satisfy ResponseMetadata")
+	require.Equal(t, 3, md.Attempts())
+	require.Equal(t, 2, md.Retries())
+	require.Equal(t, 1, md.Hedges())
+	require.Equal(t, "up1", md.UpstreamId())
+	require.False(t, md.FromCache())
+	require.False(t, md.IsObjectNull(context.Background()),
+		"a populated error is not null, so the headers must be written")
+	require.False(t, md.IsObjectNull(), "the context is optional")
+
+	causes := &sync.Map{}
+	causes.Store(up, NewErrEndpointMissingData(errors.New("not indexed"), up))
+	exhausted := NewErrUpstreamsExhausted(nil, causes, "p", "evm:1", "eth_call", time.Second, 4, 3, 2, 1)
+	md = LookupResponseMetadata(exhausted)
+	require.NotNil(t, md, "ErrUpstreamsExhausted must satisfy ResponseMetadata")
+	require.Equal(t, 4, md.Attempts())
+	require.Equal(t, 3, md.Retries())
+	require.Equal(t, 2, md.Hedges())
+	require.Equal(t, "up1", md.UpstreamId())
+	require.False(t, md.IsObjectNull(context.Background()))
+
+	// A nil typed receiver must report itself null rather than panic — the HTTP
+	// layer calls IsObjectNull before it reads any counter.
+	require.True(t, (*ErrUpstreamRequest)(nil).IsObjectNull(context.Background()))
+	require.True(t, (*ErrUpstreamsExhausted)(nil).IsObjectNull(context.Background()))
+
+	// Through a wrapper, which is how the HTTP layer usually sees the error.
+	wrapped := NewErrUpstreamsExhaustedWithCause(reqErr)
+	md = LookupResponseMetadata(wrapped)
+	require.NotNil(t, md)
+	require.Equal(t, "up1", md.UpstreamId(),
+		"the outer bundle carries no counters, so the walk must reach the inner error")
+}
+
+// metadataCarrier is a minimal error that satisfies ResponseMetadata. It keeps
+// TestLookupResponseMetadata_FindsTheCarrierThroughWrappers about the traversal
+// itself, independent of which concrete types happen to qualify.
 type metadataCarrier struct{ error }
 
 func (m metadataCarrier) FromCache() bool                        { return true }
@@ -507,10 +545,18 @@ func TestLookupResponseMetadata_FindsTheCarrierThroughWrappers(t *testing.T) {
 	require.Equal(t, "up1", md.UpstreamId())
 
 	// Two wrappers deep — the walk must recurse, not peek one level.
-	deeper := NewErrUpstreamsExhaustedWithCause(outer)
+	deeper := NewErrFailsafeRetryExceeded(ScopeUpstream, outer, nil)
 	md = LookupResponseMetadata(deeper)
 	require.NotNil(t, md)
 	require.Equal(t, "up1", md.UpstreamId())
+
+	// The OUTERMOST carrier wins. ErrUpstreamsExhausted is itself a carrier, so
+	// it answers for the whole bundle rather than handing the question to one
+	// arbitrary child — a bundle of five upstreams has no single inner truth.
+	bundle := NewErrUpstreamsExhaustedWithCause(outer)
+	md = LookupResponseMetadata(bundle)
+	require.NotNil(t, md)
+	require.IsType(t, &ErrUpstreamsExhausted{}, md)
 
 	// A StandardError with no cause has nothing to find.
 	require.Nil(t, LookupResponseMetadata(NewErrProjectNotFound("p")))
