@@ -137,17 +137,6 @@ func TestChainProbePoller_LiftsItsOwnCordonWhenTheNodeCatchesUp(t *testing.T) {
 	_, cordoned := u.CordonedReason("*")
 	require.True(t, cordoned)
 
-	// The cordon is edge-triggered, and this is what that means in practice:
-	// once the poller has cordoned, an operator who deliberately puts the node
-	// back into rotation is not overruled on the next tick. A level-triggered
-	// poller would re-cordon immediately and the operator could never win.
-	u.Uncordon("*", "operator: serving stale reads on purpose")
-	poller.poll()
-	poller.poll()
-	_, cordoned = u.CordonedReason("*")
-	require.False(t, cordoned,
-		"the poller re-cordoned a node the operator had returned to rotation")
-
 	fam.set(common.ChainProbe{Liveness: common.ChainHealthy, Tip: 200, Detail: "height 200"})
 	poller.poll()
 
@@ -158,6 +147,56 @@ func TestChainProbePoller_LiftsItsOwnCordonWhenTheNodeCatchesUp(t *testing.T) {
 	poller.poll()
 	_, cordoned = u.CordonedReason("*")
 	assert.False(t, cordoned)
+}
+
+func TestChainProbePoller_ReCordonsAFailingNodeAfterSomethingUncordonsIt(t *testing.T) {
+	// The probe result gates rotation AND answers "is this chain working". A
+	// node that somebody returned to rotation during an incident must lose that
+	// rotation again on the next tick if it is still not serving. Otherwise it
+	// serves stale reads for as long as it stays behind, and nothing says so.
+	u, _, poller := newProbePoller(t, common.ChainProbe{
+		Liveness: common.ChainSyncing, Tip: 100, Detail: "behind by 900 blocks",
+	})
+
+	poller.poll()
+	_, cordoned := u.CordonedReason("*")
+	require.True(t, cordoned)
+
+	u.Uncordon("*", "operator: putting it back during the incident")
+
+	poller.poll()
+	reason, cordoned := u.CordonedReason("*")
+	require.True(t, cordoned,
+		"a node that is still not serving stayed in rotation after an uncordon")
+	assert.Contains(t, reason, "behind by 900 blocks")
+
+	// And the node still recovers normally afterwards: the poller owns this
+	// second cordon, so it lifts it when the probe reports the node is serving.
+	poller.apply(common.ChainProbe{Liveness: common.ChainHealthy, Tip: 1000, Detail: "height 1000"})
+	_, cordoned = u.CordonedReason("*")
+	assert.False(t, cordoned, "the poller never lifted the cordon it placed second")
+}
+
+func TestChainProbePoller_DoesNotRestateACordonThatAlreadyStands(t *testing.T) {
+	// The poller acts on transitions, not on every tick. A poller that restated
+	// its cordon each tick would churn the cordon gauge's reason label and
+	// overwrite whatever an operator annotated the cordon with.
+	u, _, poller := newProbePoller(t, common.ChainProbe{
+		Liveness: common.ChainSyncing, Tip: 100, Detail: "behind",
+	})
+
+	poller.poll()
+	_, cordoned := u.CordonedReason("*")
+	require.True(t, cordoned)
+
+	u.Cordon("*", "operator: leaving it out, ticket VAL-42")
+	poller.poll()
+	poller.poll()
+
+	reason, cordoned := u.CordonedReason("*")
+	require.True(t, cordoned)
+	assert.Equal(t, "operator: leaving it out, ticket VAL-42", reason,
+		"the poller restated a cordon that already stood")
 }
 
 func TestChainProbePoller_DoesNotLiftAnOperatorsCordon(t *testing.T) {

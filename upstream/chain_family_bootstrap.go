@@ -164,9 +164,14 @@ type chainProbePoller struct {
 	// retry that only appCtx cancellation can stop.
 	started atomic.Bool
 
-	// cordonedByProbe records whether THIS poller took the upstream out of
-	// rotation. It makes cordon/uncordon edge-triggered, so a recovery cannot
-	// lift an operator's manual cordon.
+	// cordonedByProbe records whether THIS poller placed the cordon that now
+	// stands. It gates the UNCORDON only: a recovery lifts a cordon the poller
+	// placed, and never an operator's manual one.
+	//
+	// It does NOT gate the cordon. Whether to cordon is a question about the
+	// upstream's live state, not about this poller's history, so apply() asks
+	// the upstream. A latch there would let one manual uncordon disarm the
+	// probe for good, and the node would serve stale reads unannounced.
 	cordonedByProbe atomic.Bool
 }
 
@@ -223,9 +228,16 @@ func (p *chainProbePoller) apply(probe common.ChainProbe) {
 		}
 		return
 	}
-	if !p.cordonedByProbe.CompareAndSwap(false, true) {
+	// The node is not serving, so it must be out of rotation. Ask the upstream
+	// whether it already is, rather than trusting a latch: an operator (or
+	// anything else) can uncordon between two ticks, and the next probe must
+	// take the node out again. A cordon that already stands is left exactly as
+	// it is — restating it every tick would churn the cordon gauge's reason
+	// label and overwrite an operator's annotation.
+	if _, cordoned := u.CordonedReason("*"); cordoned {
 		return
 	}
+	p.cordonedByProbe.Store(true)
 	reason := fmt.Sprintf("chain probe: %s (%s)", probe.Liveness, probe.Detail)
 	u.logger.Warn().
 		Int64("tip", probe.Tip).
