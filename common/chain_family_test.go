@@ -36,6 +36,9 @@ func (f *fakeFamily) Probe(_ context.Context, c ProbeCaller) ChainProbe {
 	return f.probe
 }
 func (f *fakeFamily) Classify(ClassifyInput) RotateVerdict { return f.verdict }
+func (f *fakeFamily) MatchesConfiguredChain(configured, observed string) bool {
+	return configured == observed
+}
 func (f *fakeFamily) ValidateNetworkId(body string) bool {
 	if f.validId == nil {
 		return true

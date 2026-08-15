@@ -118,6 +118,32 @@ func (u *Upstream) detectChainFamilyFeatures(ctx context.Context, cfg *common.Up
 		)
 	}
 
+	// The node's own answer about which chain it is on, checked before the
+	// upstream becomes routable. This is the chain-family half of what
+	// detectFeatures does for EVM when it refuses a node whose chain id
+	// contradicts the config: without it a testnet bitcoind joins a mainnet
+	// pool and serves testnet blocks to mainnet clients, and nothing anywhere
+	// says so.
+	//
+	// A node that reported NO chain is accepted. An older or unusual client may
+	// omit the field, and eRPC has then observed nothing to contradict — taking
+	// a working upstream out of service over a missing string would be a
+	// regression, and it would punish the operator for their client's version.
+	// The reconciliation itself belongs to the family: "main" means "mainnet"
+	// to bitcoind and nothing at all to an EVM node.
+	if probe.Chain != "" && !family.MatchesConfiguredChain(cfg.Chain, probe.Chain) {
+		// Fatal, like the EVM chain-id mismatch it mirrors. The config will not
+		// change by itself and neither will the node's chain, so retrying only
+		// hides the message an operator has to read.
+		return common.NewTaskFatal(common.NewErrUpstreamClientInitialization(
+			&common.BaseError{
+				Code: "ErrUpstreamChainMismatch",
+				Cause: fmt.Errorf("upstream %q is configured for chain %q but the node reports chain %q",
+					cfg.Id, cfg.Chain, probe.Chain),
+			}, u,
+		))
+	}
+
 	u.networkId.Store(string(cfg.Type) + ":" + cfg.Chain)
 
 	poller := u.chainProbePoller(family, caller)
@@ -206,6 +232,30 @@ func (p *chainProbePoller) poll() {
 // eRPC already runs on: the upstream's tip, and whether it may take traffic.
 func (p *chainProbePoller) apply(probe common.ChainProbe) {
 	u := p.upstream
+
+	// Bootstrap checked the chain once. An endpoint outlives the node behind
+	// it — a DNS name or a load balancer gets repointed, and eRPC never
+	// restarts — so the same answer is re-read on every tick.
+	//
+	// The tip is DROPPED along with the verdict, and that is the point. Head lag
+	// is derived from the highest tip in the network, so one testnet height
+	// among mainnet upstreams would make every correct node look millions of
+	// blocks behind and empty the pool. A height from another chain is not
+	// comparable with this one's, so it is not published at all.
+	if configured := u.Config().Chain; probe.Chain != "" &&
+		!p.family.MatchesConfiguredChain(configured, probe.Chain) {
+		// Err as well as Detail: ChainDown always carries a cause, and the
+		// cordon log prints it. A node that answers promptly and looks healthy
+		// leaves an operator nothing else to go on.
+		mismatch := fmt.Errorf("node reports chain %q, but this upstream is configured for %q",
+			probe.Chain, configured)
+		probe = common.ChainProbe{
+			Liveness: common.ChainDown,
+			Chain:    probe.Chain,
+			Detail:   mismatch.Error(),
+			Err:      mismatch,
+		}
+	}
 
 	// The tip is published even for a node that is behind or syncing. The
 	// tracker derives every upstream's lag from the highest tip in the network,

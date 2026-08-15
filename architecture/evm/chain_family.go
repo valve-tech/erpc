@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
@@ -39,6 +41,42 @@ func (f *ChainFamily) Transport() common.ChainTransport { return common.Transpor
 // configs load.
 func (f *ChainFamily) ValidateNetworkId(body string) bool {
 	return util.IsEvmNetworkIdBody(body)
+}
+
+// MatchesConfiguredChain compares two EVM chain ids NUMERICALLY.
+//
+// An EVM chain names itself with a number, and the same number is written more
+// than one way: a node answers eth_chainId with "0x1" while an operator
+// configures "1". Comparing the strings would call those different chains, and
+// any looser text rule would call them the same for the wrong reason — "1" is a
+// prefix of "100", and chain 100 is Gnosis, not Ethereum. Parsing both sides is
+// the only comparison that is right in both directions, and it is why this
+// question belongs to the family rather than to a shared normaliser.
+//
+// A value that is not a chain id names no chain, so it matches none. That is
+// the same judgement detectFeatures already makes when a node answers
+// eth_chainId with something non-numeric.
+//
+// This is not the request path's check: detectFeatures asks eth_chainId at
+// bootstrap and refuses a contradicting node itself (upstream/upstream.go). The
+// method exists so the chain-agnostic seam has an honest EVM answer instead of
+// a stub that waves every node through.
+func (f *ChainFamily) MatchesConfiguredChain(configured, observed string) bool {
+	c, okC := parseChainId(configured)
+	o, okO := parseChainId(observed)
+	return okC && okO && c == o
+}
+
+// parseChainId reads a chain id written in decimal ("1") or hex ("0x1"), which
+// are the two forms eRPC sees: config uses the first and eth_chainId answers
+// with the second.
+func parseChainId(s string) (uint64, bool) {
+	if lower := strings.ToLower(s); strings.HasPrefix(lower, "0x") {
+		v, err := strconv.ParseUint(lower[2:], 16, 64)
+		return v, err == nil
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	return v, err == nil
 }
 
 // Probe answers liveness and tip for a generic caller — a health endpoint, or

@@ -216,3 +216,26 @@ func TestClassify_ClientErrorDoesNotBurnOtherUpstreams(t *testing.T) {
 		t.Fatalf("Classify(client-side error) = %v, want clientError", got)
 	}
 }
+
+func TestMatchesConfiguredChain_ClusterNamesMatchExactly(t *testing.T) {
+	// Solana writes its cluster names in full on both sides, so equality
+	// decides every case and anything looser would let one cluster pass for
+	// another on a resemblance the names do not have.
+	f := &ChainFamily{}
+	for _, tc := range []struct {
+		configured string
+		observed   string
+		want       bool
+	}{
+		{"mainnet-beta", "mainnet-beta", true},
+		{"devnet", "devnet", true},
+		{"testnet", "devnet", false},
+		{"mainnet-beta", "mainnet", false},
+		{"devnet", "", false},
+	} {
+		if got := f.MatchesConfiguredChain(tc.configured, tc.observed); got != tc.want {
+			t.Errorf("MatchesConfiguredChain(%q, %q) = %v, want %v",
+				tc.configured, tc.observed, got, tc.want)
+		}
+	}
+}

@@ -33,6 +33,13 @@ func (f *fakeFamily) ValidateNetworkId(body string) bool {
 	return !f.rejectChain && body != "" && !strings.Contains(body, ":")
 }
 func (f *fakeFamily) Probe(context.Context, common.ProbeCaller) common.ChainProbe { return f.probe }
+
+// MatchesConfiguredChain is exact equality: this fake chain does not abbreviate
+// its network names, so nothing has to be reconciled. Bitcoin's real rule
+// ("main" means "mainnet") is tested where it lives, in architecture/btc.
+func (f *fakeFamily) MatchesConfiguredChain(configured, observed string) bool {
+	return configured == observed
+}
 func (f *fakeFamily) Classify(common.ClassifyInput) common.RotateVerdict {
 	return common.VerdictServe
 }

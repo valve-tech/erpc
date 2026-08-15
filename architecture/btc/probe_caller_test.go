@@ -28,6 +28,10 @@ type fakeBitcoind struct {
 	height  int64
 	headers int64
 	ibd     bool
+	// chain is what the node calls its network — "main" on mainnet, "test" on
+	// testnet. Real bitcoind always sends it; a test sets it to "" to play the
+	// older client that does not.
+	chain string
 	// rpcError, when set, is returned as a JSON-RPC error with HTTP 500,
 	// which is what bitcoind actually does.
 	rpcError string
@@ -37,7 +41,7 @@ type fakeBitcoind struct {
 
 func newFakeBitcoind(t *testing.T, height, headers int64) *fakeBitcoind {
 	t.Helper()
-	f := &fakeBitcoind{height: height, headers: headers}
+	f := &fakeBitcoind{height: height, headers: headers, chain: "main"}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req struct {
@@ -57,16 +61,22 @@ func newFakeBitcoind(t *testing.T, height, headers int64) *fakeBitcoind {
 			})
 			return
 		}
+		result := map[string]interface{}{
+			"blocks":               f.height,
+			"headers":              f.headers,
+			"verificationprogress": 0.999999,
+			"initialblockdownload": f.ibd,
+		}
+		// Omitted rather than empty when the test asks for a client that does
+		// not report its chain: an absent key and a blank one are different
+		// wire facts, and only the absent one happens in the field.
+		if f.chain != "" {
+			result["chain"] = f.chain
+		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"result": map[string]interface{}{
-				"chain":                "main",
-				"blocks":               f.height,
-				"headers":              f.headers,
-				"verificationprogress": 0.999999,
-				"initialblockdownload": f.ibd,
-			},
-			"error": nil,
-			"id":    "erpc-probe",
+			"result": result,
+			"error":  nil,
+			"id":     "erpc-probe",
 		})
 	}))
 	t.Cleanup(f.closeSafely)
