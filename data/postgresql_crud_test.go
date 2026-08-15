@@ -166,6 +166,35 @@ func TestPostgreSQLConnector_CRUD(t *testing.T) {
 		assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
 	})
 
+	// PostgreSQL is the only store where API keys worked before the record
+	// moved to a fixed address, so it is the only store with anything to
+	// migrate. It expands "*" into a LIKE match, which is why a read at the new
+	// address still finds a row an older eRPC left under the user id. That is
+	// what lets an existing deployment upgrade without touching its data.
+	t.Run("an API-key read reaches a record written under either layout", func(t *testing.T) {
+		legacy := []byte(`{"userId":"alice","enabled":true}`)
+		require.NoError(t, connector.Set(ctx, "sk_legacy", "alice", legacy, nil))
+
+		got, err := connector.Get(ctx, ConnectorMainIndex, "sk_legacy", ConnectorApiKeyRangeKey, nil)
+		require.NoError(t, err, "a record left at the user id must still resolve after the upgrade")
+		assert.JSONEq(t, string(legacy), string(got))
+
+		current := []byte(`{"userId":"bob","enabled":true}`)
+		require.NoError(t, connector.Set(ctx, "sk_current", ConnectorApiKeyRangeKey, current, nil))
+
+		got, err = connector.Get(ctx, ConnectorMainIndex, "sk_current", ConnectorApiKeyRangeKey, nil)
+		require.NoError(t, err, "a record written at the fixed address must resolve")
+		assert.JSONEq(t, string(current), string(got))
+
+		// Revoking has to clear both addresses. Leaving the legacy row behind
+		// would let the next read resolve it and keep the key working.
+		require.NoError(t, connector.Delete(ctx, "sk_legacy", ConnectorApiKeyRangeKey))
+		require.NoError(t, connector.Delete(ctx, "sk_legacy", "alice"))
+		_, err = connector.Get(ctx, ConnectorMainIndex, "sk_legacy", ConnectorApiKeyRangeKey, nil)
+		require.Error(t, err, "a revoked key must leave no row behind")
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
+	})
+
 	t.Run("Get with a wildcard partition key uses the reverse index", func(t *testing.T) {
 		require.NoError(t, connector.Set(ctx, "evm:7:0x1f", "eth_getBlockByNumber", []byte("blk"), nil))
 

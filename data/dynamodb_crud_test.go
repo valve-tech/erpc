@@ -139,6 +139,29 @@ func TestDynamoDBConnector_CRUD(t *testing.T) {
 			"deleting an absent item must not be an error")
 	})
 
+	// DynamoDB reads the main index with GetItem, which matches both keys
+	// exactly. An API-key record is therefore only reachable at the one address
+	// a reader can name from the API key alone.
+	t.Run("an API-key record round trips at its canonical address", func(t *testing.T) {
+		record := []byte(`{"userId":"alice","enabled":true,"rateLimitBudget":"gold"}`)
+		require.NoError(t, connector.Set(ctx, "sk_live", ConnectorApiKeyRangeKey, record, nil))
+
+		got, err := connector.Get(ctx, ConnectorMainIndex, "sk_live", ConnectorApiKeyRangeKey, nil)
+		require.NoError(t, err, "the record must be readable at the address it was written to")
+		assert.JSONEq(t, string(record), string(got))
+
+		// The user id is payload, not address. A writer that put it in the key
+		// would leave a record no reader could locate.
+		_, err = connector.Get(ctx, ConnectorMainIndex, "sk_live", "alice", nil)
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
+
+		require.NoError(t, connector.Delete(ctx, "sk_live", ConnectorApiKeyRangeKey))
+		_, err = connector.Get(ctx, ConnectorMainIndex, "sk_live", ConnectorApiKeyRangeKey, nil)
+		require.Error(t, err, "a revoked key must be gone")
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
+	})
+
 	t.Run("List returns every stored pair with its value", func(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			require.NoError(t, connector.Set(ctx, fmt.Sprintf("list-pk-%d", i), "rk",

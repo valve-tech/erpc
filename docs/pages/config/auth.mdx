@@ -173,6 +173,10 @@ Authenticate fast paths (in evaluation order):
 ```
 `enabled: false` → `ErrAuthUnauthorized` + 5-second negative-cache entry. Missing `userId` → auth error. Missing `enabled` → treated as `true`.
 
+**Where the record lives:** partition key = the API key, range key = the literal `*` (`data.ConnectorApiKeyRangeKey`). A caller presents an API key and nothing else, so that is the only address the lookup can name. The user the key belongs to is payload, not address — it lives in `userId` inside the record. Seed a store by hand at that address. <SourceLink file="data/connector.go" lines="17-33" />
+
+eRPC before this change stored the record at (API key, user id), which no reader could locate. PostgreSQL is the one driver that expands `*` on a main-index range key, so a PostgreSQL store keeps resolving those older records and needs no migration; `erpc_updateApiKey` and `erpc_deleteApiKey` clear the old row on first touch. Memory, Redis and DynamoDB compare keys literally, and API keys never worked on them before, so there is nothing there to migrate.
+
 **Connector-down circuit-breaker** (added after 2026-05-13 production incident). The strategy tracks `connectorDown bool` and `connectorDownSince int64`. On transport/timeout/not-ready errors, `markConnectorDown()` sets the latch. While down, `tryFastFailOpen()` bypasses singleflight and the DB entirely — returning the emergency user (if `failOpen.enabled=true`) or rejecting immediately. One probe per second is elected via CAS to run the real DB path. A successful probe calls `markConnectorUp()`.
 
 ### Config schema

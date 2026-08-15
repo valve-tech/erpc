@@ -305,25 +305,18 @@ func TestDatabaseStrategy_MissingAndEmptySecret(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty API key")
 }
 
-// TestDatabaseStrategy_AuthenticateAgainstMemoryConnector_WildcardRangeKey
-// PINS A LIVE DEFECT. It asserts today's broken behaviour, not the desired
-// behaviour.
+// TestDatabaseStrategy_AuthenticateReadsTheRecordAtItsCanonicalAddress pins the
+// address an API-key record lives at, from the reader's side.
 //
-// Defect: auth/strategy_database.go:179 reads the API-key record with the
-// range key set to the literal string "*", and erpc/admin.go:334 and :420 do
-// the same for updates and revocation. Only the PostgreSQL connector treats
-// "*" as a wildcard (data/postgresql.go:1035 getWithWildcard rewrites "*" to
-// a SQL LIKE "%"). The memory connector (data/memory.go:169) and the Redis
-// connector (data/redis.go:426) build the literal key "<apiKey>:*" instead.
+// A caller presents an API key and nothing else. The record therefore has to
+// sit somewhere the reader can name from the API key alone, on a store that
+// compares keys literally — the memory connector here, and Redis in production,
+// can neither expand a wildcard nor enumerate range keys.
 //
-// What an operator observes: on a memory- or Redis-backed auth store an API
-// key created through the admin API can never be authenticated with, updated,
-// or revoked. Every request with that key returns "invalid API key", and
-// admin revoke returns "failed to get current API key data".
-//
-// This test locks the behaviour in place so the eventual fix has to change it
-// deliberately. Do not "fix" the test — fix the connector contract.
-func TestDatabaseStrategy_AuthenticateAgainstMemoryConnector_WildcardRangeKey(t *testing.T) {
+// data.ConnectorApiKeyRangeKey is that address, and erpc/admin.go writes there.
+// The user the key belongs to is payload, not address: it travels in the record
+// body, which is the only place this strategy reads it from.
+func TestDatabaseStrategy_AuthenticateReadsTheRecordAtItsCanonicalAddress(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -333,37 +326,35 @@ func TestDatabaseStrategy_AuthenticateAgainstMemoryConnector_WildcardRangeKey(t 
 	s := newMemoryStrategy(t, cfg)
 	conn := s.GetConnector()
 
-	// Write the record exactly as erpc/admin.go:175 writes it:
-	// Set(ctx, apiKey, userId, payload, nil) — the range key is the user id.
-	storeRecord(t, conn, "live-key", "user-42", userRecord(t, "user-42", "premium", nil))
+	// Write the record exactly as erpc/admin.go writes it.
+	storeRecord(t, conn, "live-key", data.ConnectorApiKeyRangeKey, userRecord(t, "user-42", "premium", nil))
 
-	// The record IS retrievable when the real range key is used. This proves
-	// the write landed, so the failure below is the wildcard, not a bad setup.
-	stored, err := conn.Get(ctx, data.ConnectorMainIndex, "live-key", "user-42", nil)
-	require.NoError(t, err, "the record must be readable by its concrete range key")
+	// The address resolves on a store with no wildcard support at all. This is
+	// a plain key comparison, which is what makes the authentication below work
+	// on memory and Redis rather than on PostgreSQL only.
+	stored, err := conn.Get(ctx, data.ConnectorMainIndex, "live-key", data.ConnectorApiKeyRangeKey, nil)
+	require.NoError(t, err, "the record must be readable at the address the writer used")
 	var decoded map[string]interface{}
 	require.NoError(t, json.Unmarshal(stored, &decoded))
 	require.Equal(t, "user-42", decoded["userId"])
 	require.Equal(t, "premium", decoded["rateLimitBudget"])
 
-	// DEFECT: the strategy reads with rangeKey "*", which the memory connector
-	// treats as a literal, so the lookup misses.
-	_, wildcardErr := conn.Get(ctx, data.ConnectorMainIndex, "live-key", "*", nil)
-	require.Error(t, wildcardErr, "DEFECT PINNED: the memory connector does not expand the '*' range key")
-	assert.True(t, common.HasErrorCode(wildcardErr, common.ErrCodeRecordNotFound))
+	// The user id is not part of the address. If a writer put it there, no
+	// reader could reconstruct it, and the key would be unusable.
+	_, byUserId := conn.Get(ctx, data.ConnectorMainIndex, "live-key", "user-42", nil)
+	require.Error(t, byUserId, "the record must not be addressed by the user id")
+	assert.True(t, common.HasErrorCode(byUserId, common.ErrCodeRecordNotFound))
 
-	// Consequence: a key that exists in the store cannot authenticate.
 	user, err := s.Authenticate(ctx, nil, secretPayload("live-key"))
-	require.Error(t, err, "DEFECT PINNED: a stored API key cannot authenticate on a memory-backed store")
-	assert.Nil(t, user)
-	assert.True(t, common.HasErrorCode(err, common.ErrCodeAuthUnauthorized))
-	assert.Contains(t, err.Error(), "invalid API key")
+	require.NoError(t, err, "a stored API key must authenticate on a memory-backed store")
+	require.NotNil(t, user)
+	assert.Equal(t, "user-42", user.Id, "the authenticated identity must come from the record body")
+	assert.Equal(t, "premium", user.RateLimitBudget, "the stored rate limit budget must reach the caller")
 }
 
-// TestDatabaseStrategy_AuthenticateSucceedsWhenRangeKeyMatches shows the same
-// strategy authenticates correctly once the stored range key is the literal
-// "*" the lookup asks for. This is the control for the defect above: the
-// authentication logic is sound, only the range key does not line up.
+// TestDatabaseStrategy_AuthenticateSucceedsWhenRangeKeyMatches is the control:
+// the authentication logic itself was always sound, and it still is. It reads a
+// record written at the literal range key the lookup asks for.
 func TestDatabaseStrategy_AuthenticateSucceedsWhenRangeKeyMatches(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -380,6 +371,56 @@ func TestDatabaseStrategy_AuthenticateSucceedsWhenRangeKeyMatches(t *testing.T) 
 	require.NotNil(t, user)
 	assert.Equal(t, "user-99", user.Id, "the authenticated identity must come from the stored record")
 	assert.Equal(t, "premium", user.RateLimitBudget, "the stored rate limit budget must reach the caller")
+}
+
+// TestDatabaseStrategy_InvalidateCacheDropsBothCachedDecisions pins what an
+// admin revoke depends on. The strategy caches a successful lookup for an hour
+// and a failed one for five seconds, so a revoke that only reaches storage
+// leaves the key working on every instance that already authenticated it.
+func TestDatabaseStrategy_InvalidateCacheDropsBothCachedDecisions(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s := newMemoryStrategy(t, memoryStrategyConfig())
+	conn := s.GetConnector()
+
+	// A key that authenticates, so the positive cache holds it.
+	storeRecord(t, conn, "good-key", data.ConnectorApiKeyRangeKey, userRecord(t, "user-1", "", nil))
+	user, err := s.Authenticate(ctx, nil, secretPayload("good-key"))
+	require.NoError(t, err)
+	require.Equal(t, "user-1", user.Id)
+	require.Eventually(t, func() bool {
+		_, found := s.cache.Get("good-key")
+		return found
+	}, 5*time.Second, 5*time.Millisecond, "the successful lookup must be cached")
+
+	// A key that does not, so the negative cache holds it.
+	_, err = s.Authenticate(ctx, nil, secretPayload("bad-key"))
+	require.Error(t, err)
+	require.Eventually(t, func() bool {
+		_, found := s.negCache.Get("bad-key")
+		return found
+	}, 5*time.Second, 5*time.Millisecond, "the failed lookup must be cached")
+
+	s.InvalidateCache("good-key")
+	s.InvalidateCache("bad-key")
+
+	// The window is deliberately far shorter than the negative cache's own
+	// 5-second TTL. A longer wait would pass on expiry rather than on the
+	// invalidation this test is about.
+	require.Eventually(t, func() bool {
+		_, positive := s.cache.Get("good-key")
+		_, negative := s.negCache.Get("bad-key")
+		return !positive && !negative
+	}, 500*time.Millisecond, 5*time.Millisecond,
+		"invalidation must drop the cached decision in both directions")
+
+	// The store is still the authority: the good key still works, because
+	// invalidation drops a cached answer rather than the record.
+	user, err = s.Authenticate(ctx, nil, secretPayload("good-key"))
+	require.NoError(t, err)
+	require.Equal(t, "user-1", user.Id)
 }
 
 // TestDatabaseStrategy_DisabledKeyIsRefused pins that the `enabled: false`

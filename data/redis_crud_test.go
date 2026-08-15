@@ -250,6 +250,82 @@ func TestRedisConnector_ListPaginatesOnRealRedis(t *testing.T) {
 	assert.Equal(t, "v499", seen["pk499"])
 }
 
+// TestRedisConnector_ApiKeyAddressRoundTripsOnRealRedis pins the storage half
+// of API-key management against a real Redis.
+//
+// Redis compares keys literally. It cannot expand a wildcard on the main index
+// and it cannot enumerate the range keys under one partition key, so an
+// API-key record is only reachable if it sits at ConnectorApiKeyRangeKey — the
+// one address a reader can name from the API key alone. This walks the three
+// operations the admin RPCs perform: issue, list, revoke.
+func TestRedisConnector_ApiKeyAddressRoundTripsOnRealRedis(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	redisC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "redis:7-alpine",
+			ExposedPorts: []string{"6379/tcp"},
+			WaitingFor:   wait.ForListeningPort("6379/tcp"),
+		},
+		Started: true,
+	})
+	require.NoError(t, err, "failed to start the redis container")
+	t.Cleanup(func() { _ = redisC.Terminate(context.Background()) })
+
+	host, err := redisC.Host(ctx)
+	require.NoError(t, err)
+	port, err := redisC.MappedPort(ctx, "6379")
+	require.NoError(t, err)
+
+	logger := zerolog.New(io.Discard)
+	cfg := &common.RedisConnectorConfig{
+		Addr:         fmt.Sprintf("%s:%s", host, port.Port()),
+		ConnPoolSize: 5,
+		InitTimeout:  common.Duration(30 * time.Second),
+		GetTimeout:   common.Duration(30 * time.Second),
+		SetTimeout:   common.Duration(30 * time.Second),
+	}
+	require.NoError(t, cfg.SetDefaults())
+
+	connector, err := NewRedisConnector(ctx, &logger, "redis-api-keys", cfg)
+	require.NoError(t, err)
+	require.Equal(t, util.StateReady, connector.initializer.State())
+
+	record := []byte(`{"userId":"alice","enabled":true,"rateLimitBudget":"gold"}`)
+	require.NoError(t, connector.Set(ctx, "sk_live", ConnectorApiKeyRangeKey, record, nil))
+
+	got, err := connector.Get(ctx, ConnectorMainIndex, "sk_live", ConnectorApiKeyRangeKey, nil)
+	require.NoError(t, err, "the record must be readable at the address it was written to")
+	assert.JSONEq(t, string(record), string(got))
+
+	// The user id is payload. Redis cannot resolve an address it was not given,
+	// which is why the writer must not put the user id in the key.
+	_, err = connector.Get(ctx, ConnectorMainIndex, "sk_live", "alice", nil)
+	require.Error(t, err)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
+
+	// Listing has to carry the record body, because that body is the only place
+	// the user id is written down.
+	results, _, err := connector.List(ctx, ConnectorMainIndex, 100, "")
+	require.NoError(t, err)
+	var listed *KeyValuePair
+	for i := range results {
+		if results[i].PartitionKey == "sk_live" {
+			listed = &results[i]
+		}
+	}
+	require.NotNil(t, listed, "an issued key must appear in the listing")
+	assert.Equal(t, ConnectorApiKeyRangeKey, listed.RangeKey)
+	assert.JSONEq(t, string(record), string(listed.Value),
+		"the listed record must carry the user id, since the range key names nobody")
+
+	require.NoError(t, connector.Delete(ctx, "sk_live", ConnectorApiKeyRangeKey))
+	_, err = connector.Get(ctx, ConnectorMainIndex, "sk_live", ConnectorApiKeyRangeKey, nil)
+	require.Error(t, err, "a revoked key must be gone")
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound))
+}
+
 // TestRedisConnector_ListRejectsBadPaginationToken pins the token validation.
 // A token from another driver must be refused, not silently treated as page 0.
 func TestRedisConnector_ListRejectsBadPaginationToken(t *testing.T) {
