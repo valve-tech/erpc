@@ -664,10 +664,13 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += int64(nn)
 	} else if r.Error != nil {
-		// Marshal error on demand if errBytes not set
-		r.errBytes, err = SonicCfg.Marshal(r.Error)
-		if err != nil {
-			return n, err
+		// Marshal error on demand if errBytes not set. Render into a LOCAL and
+		// leave r.errBytes alone: this function holds read locks only, and
+		// multiplexing hands one response to many clients that render it at the
+		// same time. Writing the shared field here races those readers.
+		errBytes, merr := SonicCfg.Marshal(r.Error)
+		if merr != nil {
+			return n, merr
 		}
 
 		nn, err = w.Write([]byte(`,"error":`))
@@ -676,7 +679,7 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += int64(nn)
 
-		nn, err = w.Write(r.errBytes)
+		nn, err = w.Write(errBytes)
 		if err != nil {
 			return n + int64(nn), err
 		}
@@ -1074,15 +1077,23 @@ func removeFieldsByPaths(obj interface{}, paths []string) interface{} {
 		current := pathTree
 		for i, part := range parts {
 			if i == len(parts)-1 {
-				current[part] = true // Leaf node
-			} else {
-				if _, exists := current[part]; !exists {
-					current[part] = make(map[string]interface{})
-				}
-				if next, ok := current[part].(map[string]interface{}); ok {
-					current = next
-				}
+				// Leaf node. A broader path wins over any subtree already here:
+				// removing the whole field also removes everything under it.
+				current[part] = true
+				break
 			}
+			next, ok := current[part].(map[string]interface{})
+			if !ok {
+				if current[part] == true {
+					// An ancestor of this path is already removed whole, so the
+					// rest of this path adds nothing. Drop it here — carrying on
+					// would write the remaining segments onto the wrong node.
+					break
+				}
+				next = make(map[string]interface{})
+				current[part] = next
+			}
+			current = next
 		}
 	}
 
