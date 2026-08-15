@@ -147,16 +147,25 @@ func TestBlockPiVendor_GenerateConfigs_MovementTakesADifferentPathOrder(t *testi
 // whether upstream.Evm is nil, unlike ankr, blastapi and blockpi. A provider
 // configured without an evm block panics instead of reporting a config
 // error. This test pins today's behaviour; see the report.
-func TestInfuraAndLlama_GenerateConfigs_PanicOnAMissingEvmBlock(t *testing.T) {
+// A provider configured with no `evm` block is an operator mistake at
+// bootstrap. Every vendor must name the missing field instead of panicking.
+func TestInfuraAndLlama_GenerateConfigs_AMissingEvmBlockIsAConfigError(t *testing.T) {
 	logger := zerolog.Nop()
 	ctx := context.Background()
 	settings := common.VendorSettings{"apiKey": "k"}
 
 	for _, v := range []common.Vendor{CreateInfuraVendor(), CreateLlamaVendor()} {
 		t.Run(v.Name(), func(t *testing.T) {
-			assert.Panics(t, func() {
-				_, _ = v.GenerateConfigs(ctx, &logger, &common.UpstreamConfig{}, settings)
-			}, "the vendor dereferences upstream.Evm without a nil guard")
+			var cfgs []*common.UpstreamConfig
+			var err error
+			require.NotPanics(t, func() {
+				cfgs, err = v.GenerateConfigs(ctx, &logger, &common.UpstreamConfig{}, settings)
+			}, "a missing evm block must not crash the process")
+
+			require.Error(t, err)
+			assert.Nil(t, cfgs)
+			assert.Equal(t, v.Name()+" vendor requires upstream.evm to be defined", err.Error(),
+				"the message must match the wording the other vendors already use")
 		})
 	}
 }

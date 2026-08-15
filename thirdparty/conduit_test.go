@@ -229,22 +229,41 @@ func TestConduitVendor_GetVendorSpecificErrorIfAny_ClassifiesByCodeAndMessage(t 
 	assert.Nil(t, classify(0, "monthly limit exceeded"))
 }
 
-// The server-side branch at conduit.go:194 guards on
-// `code >= -32000 && code <= -32099`, which no integer satisfies because
-// -32000 is greater than -32099. The branch is unreachable. This test pins
-// the behaviour an operator sees today; see the report.
-func TestConduitVendor_GetVendorSpecificErrorIfAny_TheServerSideBranchIsUnreachable(t *testing.T) {
+// JSON-RPC 2.0 reserves -32099..-32000 for implementation-defined server
+// errors. Conduit classifies that whole band as a server-side exception, which
+// stays retryable toward the network because a sibling upstream may answer.
+func TestConduitVendor_GetVendorSpecificErrorIfAny_TheServerErrorBandIsServerSide(t *testing.T) {
 	v := CreateConduitVendor()
 
-	for _, code := range []int{-32000, -32050, -32099} {
+	// Both endpoints of the band, plus a code inside it.
+	for _, code := range []int{-32099, -32050, -32000} {
 		jrr, err := common.NewJsonRpcResponse(1, nil,
 			common.NewErrJsonRpcExceptionExternal(code, "internal failure", ""))
 		require.NoError(t, err)
 
 		classified := v.GetVendorSpecificErrorIfAny(nil, &http.Response{StatusCode: 500}, jrr, map[string]interface{}{})
 
-		assert.Nil(t, classified,
-			"code %d falls through to the generic handler because the range bounds are inverted", code)
+		require.Error(t, classified, "code %d must be classified", code)
+		assert.True(t, common.HasErrorCode(classified, common.ErrCodeEndpointServerSideException),
+			"code %d must be a server-side exception, got %v", code, classified)
+		assert.True(t, common.IsRetryableTowardNetwork(classified),
+			"code %d is the upstream's fault, so a sibling upstream is worth trying", code)
+	}
+}
+
+// Just outside the band the vendor stays silent and the generic normaliser
+// decides. -31999 and -32100 pin both edges.
+func TestConduitVendor_GetVendorSpecificErrorIfAny_JustOutsideTheServerErrorBandFallsThrough(t *testing.T) {
+	v := CreateConduitVendor()
+
+	for _, code := range []int{-31999, -32100} {
+		jrr, err := common.NewJsonRpcResponse(1, nil,
+			common.NewErrJsonRpcExceptionExternal(code, "internal failure", ""))
+		require.NoError(t, err)
+
+		classified := v.GetVendorSpecificErrorIfAny(nil, &http.Response{StatusCode: 500}, jrr, map[string]interface{}{})
+
+		assert.NoError(t, classified, "code %d sits outside the reserved server-error band", code)
 	}
 }
 

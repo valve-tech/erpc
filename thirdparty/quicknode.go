@@ -370,11 +370,9 @@ func (v *QuicknodeVendor) resolveEndpoints(logger *zerolog.Logger, apiKey string
 			if err != nil {
 				return nil, err
 			}
-			if err := v.fetchChainIDs(ctx, logger, fetched); err != nil {
-				// Partial success: chain ID fetches may individually fail
-				// without invalidating the rest of the data.
-				logger.Warn().Err(err).Msg("some quicknode chain ID fetches failed; continuing with available data")
-			}
+			// Partial success: chain ID probes may individually fail without
+			// invalidating the rest of the data, so the walk carries on.
+			v.fetchChainIDs(ctx, logger, fetched)
 			return fetched, nil
 		})
 	}
@@ -463,7 +461,12 @@ func (v *QuicknodeVendor) fetchEndpoints(ctx context.Context, apiKey string, fil
 	return allEndpoints, nil
 }
 
-func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Logger, endpoints []*QuicknodeEndpoint) error {
+// fetchChainIDs probes every endpoint for its chain ID and fills it in place.
+// An endpoint whose probe fails keeps chain ID 0 and drops out of routing.
+// That is a per-endpoint outcome, not a failure of the walk, so there is
+// nothing to return: the caller must keep the endpoints that did answer.
+// Every failure goes to the logger, which is the operator's signal.
+func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Logger, endpoints []*QuicknodeEndpoint) {
 	// Use semaphore to limit concurrent requests
 	sem := semaphore.NewWeighted(10)
 	var wg sync.WaitGroup
@@ -553,8 +556,6 @@ func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Log
 	if len(errors) > 0 {
 		logger.Warn().Errs("errors", errors).Msg("failed to fetch chain IDs for some QuickNode endpoints")
 	}
-
-	return nil
 }
 
 func (v *QuicknodeVendor) GetVendorSpecificErrorIfAny(req *common.NormalizedRequest, resp *http.Response, jrr interface{}, details map[string]interface{}) error {
@@ -566,7 +567,6 @@ func (v *QuicknodeVendor) GetVendorSpecificErrorIfAny(req *common.NormalizedRequ
 	err := bodyMap.Error
 	if code := err.Code; code != 0 {
 		msg := err.Message
-		var details map[string]interface{} = make(map[string]interface{})
 		if err.Data != "" {
 			details["data"] = err.Data
 		}
