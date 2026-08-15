@@ -356,7 +356,11 @@ Pinned by `TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePres
 
 ## 19. A wrapped nonce exception disables idempotency and re-broadcasts a transaction
 
-**Status:** open. **Severity: high.** Duplicate broadcast of a real transaction.
+**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: high.**
+
+Fixed together with 35, which is the same root cause. See "Fixes the fork
+already carries" below. The pinning test is now
+`AWrappedNonceExceptionReachesTheIdempotencyPath`.
 
 `architecture/evm/eth_sendRawTransaction.go:80` gates the idempotency path with
 `common.HasErrorCode(re, ErrCodeEndpointNonceException)`.
@@ -552,7 +556,10 @@ reverse-index target, and a future change relying on it would silently not run.
 
 ## 28. An inverted condition drops the caller's request id over HTTP
 
-**Status:** open. **Severity: high.** A blocked method answers with `id: null`.
+**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: high.**
+One character: `err != nil` became `err == nil` at `erpc/http_server.go:580`.
+Pinned by `TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp` and a
+batch case proving each entry gets its own id back.
 
 `erpc/http_server.go:580`:
 
@@ -694,7 +701,9 @@ One line per handler fixes it.
 
 ## 35. `HasErrorCode` does not follow a single `Unwrap() error`
 
-**Status:** open. **Severity: medium.** Found independently by two agents.
+**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: medium.**
+Found independently by two agents, and the fix repaired a third consumer
+nobody was looking at — see below. **Severity was understated.**
 
 `common/errors.go:2543-2569` handles `StandardError`, `*BaseError` and
 `Unwrap() []error` — but not the `Unwrap() error` that `fmt.Errorf("%w", …)`
@@ -709,6 +718,166 @@ found from opposite ends of the codebase:
 
 That two agents reached the same root cause from unrelated directions is the
 strongest signal in this log. Fixing `HasErrorCode` closes both.
+
+---
+
+## 36. An unrelated `directiveDefaults` key cancels the legacy integrity migration
+
+**Status:** open. **Severity: medium.** An upgrade-path regression that turns
+data-integrity enforcement back on without saying so.
+
+The root cause is a `nil` check standing in for "the user did not specify this",
+defeated by an earlier defaulting pass.
+
+Order of events inside `ProjectConfig.SetDefaults`:
+
+1. `NetworkDefaults.SetDefaults` runs first (`common/defaults.go:1341`).
+2. It calls `DirectiveDefaultsConfig.SetDefaults` (`:1714`), which fills
+   `EnforceHighestBlock`, `EnforceGetLogsBlockRange` and
+   `EnforceNonNullTaggedBlocks` with `true` when they are nil (`:1728`).
+3. Each network copies that whole block (`:2142`).
+4. The legacy migration at `:2291` writes only into a field that is **still
+   nil** — and finds `true` already there. It does nothing.
+
+Its own comment says *"Only migrate if the user hasn't explicitly set the new
+directive"*. But the guard cannot tell *the user set it* from *the defaults set
+it*.
+
+An operator writes `networkDefaults.evm.integrity.enforceHighestBlock: false`
+and it works. Then they add any unrelated key under
+`networkDefaults.directiveDefaults` — `retryEmpty: false`, say — and
+enforcement silently stays ON. The only visible symptom is requests rejected for
+a highest-block violation.
+
+The same config at the **per-network** level works correctly, because there the
+migration runs before the defaults pass. So the two levels disagree.
+
+Pinned by
+`TestNetworkDefaults_ADirectiveDefaultsBlockCancelsTheLegacyIntegrityMigration`.
+
+---
+
+## 37. A converted shorthand upstream gets an invented override id
+
+**Status:** open. **Severity: low.** Cosmetic today.
+
+`convertUpstreamToProvider` clears the override's id (`common/defaults.go:1456`)
+and then calls `cfg.SetDefaults(upstream)` (`:1475`), which reaches
+`UpstreamConfig.SetDefaults` on that override. With an empty endpoint,
+`url.Parse("")` gives an empty scheme, so `:1907` synthesises `"" + "-" +
+<counter>` — an id like `-8`, dependent on a process-global counter.
+
+The id shows up in a config dump. Routing is unaffected, because
+`thirdparty/provider.go:120` overwrites `baseCfg.Id` from `UpstreamIdTemplate`
+before use, and nothing resolves overrides by id.
+
+`SetDefaults` should not invent an id when there is no endpoint to derive one
+from.
+
+---
+
+## 38. Inverted numeric ranges make error classification dead code
+
+**Status:** open. **Severity: high for Alchemy.** eRPC retries failures that
+cannot succeed.
+
+Two vendors compare an error code against a range whose bounds are the wrong way
+round, so **no integer can satisfy the condition**. Verified by evaluating the
+predicate over the whole code space.
+
+- **`thirdparty/alchemy.go:504`** — three empty ranges chained in one `else if`:
+  `code >= -32099 && code <= -32599 || code >= -32603 && code <= -32699 ||
+  code >= -32701 && code <= -32768`. The whole branch is dead, so Alchemy
+  client-side faults — invalid params, method not found, parse errors — never
+  receive `.WithRetryableTowardNetwork(false)`.
+
+  An operator observes eRPC retrying a deterministic failure against every
+  remaining upstream in the network. Quota and latency spent on a request that
+  cannot succeed anywhere. The comment directly below cites Alchemy's own
+  error-code reference, so the intent is unambiguous.
+
+- **`thirdparty/conduit.go:194`** — `code >= -32000 && code <= -32099`. Every
+  Conduit error in the standard server-error band falls through to the generic
+  normaliser instead of `ErrEndpointServerSideException`.
+
+Both are one-line fixes: swap the bounds.
+
+---
+
+## 39. A filter that matches nothing becomes a permanent "not yet populated"
+
+**Status:** open. **Severity: medium.** A stuck state reported as transient.
+
+`thirdparty/remote_cache.go:99`. `chainstack.fetchNodes` and
+`quicknode.fetchEndpoints` both declare `var allX []*T` and return it, so a
+filter matching nothing returns `nil`.
+
+The cache stores that `nil` and `Lookup` reports it **fresh** — correctly, the
+fetch succeeded. But every vendor's `resolve*` helper branches on `value == nil`
+to mean *cold start*.
+
+So an operator whose Chainstack project or QuickNode filter matches no nodes
+sees `vendor remote-data cache not yet populated; retry shortly` for the life of
+the process. The message says transient; the state is permanent. It never says
+"your filter matched nothing".
+
+The map-returning vendors escape this only because they allocate with `make`.
+
+---
+
+## 40. `EnsureFresh` has no callers, and disagrees with the pattern it documents
+
+**Status:** open. **Severity: low.** Unexercised machinery.
+
+`thirdparty/remote_cache.go:252`. `EnsureFresh` is documented as "the canonical
+hot-path call", but all eight vendors open-code `Lookup` +
+`TriggerAsyncRefresh` + a `== nil` check instead.
+
+It also diverges from that convention: it keys on `Has`, so a published `nil`
+reads as usable where the open-coded version treats it as a cold start. And it
+races — a refresh can publish between its `Lookup` and its `Has`, so it returns
+the pre-refresh zero value with `usable == true`.
+
+Either adopt it everywhere or delete it. A helper that contradicts the pattern
+it claims to standardise is worse than no helper.
+
+---
+
+## 41. Two vendors panic on a config the others reject politely
+
+**Status:** open. **Severity: medium.** Bootstrap crash instead of a config error.
+
+`thirdparty/infura.go:81` and `thirdparty/llama.go:54` read
+`upstream.Evm.ChainId` with no nil check.
+
+Ankr, BlastAPI, BlockPi and Conduit all guard first and return
+`"...requires upstream.evm to be defined"`.
+
+So an operator who configures an Infura or Llama provider without an `evm` block
+gets a panic at bootstrap rather than a message naming the missing field.
+
+Pinned by `TestInfuraAndLlama_GenerateConfigs_PanicOnAMissingEvmBlock`, which
+fails loudly once the guard is added.
+
+---
+
+## 42. Three smaller `thirdparty` defects
+
+**Status:** open. **Severity: low.**
+
+- **`thirdparty/chainstack.go:314` and `thirdparty/quicknode.go:466`** —
+  `fetchChainIDs` collects per-node errors, logs them, then always returns
+  `nil`. The callers at `chainstack.go:117` and `quicknode.go:373` guard with
+  `if err != nil { logger.Warn()… }`, so that warning is dead. Nodes silently
+  keep chain ID 0 and drop out of routing with no signal at the caller.
+- **`thirdparty/chainstack.go:232`** — `defer resp.Body.Close()` sits inside the
+  pagination loop, so every page's body stays open until `fetchNodes` returns.
+  On a large account that holds one connection per page for the whole walk.
+- **`thirdparty/quicknode.go:569`** — the normaliser shadows its own `details`
+  parameter with `var details map[string]interface{} = make(...)`. The caller at
+  `architecture/evm/error_normalizer.go:22` fills `details` with `statusCode`
+  and the response headers, and none of it reaches a QuickNode error. QuickNode
+  is the only vendor that does this.
 
 ---
 
@@ -735,7 +904,10 @@ unobservable. They are not bugs, and a test cannot pin them.
 
 ## F1. The chain-family cordon latch is one-shot in both directions
 
-**Status:** open. **Severity: medium.** Introduced by this session's btc work.
+**Status: FIXED.** This was the fork's own code, so it is simply closed.
+Cordon is now level-triggered against the upstream's live state; uncordon
+stays edge-triggered on ownership, so a recovery lifts only a cordon the
+poller placed.
 
 `upstream/chain_family_bootstrap.go:226` guards the cordon with
 `cordonedByProbe.CompareAndSwap(false, true)`.
@@ -759,6 +931,41 @@ is our code, so it does not go upstream. Fix it in the fork.
 # Fixes the fork already carries that upstream still needs
 
 These are working patches, not just reports. Each is a candidate pull request.
+
+## E. `HasErrorCode` now follows a plain `%w` chain
+
+**Status:** fixed-in-fork (`common/errors.go`).
+
+Two hunks, twelve lines. The new branch handles a plain `fmt.Errorf("%w", …)`
+wrapper at the top of the chain. Dropping an early `return` handles the same
+hole one level down, because `BaseError.HasCode` stops at a plain link inside
+its own cause chain — without it, the defect just moves deeper.
+
+The change is monotone: it can only turn `false` into `true`, and only when a
+matching code is genuinely in the chain. All 157 non-test call sites were
+traced.
+
+It closes three consumers, not two:
+
+- The nonce-exception gate (log entry 19) — no more re-broadcast.
+- `mapToGRPCStatus` (log entry 35) — a wrapped eRPC error maps to its real
+  `codes.*` instead of `codes.Internal`.
+- **`classifyProbeErr` (`internal/policy/prober.go:456`)** — nobody was looking
+  at this one. It tests four codes against errors the chain families build with
+  `fmt.Errorf("evm probe: %w", err)`, so before the fix it could never match any
+  of them and labelled **every** probe failure `"error"`. It now labels timeout,
+  auth, throttled and skipped correctly. That function has no test, so nothing
+  pinned the wrong labels.
+
+`BaseError.HasCode` itself is deliberately untouched. `DeepSearch`, `CodeChain`
+and `DeepestMessage` share the same stop-at-a-plain-link shape, so fixing the
+method is one coherent follow-up rather than a piece to break off here.
+
+## F. A blocked method echoes the caller's request id over HTTP
+
+**Status:** fixed-in-fork (`erpc/http_server.go:580`). One character.
+
+See log entry 28.
 
 ## A. Transport failures lose their cause identity
 
