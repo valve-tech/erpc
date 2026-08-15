@@ -1,0 +1,59 @@
+logLevel: info
+
+server:
+  httpHostV4: "127.0.0.1"
+  httpPort: 4210
+
+metrics:
+  enabled: false
+
+projects:
+  - id: main
+    networks:
+      - architecture: btc
+        chain: mainnet
+
+    upstreams:
+      # Six public Bitcoin JSON-RPC endpoints, all confirmed answering
+      # getblockchaininfo at height 962470 on 2026-08-14.
+      #
+      # onfinality returns HTTP 429 quickly, so it is tagged tier:fallback —
+      # it should only be reached once the others are exhausted. That is the
+      # whole point of the pool.
+      - id: drpc
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin.drpc.org
+        chainProbeInterval: 10s
+
+      - id: publicnode
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin-rpc.publicnode.com
+        chainProbeInterval: 10s
+
+      - id: quicknode-demo
+        type: btc
+        chain: mainnet
+        endpoint: https://docs-demo.btc.quiknode.pro
+        chainProbeInterval: 10s
+
+      - id: tatum
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin-mainnet.gateway.tatum.io/
+        chainProbeInterval: 10s
+
+      - id: nownodes
+        type: btc
+        chain: mainnet
+        endpoint: https://public-btc.nownodes.io/
+        chainProbeInterval: 10s
+
+      - id: onfinality
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin.api.onfinality.io/public
+        chainProbeInterval: 30s
+        tags:
+          - tier:fallback
