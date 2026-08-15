@@ -2546,7 +2546,9 @@ func HasErrorCode(err error, codes ...ErrorCode) bool {
 	}
 
 	if be, ok := err.(StandardError); ok {
-		return be.HasCode(codes...)
+		if be.HasCode(codes...) {
+			return true
+		}
 	}
 
 	if be, ok := err.(*BaseError); ok {
@@ -2563,6 +2565,14 @@ func HasErrorCode(err error, codes ...ErrorCode) bool {
 				return true
 			}
 		}
+	}
+
+	// A plain fmt.Errorf("%w", ...) link must not hide a code. errors.As walks
+	// it, and callers pair the two (see eth_sendRawTransaction), so a walk that
+	// stops here makes the pair disagree. StandardError.HasCode also stops at
+	// such a link inside its own cause chain, so keep walking after it too.
+	if we, ok := err.(interface{ Unwrap() error }); ok {
+		return HasErrorCode(we.Unwrap(), codes...)
 	}
 
 	return false
