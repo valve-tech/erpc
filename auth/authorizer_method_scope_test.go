@@ -238,20 +238,20 @@ func TestAuthRegistry_Authenticate_JoinsEveryStrategyError(t *testing.T) {
 		"both failing strategies must be reported, not just the last one")
 }
 
-// TestAuthRegistry_FindDatabaseConnector_ReportsAMissingId keeps the lookup
+// TestAuthRegistry_FindDatabaseStrategy_ReportsAMissingId keeps the lookup
 // honest. A silent nil here would surface later as a nil-pointer panic in the
 // admin path rather than a clear configuration error.
-func TestAuthRegistry_FindDatabaseConnector_ReportsAMissingId(t *testing.T) {
+func TestAuthRegistry_FindDatabaseStrategy_ReportsAMissingId(t *testing.T) {
 	registry := newSecretAuthRegistry(t, &common.AuthConfig{
 		Strategies: []*common.AuthStrategyConfig{
 			{Type: common.AuthTypeSecret, Secret: &common.SecretStrategyConfig{Id: "ops", Value: "ops-token"}},
 		},
 	})
 
-	conn, err := registry.FindDatabaseConnector("no-such-connector")
+	strategy, err := registry.FindDatabaseStrategy("no-such-connector")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no-such-connector")
-	assert.Nil(t, conn)
+	assert.Nil(t, strategy)
 }
 
 // TestNewAuthorizer_RejectsIncompleteConfig proves every strategy type demands
