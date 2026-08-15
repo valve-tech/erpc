@@ -1,12 +1,17 @@
 package thirdparty
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
 	stdlog "log"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -324,9 +329,8 @@ func TestChainstackFetchChainIDs_FillsTheChainIdFromTheProbe(t *testing.T) {
 	logger := zerolog.Nop()
 	node := &ChainstackNode{ID: "n1", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: srv.URL, AuthKey: "k"}}
 
-	err := v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node})
+	v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node})
 
-	require.NoError(t, err)
 	assert.Equal(t, int32(1), hits.Load())
 	assert.Equal(t, int64(8453), node.ChainID, "0x2105 must decode as base 16")
 }
@@ -338,9 +342,8 @@ func TestChainstackFetchChainIDs_SkipsNodesThatAreNotRunning(t *testing.T) {
 	stopped := &ChainstackNode{ID: "n1", Status: "stopped", Details: ChainstackNodeDetails{HTTPSEndpoint: srv.URL}}
 	noEndpoint := &ChainstackNode{ID: "n2", Status: "running"}
 
-	err := v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{stopped, noEndpoint})
+	v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{stopped, noEndpoint})
 
-	require.NoError(t, err)
 	assert.Equal(t, int32(0), hits.Load(), "a stopped node or one with no endpoint must not be probed")
 	assert.Equal(t, int64(0), stopped.ChainID)
 	assert.Equal(t, int64(0), noEndpoint.ChainID)
@@ -358,11 +361,11 @@ func TestChainstackFetchChainIDs_LeavesTheChainIdUnsetWhenTheProbeFails(t *testi
 		{ID: "bad-hex", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: badHex.URL}},
 		{ID: "garbage", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: garbage.URL}},
 	}
-	err := v.fetchChainIDs(context.Background(), &logger, nodes)
+	v.fetchChainIDs(context.Background(), &logger, nodes)
 
-	// fetchChainIDs never returns an error, even when every probe fails; it
-	// only logs. See the report for what an operator observes.
-	assert.NoError(t, err)
+	// A failed probe costs that node its chain ID and nothing more. The
+	// function reports the failures on its own logger; it has no error to
+	// return, because a partial failure must never discard the good nodes.
 	for _, n := range nodes {
 		assert.Equal(t, int64(0), n.ChainID, "node %s must keep chain ID 0 after a failed probe", n.ID)
 	}
@@ -376,9 +379,8 @@ func TestChainstackFetchChainIDs_OneBadNodeDoesNotStopTheGoodOne(t *testing.T) {
 
 	goodNode := &ChainstackNode{ID: "good", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: good.URL}}
 	badNode := &ChainstackNode{ID: "bad", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: bad.URL}}
-	err := v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{badNode, goodNode})
+	v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{badNode, goodNode})
 
-	require.NoError(t, err)
 	assert.Equal(t, int64(10), goodNode.ChainID, "a failing sibling must not cost the healthy node its chain ID")
 	assert.Equal(t, int64(0), badNode.ChainID)
 }
@@ -391,9 +393,8 @@ func TestChainstackFetchChainIDs_ACancelledContextStopsEveryProbe(t *testing.T) 
 	cancel()
 
 	node := &ChainstackNode{ID: "n1", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: srv.URL}}
-	err := v.fetchChainIDs(ctx, &logger, []*ChainstackNode{node})
+	v.fetchChainIDs(ctx, &logger, []*ChainstackNode{node})
 
-	require.NoError(t, err)
 	assert.Equal(t, int32(0), hits.Load(), "a cancelled context must not reach the network")
 	assert.Equal(t, int64(0), node.ChainID)
 }
@@ -404,9 +405,8 @@ func TestQuicknodeFetchChainIDs_FillsTheChainIdFromTheProbe(t *testing.T) {
 	logger := zerolog.Nop()
 	ep := &QuicknodeEndpoint{ID: "e1", HttpUrl: srv.URL}
 
-	err := v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep})
+	v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep})
 
-	require.NoError(t, err)
 	assert.Equal(t, int32(1), hits.Load())
 	assert.Equal(t, int64(8453), ep.ChainID)
 }
@@ -421,13 +421,13 @@ func TestChainIdProbe_AnErrorBesideAResultMustWin(t *testing.T) {
 	csSrv, _ := chainIdServer(t, body)
 	cs := CreateChainstackVendor().(*ChainstackVendor)
 	node := &ChainstackNode{ID: "n1", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: csSrv.URL}}
-	require.NoError(t, cs.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node}))
+	cs.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node})
 	assert.Equal(t, int64(0), node.ChainID, "chainstack must not accept a result that came with an error")
 
 	qnSrv, _ := chainIdServer(t, body)
 	qn := CreateQuicknodeVendor().(*QuicknodeVendor)
 	ep := &QuicknodeEndpoint{ID: "e1", HttpUrl: qnSrv.URL}
-	require.NoError(t, qn.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep}))
+	qn.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep})
 	assert.Equal(t, int64(0), ep.ChainID, "quicknode must not accept a result that came with an error")
 }
 
@@ -441,9 +441,8 @@ func TestQuicknodeFetchChainIDs_LeavesTheChainIdUnsetWhenTheProbeFails(t *testin
 		{ID: "rpc-error", HttpUrl: rpcErr.URL},
 		{ID: "bad-hex", HttpUrl: badHex.URL},
 	}
-	err := v.fetchChainIDs(context.Background(), &logger, eps)
+	v.fetchChainIDs(context.Background(), &logger, eps)
 
-	assert.NoError(t, err, "fetchChainIDs swallows every probe failure")
 	for _, e := range eps {
 		assert.Equal(t, int64(0), e.ChainID, "endpoint %s must keep chain ID 0", e.ID)
 	}
@@ -457,9 +456,8 @@ func TestQuicknodeFetchChainIDs_OneBadEndpointDoesNotStopTheGoodOne(t *testing.T
 
 	goodEp := &QuicknodeEndpoint{ID: "good", HttpUrl: good.URL}
 	badEp := &QuicknodeEndpoint{ID: "bad", HttpUrl: bad.URL}
-	err := v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{badEp, goodEp})
+	v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{badEp, goodEp})
 
-	require.NoError(t, err)
 	assert.Equal(t, int64(137), goodEp.ChainID)
 	assert.Equal(t, int64(0), badEp.ChainID)
 }
@@ -472,8 +470,144 @@ func TestChainIdProbe_ParsesHexNotDecimal(t *testing.T) {
 	logger := zerolog.Nop()
 	ep := &QuicknodeEndpoint{ID: "e1", HttpUrl: srv.URL}
 
-	require.NoError(t, v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep}))
+	v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{ep})
 
 	assert.Equal(t, int64(16), ep.ChainID, "0x10 is 16, not 10")
 	assert.NotEqual(t, int64(10), ep.ChainID)
+}
+
+// fetchChainIDs must not offer an error result. A probe failure costs one node
+// its chain ID and nothing else, so there is no failure for a caller to act on.
+// An error result would invite a caller to discard the nodes that did answer.
+// These declarations fail to compile if either signature grows one back.
+var (
+	_ func(context.Context, *zerolog.Logger, []*ChainstackNode)    = (&ChainstackVendor{}).fetchChainIDs
+	_ func(context.Context, *zerolog.Logger, []*QuicknodeEndpoint) = (&QuicknodeVendor{}).fetchChainIDs
+)
+
+// fetchChainIDs reports every probe failure on its own logger, and it names the
+// node that failed. That log line is the operator's whole signal, so it must
+// survive. The function returns nothing: a partial failure is normal and the
+// caller must keep the nodes that did answer.
+func TestFetchChainIDs_ReportsEveryFailureOnItsOwnLogger(t *testing.T) {
+	good, _ := chainIdServer(t, `{"jsonrpc":"2.0","id":1,"result":"0xa"}`)
+	bad, _ := chainIdServer(t, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"node syncing"}}`)
+
+	t.Run("chainstack", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := zerolog.New(&buf)
+		v := CreateChainstackVendor().(*ChainstackVendor)
+		goodNode := &ChainstackNode{ID: "good", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: good.URL}}
+		badNode := &ChainstackNode{ID: "bad-node", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: bad.URL}}
+
+		v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{goodNode, badNode})
+
+		assert.Contains(t, buf.String(), "bad-node", "the warning must name the node that failed")
+		assert.Contains(t, buf.String(), `"level":"warn"`)
+		assert.Equal(t, int64(10), goodNode.ChainID, "the healthy node keeps its chain ID")
+	})
+
+	t.Run("quicknode", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := zerolog.New(&buf)
+		v := CreateQuicknodeVendor().(*QuicknodeVendor)
+		goodEp := &QuicknodeEndpoint{ID: "good", HttpUrl: good.URL}
+		badEp := &QuicknodeEndpoint{ID: "bad-endpoint", HttpUrl: bad.URL}
+
+		v.fetchChainIDs(context.Background(), &logger, []*QuicknodeEndpoint{goodEp, badEp})
+
+		assert.Contains(t, buf.String(), "bad-endpoint", "the warning must name the endpoint that failed")
+		assert.Contains(t, buf.String(), `"level":"warn"`)
+		assert.Equal(t, int64(10), goodEp.ChainID, "the healthy endpoint keeps its chain ID")
+	})
+}
+
+// A run in which every probe succeeds must stay silent.
+func TestFetchChainIDs_LogsNothingWhenEveryProbeSucceeds(t *testing.T) {
+	srv, _ := chainIdServer(t, `{"jsonrpc":"2.0","id":1,"result":"0xa"}`)
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	v := CreateChainstackVendor().(*ChainstackVendor)
+	node := &ChainstackNode{ID: "n1", Status: "running", Details: ChainstackNodeDetails{HTTPSEndpoint: srv.URL}}
+
+	v.fetchChainIDs(context.Background(), &logger, []*ChainstackNode{node})
+
+	assert.Empty(t, buf.String(), "a clean run must not warn")
+}
+
+// -----------------------------------------------------------------------------
+// chainstack: fetchNodes pagination
+// -----------------------------------------------------------------------------
+
+// pagedNodesServer serves `pages` pages of the Chainstack node listing and
+// tracks how many connections it holds open at once.
+func pagedNodesServer(t *testing.T, pages int) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	open, maxOpen := 0, 0
+	var srv *httptest.Server
+
+	srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page == 0 {
+			page = 1
+		}
+		next := "null"
+		if page < pages {
+			next = fmt.Sprintf(`"%s/?page=%d"`, srv.URL, page+1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"next":%s,"results":[{"id":"n%d","status":"running","details":{"https_endpoint":"https://n%d.example"}}]}`,
+			next, page, page)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Padding the decoder never reads. Go returns a connection to its pool
+		// only after the body reaches EOF or the caller closes it, so this is
+		// what turns an unclosed body into a held connection.
+		_, _ = w.Write(bytes.Repeat([]byte("\n"), 64*1024))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch s {
+		case http.StateNew:
+			open++
+			if open > maxOpen {
+				maxOpen = open
+			}
+		case http.StateClosed, http.StateHijacked:
+			open--
+		}
+	}
+	// ConnState must be in place before the server starts serving.
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return maxOpen
+	}
+}
+
+// fetchNodes must release each page's body before it asks for the next one.
+// Holding them all open costs one connection per page for the whole walk,
+// which on a large account is a connection leak in everything but name.
+func TestChainstackFetchNodes_ReleasesEachPageBeforeTheNextRequest(t *testing.T) {
+	const pages = 4
+	srv, maxOpen := pagedNodesServer(t, pages)
+	prev := chainstackNodesApiUrl
+	chainstackNodesApiUrl = srv.URL + "/"
+	t.Cleanup(func() { chainstackNodesApiUrl = prev })
+
+	v := CreateChainstackVendor().(*ChainstackVendor)
+	logger := zerolog.Nop()
+
+	nodes, err := v.fetchNodes(context.Background(), &logger, "k", nil)
+
+	require.NoError(t, err)
+	assert.Len(t, nodes, pages, "the walk must collect every page")
+	assert.Equal(t, 1, maxOpen(),
+		"page N's body must close before page N+1 is requested; deferring the close to the end of the walk holds one connection per page")
 }

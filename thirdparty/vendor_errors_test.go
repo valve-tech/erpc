@@ -104,19 +104,20 @@ func TestQuicknodeVendor_GetVendorSpecificErrorIfAny_IgnoresANonJsonRpcBody(t *t
 		"a plain string body", map[string]interface{}{}))
 }
 
-// The quicknode normaliser shadows its `details` argument with a fresh map at
-// quicknode.go:569, so nothing the caller put in `details` reaches the error.
-// This test pins what an operator sees today; see the report.
-func TestQuicknodeVendor_GetVendorSpecificErrorIfAny_DropsTheCallersDetails(t *testing.T) {
+// architecture/evm/error_normalizer.go fills `details` with the HTTP status
+// code and the useful response headers before it asks the vendor. Quicknode
+// must carry that map into the error it builds, like every other vendor.
+func TestQuicknodeVendor_GetVendorSpecificErrorIfAny_CarriesTheCallersDetails(t *testing.T) {
 	v := CreateQuicknodeVendor()
 	details := map[string]interface{}{"statusCode": 429, "headers": "x-qn-request-id: abc"}
 
-	err := classifyWith(t, v, 429, -32009, "too many requests", "", details)
+	err := classifyWith(t, v, 429, -32009, "too many requests", "rate-limit-payload", details)
 
 	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "x-qn-request-id",
-		"the caller's request context never reaches the quicknode error")
-	assert.NotContains(t, details, "data", "the shadowed map also swallows the vendor data field")
+	assert.Contains(t, err.Error(), "x-qn-request-id",
+		"the caller's request context must reach the quicknode error")
+	assert.Equal(t, "rate-limit-payload", details["data"],
+		"the vendor data field must land in the caller's map")
 }
 
 // -----------------------------------------------------------------------------
