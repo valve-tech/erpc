@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -108,8 +109,15 @@ func TestJsonRpcResponse_WriteTo_MarshalsATypedErrorOnDemand(t *testing.T) {
 	require.Contains(t, out, `limit exceeded`)
 	require.NotContains(t, out, `"result"`, "an error response must not also carry a result")
 
-	// The lazy marshal must memoize, otherwise every re-send re-marshals.
-	require.NotEmpty(t, jr.errBytes)
+	// The lazy marshal must NOT cache into the shared errBytes field. WriteTo
+	// holds read locks only and many clients render one response at once, so a
+	// write here is a data race. A re-send re-marshals and emits the same bytes.
+	require.Empty(t, jr.errBytes, "WriteTo must not mutate shared state under a read lock")
+
+	var again bytes.Buffer
+	_, err = jr.WriteTo(&again)
+	require.NoError(t, err)
+	require.Equal(t, out, again.String(), "a re-send must emit identical bytes")
 }
 
 // TestJsonRpcResponse_WriteTo_PrefersTheUpstreamErrorBytes proves the upstream's
@@ -169,6 +177,46 @@ func TestJsonRpcResponse_WriteTo_ReportsOnlyTheBytesItActuallyWrote(t *testing.T
 		require.Error(t, err)
 		require.Equal(t, int64(budget), n)
 	})
+}
+
+// TestJsonRpcResponse_WriteTo_ServesConcurrentClientsWithoutRacing covers the
+// multiplexing case: one response object, many waiting clients, each rendering
+// it at the same time. The response carries a typed Error and no errBytes, so
+// every goroutine takes the lazy-marshal branch. WriteTo holds only READ locks
+// there, so it must not write any shared field, and every client must receive
+// the same bytes. Run with -race.
+func TestJsonRpcResponse_WriteTo_ServesConcurrentClientsWithoutRacing(t *testing.T) {
+	t.Parallel()
+
+	jr := &JsonRpcResponse{
+		idBytes: []byte(`"abc"`),
+		Error:   NewErrJsonRpcExceptionExternal(-32005, "limit exceeded", "retry later"),
+	}
+
+	const clients = 8
+	start := make(chan struct{})
+	outs := make([]string, clients)
+	var wg sync.WaitGroup
+	wg.Add(clients)
+	for i := 0; i < clients; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			var buf bytes.Buffer
+			n, err := jr.WriteTo(&buf)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(buf.Len()), n)
+			outs[i] = buf.String()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 1; i < clients; i++ {
+		require.Equal(t, outs[0], outs[i],
+			"every multiplexed client must receive identical bytes")
+	}
+	require.Contains(t, outs[0], `-32005`)
 }
 
 // TestJsonRpcResponse_WriteTo_StreamsFromTheResultWriter covers the streaming

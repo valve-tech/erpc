@@ -230,53 +230,77 @@ func TestCanonicalHashWithIgnoredFields_WalksNestedAndWildcardPaths(t *testing.T
 	require.NotEqual(t, h1, h3)
 }
 
-// TestRemoveFieldsByPaths_APrefixPathPoisonsTheRootTree pins a DEFECT, not a
-// desired behaviour. When one ignore path is a prefix of another ("logs" plus
-// "logs.*.blockTimestamp"), the tree builder fails to descend into the leaf it
-// already wrote and grafts the remaining segments onto the ROOT. The root then
-// carries a "*" entry, which removeFieldsRecursive applies to every other
-// top-level member. An operator sees two genuinely different bodies reported as
-// agreeing. See the report accompanying this change; the assertions below
-// record today's output so the fix has something to break.
-func TestRemoveFieldsByPaths_APrefixPathPoisonsTheRootTree(t *testing.T) {
+// TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension pins the rule
+// for a path that is a prefix of another one: the broader path wins. Ignoring
+// "logs" already ignores everything under it, so "logs.*.blockTimestamp" adds
+// nothing and the builder drops it. The order the operator lists them in must
+// not matter.
+//
+// The old builder found pathTree["logs"] already set to true, failed the map
+// type assertion, and kept writing the remaining segments onto the ROOT. The
+// root then carried a "*" entry, which removeFieldsRecursive applied to every
+// other top-level member — so fields no ignore path ever named disappeared, and
+// consensus reported agreement on bodies that diverge.
+func TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension(t *testing.T) {
 	t.Parallel()
 
-	obj := map[string]interface{}{
-		"logs": []interface{}{map[string]interface{}{"blockTimestamp": "0x64"}},
-		"receipt": map[string]interface{}{
-			"blockTimestamp": "0x64",
-			"status":         "0x1",
-		},
+	newObj := func() map[string]interface{} {
+		return map[string]interface{}{
+			"logs": []interface{}{map[string]interface{}{"blockTimestamp": "0x64"}},
+			"receipt": map[string]interface{}{
+				"blockTimestamp": "0x64",
+				"status":         "0x1",
+			},
+		}
 	}
 
-	got := removeFieldsByPaths(obj, []string{"logs", "logs.*.blockTimestamp"})
-	m, ok := got.(map[string]interface{})
-	require.True(t, ok)
+	for _, paths := range [][]string{
+		{"logs", "logs.*.blockTimestamp"},
+		{"logs.*.blockTimestamp", "logs"},
+	} {
+		m, ok := removeFieldsByPaths(newObj(), paths).(map[string]interface{})
+		require.True(t, ok)
 
-	_, hasLogs := m["logs"]
-	require.False(t, hasLogs, "the plain 'logs' path removes logs, as asked")
+		_, hasLogs := m["logs"]
+		require.False(t, hasLogs, "%v: the broader 'logs' path removes logs entirely", paths)
 
-	receipt, ok := m["receipt"].(map[string]interface{})
-	require.True(t, ok)
-	_, leaked := receipt["blockTimestamp"]
-	require.False(t, leaked,
-		"DEFECT: receipt.blockTimestamp was never named by any ignore path, "+
-			"yet the root-level wildcard grafted by the prefix collision strips it")
-	require.Equal(t, "0x1", receipt["status"], "unrelated members must survive")
+		receipt, ok := m["receipt"].(map[string]interface{})
+		require.True(t, ok)
+		require.Equal(t, "0x64", receipt["blockTimestamp"],
+			"%v: no ignore path names receipt.blockTimestamp, so it must survive", paths)
+		require.Equal(t, "0x1", receipt["status"], "%v: unrelated members must survive", paths)
+	}
+}
 
-	// The correct tree — built when the longer path comes first — leaves the
-	// sibling alone. Same two paths, opposite order, different answer.
-	reordered := removeFieldsByPaths(map[string]interface{}{
-		"logs": []interface{}{map[string]interface{}{"blockTimestamp": "0x64"}},
-		"receipt": map[string]interface{}{
-			"blockTimestamp": "0x64",
-			"status":         "0x1",
-		},
-	}, []string{"logs.*.blockTimestamp", "logs"})
-	rm := reordered.(map[string]interface{})
-	rr := rm["receipt"].(map[string]interface{})
-	require.Equal(t, "0x64", rr["blockTimestamp"],
-		"path order must not change which fields are removed, but today it does")
+// TestCanonicalHashWithIgnoredFields_APathAndItsPrefixHashTheSameEitherWay is
+// the consensus-level statement of the same rule. An operator list where one
+// path is a prefix of another must give one answer, whatever the order, and it
+// must still separate bodies that genuinely differ.
+func TestCanonicalHashWithIgnoredFields_APathAndItsPrefixHashTheSameEitherWay(t *testing.T) {
+	t.Parallel()
+
+	body := func(receiptTs string) *JsonRpcResponse {
+		return &JsonRpcResponse{result: []byte(
+			`{"logs":[{"blockTimestamp":"0x64"}],` +
+				`"receipt":{"blockTimestamp":"` + receiptTs + `","status":"0x1"}}`)}
+	}
+
+	forward := []string{"logs", "logs.*.blockTimestamp"}
+	reverse := []string{"logs.*.blockTimestamp", "logs"}
+
+	hf, err := body("0x64").CanonicalHashWithIgnoredFields(forward)
+	require.NoError(t, err)
+	hr, err := body("0x64").CanonicalHashWithIgnoredFields(reverse)
+	require.NoError(t, err)
+	require.Equal(t, hf, hr, "the same two paths in either order must give the same hash")
+
+	// receipt.blockTimestamp is named by no ignore path, so a difference there
+	// must still separate the two bodies. The old root-level wildcard stripped
+	// it from both and made consensus agree on divergent data.
+	hd, err := body("0x99").CanonicalHashWithIgnoredFields(forward)
+	require.NoError(t, err)
+	require.NotEqual(t, hf, hd,
+		"a field outside the ignore list must still count towards the hash")
 }
 
 // TestRemoveFieldsByPaths_LeavesTheObjectAloneWhenThereIsNothingToRemove keeps
