@@ -48,58 +48,95 @@ Pinned by `TestAdmin_UpdateAndDeleteNeedAStoreThatResolvesTheRangeWildcard` and
 
 ## 2. `CopyResponseForRequest` deadlocks on an unparsed response
 
-**Status:** open. **Severity: high.** A hung request never returns.
+**Status:** fixed-in-fork. **Severity: high.** A hung request never returns.
 
-`common/response.go:623` takes `resp.RLockWithTrace(ctx)`, a read lock on the
-response's `sync.RWMutex`. If the response is not parsed yet, it then calls
+`common/response.go:623` took `resp.RLockWithTrace(ctx)`, a read lock on the
+response's `sync.RWMutex`. If the response was not parsed yet, it then called
 `resp.JsonRpcResponse(ctx)`, which takes `r.Lock()` on the same non-reentrant
 mutex at `common/response.go:331`.
 
-The goroutine blocks forever while holding the read lock.
+The goroutine blocked forever while holding the read lock.
 
 The comment at `:638` says this path is "common with multiplexed requests", so
-the intended case is the one that hangs.
+the intended case was the one that hung.
 
-The unparsed path is deliberately left uncovered: a test for it would hang the
-suite until this is fixed. A comment at the test names both line numbers.
+**The fix** parses before taking the read lock, and re-reads the parsed pointer
+under the lock so `Release()` still cannot free it mid-clone. The critical
+section shrank; it never grew. Taking the write lock for the whole operation
+would also break the self-deadlock, but it would queue the multiplexed waiters
+behind each other and behind every other reader. The fan-out test named below
+rejects that variant.
+
+Covered by `TestCopyResponseForRequest_UnparsedOriginalCompletes` and
+`TestCopyResponseForRequest_DoesNotSerialiseTheFanOut`, both bounded to 5
+seconds: a regression fails fast instead of wedging the run.
 
 ---
 
 ## 3. No error type satisfies `common.ResponseMetadata`
 
-**Status:** open. **Severity: medium.** Operators lose diagnostics exactly when
-they need them.
+**Status:** fixed-in-fork. **Severity: medium.** Operators lose diagnostics
+exactly when they need them.
 
 `common/response.go:64` declares `IsObjectNull(ctx ...context.Context) bool`.
 
 `ErrUpstreamRequest.IsObjectNull()` (`common/errors.go:810`) and
-`ErrUpstreamsExhausted.IsObjectNull()` (`:1041`) take **no argument**. Neither
-type satisfies the interface, although both implement every other method.
+`ErrUpstreamsExhausted.IsObjectNull()` (`:1041`) took **no argument**. Neither
+type satisfied the interface, although both implemented every other method.
 
-`common.LookupResponseMetadata` therefore returns nil for every error, and
-`erpc/http_server.go:1316` and `:1321` emit no `X-ERPC-Attempts`,
-`X-ERPC-Retries`, `X-ERPC-Hedges` or `X-ERPC-Upstream` header on an error
-response.
+`common.LookupResponseMetadata` therefore returned nil for every error, so
+`writeResponseMetadataHeaders` (`erpc/http_server.go:1290`) wrote no
+`X-ERPC-Cache` and no `X-ERPC-Upstream` header on an error response. Checked:
+`X-ERPC-Attempts` and the retry/hedge counters come from `ExecState`
+(`:1258`), not from this interface, so they were never affected.
 
-The compiler cannot catch this, because nothing asserts the interface
-statically. A `var _ ResponseMetadata = (*ErrUpstreamRequest)(nil)` line would
-have.
+**The fix** makes both methods variadic and adds the two static assertions the
+package lacked, so the signature cannot drift again without a compile error.
+
+One consequence, deliberate: in a batch response the failed items now count
+toward `withMeta` (`erpc/http_server.go:1565`) with `FromCache()` false, so a
+batch mixing a cache hit with an upstream failure reports `X-ERPC-Cache:
+PARTIAL:1` instead of `HIT`. That is the honest answer — the failed item was
+not served from cache.
 
 ---
 
 ## 4. `WithRetryableTowardNetwork` throws the concrete type away
 
-**Status:** open. **Severity: medium.** Wrong HTTP status to the client.
+**Status:** fixed-in-fork. **Severity: medium.** The client reads the wrapper
+instead of the real error.
 
-`common/errors.go:210` returns the embedded `*BaseError`, not the receiver's
-concrete type. `common/grpc_errors.go:75` and `:156` chain it.
+`common/errors.go:210` returned the embedded `*BaseError`, not the receiver's
+concrete type. Twenty-five call sites chain it: twenty-one in production code,
+four in tests.
 
-So a gRPC `InvalidArgument`, or a BDS `INVALID_PARAMETER`, reaches the HTTP
-layer as a bare `*BaseError`. That value no longer implements
-`ErrorStatusCode()`, so the client sees **500 instead of 400**, and
-`errors.As` for `*ErrEndpointClientSideException` no longer finds it.
+So a gRPC `InvalidArgument`, or a BDS `INVALID_PARAMETER`, reached the HTTP
+layer as a bare `*BaseError`. That value implements neither `ErrorStatusCode()`
+nor its own identity, so `errors.As` for `*ErrEndpointClientSideException` did
+not find it.
 
-Classification still works, because it reads the code rather than the type.
+The live consumer is `buildErrorResponseBody` (`erpc/http_server.go:1744`): it
+calls `errors.As(err, &exe)` to lift an `*ErrEndpointExecutionException` out of
+a failed bundle so the client reads the revert rather than the wrapper. The
+four EVM paths that mark a revert retryable
+(`architecture/evm/error_normalizer.go:268, 289, 375, 406`) all returned a
+`*BaseError`, so that lift never fired for them.
+
+Correction to the original report: `ErrorStatusCode()` has **no** production
+consumer in this tree — `determineResponseStatusCode`
+(`erpc/http_server.go:1624`) keys off `HasErrorCode`, and the `Code` field
+survives inside the `*BaseError`. So the status did not flip to 500; the body
+selection was the damage. Only tests read `ErrorStatusCode()`.
+
+**The fix** keeps `*BaseError.WithRetryableTowardNetwork` — every error type
+stays a `RetryableError`, so the four production `err.(RetryableError)`
+assertions still set the flag — and overrides the method on the five concrete
+types that are chained with it today, each returning its own receiver. A type added later
+still needs its own override; the alternative, unexporting the base method to
+force a compile error, would silently turn those dynamic assertions into
+no-ops, which is a worse failure than a wrong body.
+
+Classification always worked, because it reads the code rather than the type.
 
 ---
 

@@ -1,6 +1,8 @@
 package common
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 
 	bdscommon "github.com/blockchain-data-standards/manifesto/common"
@@ -57,13 +59,6 @@ func TestExtractGrpcErrorFromGrpcStatus_MapsEveryStatusCode(t *testing.T) {
 
 // InvalidArgument means the request itself is wrong. Failing over to another
 // upstream would re-send the same bad request to every node in the pool.
-//
-// BUG (reported, not fixed here): the constructor chains
-// .WithRetryableTowardNetwork(false), which returns the embedded *BaseError
-// (common/errors.go:210) and so throws the concrete type away. The returned
-// error therefore stops implementing ErrorStatusCode, and the HTTP layer serves
-// this as 500 instead of 400. The classification below still works because it
-// reads the code, not the type.
 func TestExtractGrpcErrorFromGrpcStatus_InvalidArgumentDoesNotFailOver(t *testing.T) {
 	err := ExtractGrpcErrorFromGrpcStatus(status.New(codes.InvalidArgument, "bad block tag"), nil)
 	require.False(t, IsRetryableTowardNetwork(err),
@@ -75,6 +70,62 @@ func TestExtractGrpcErrorFromGrpcStatus_InvalidArgumentDoesNotFailOver(t *testin
 	require.True(t, IsRetryableTowardNetwork(server))
 	require.True(t, IsRetryableTowardsUpstream(server))
 	require.False(t, IsClientError(server))
+}
+
+// Marking an error non-retryable must not change what the error IS. The layers
+// above match on the concrete type: erpc/http_server.go calls errors.As to lift
+// the real endpoint error out of a failed bundle, and the type is what carries
+// ErrorStatusCode. An error that arrives as a bare *BaseError answers neither.
+func TestExtractGrpcErrorFromGrpcStatus_InvalidArgumentKeepsItsTypeAndStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"transport code", ExtractGrpcErrorFromGrpcStatus(status.New(codes.InvalidArgument, "bad block tag"), nil)},
+		{"bds detail code", ExtractGrpcErrorFromGrpcStatus(
+			bdscommon.NewError(bdscommon.ErrorCode_INVALID_PARAMETER, "bad parameter").ToGRPCStatus(), nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cse *ErrEndpointClientSideException
+			require.True(t, errors.As(tc.err, &cse),
+				"the concrete type must survive WithRetryableTowardNetwork, got %T", tc.err)
+
+			sc, ok := tc.err.(interface{ ErrorStatusCode() int })
+			require.Truef(t, ok, "the error must still carry a status code, got %T", tc.err)
+			require.Equal(t, http.StatusBadRequest, sc.ErrorStatusCode())
+
+			// The flag it was chained with must still be set.
+			require.False(t, IsRetryableTowardNetwork(tc.err))
+		})
+	}
+}
+
+// WithRetryableTowardNetwork returns the receiver, not the embedded BaseError,
+// for every error type that is chained with it today.
+func TestWithRetryableTowardNetwork_ReturnsTheReceiver(t *testing.T) {
+	cause := NewErrJsonRpcExceptionInternal(0, JsonRpcErrorClientSideException, "boom", nil, nil)
+
+	for _, tc := range []struct {
+		name string
+		err  RetryableError
+	}{
+		{"client side", NewErrEndpointClientSideException(cause)},
+		{"capacity exceeded", NewErrEndpointCapacityExceeded(cause).(RetryableError)},
+		{"execution exception", NewErrEndpointExecutionException(cause).(RetryableError)},
+		{"missing data", NewErrEndpointMissingData(cause, nil).(RetryableError)},
+		{"invalid request", NewErrInvalidRequest(cause).(RetryableError)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			marked := tc.err.WithRetryableTowardNetwork(false)
+			require.IsTypef(t, tc.err, marked,
+				"the concrete type must survive, got %T", marked)
+			require.Same(t, tc.err, marked, "the receiver itself must come back")
+			require.False(t, IsRetryableTowardNetwork(marked))
+
+			// And the flag must be settable back the other way.
+			require.True(t, IsRetryableTowardNetwork(marked.WithRetryableTowardNetwork(true)))
+		})
+	}
 }
 
 // The upstream id and the gRPC code must reach the error details. Without them

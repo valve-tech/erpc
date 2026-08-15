@@ -207,14 +207,28 @@ type RetryableError interface {
 	WithRetryableTowardNetwork(bool) RetryableError
 }
 
+// WithRetryableTowardNetwork records the opt-out flag on the error itself.
+//
+// Callers CHAIN this method and return its result, so the value it gives back
+// is the value the rest of the pipeline sees. A concrete type that leaves the
+// method to promotion gets a *BaseError back and loses everything the outer
+// type added: its ErrorStatusCode, and its identity to errors.As — which is how
+// erpc/http_server.go lifts an execution exception out of a failed bundle so the
+// client reads the revert instead of the wrapper. Every type that is chained
+// with this method therefore overrides it and returns itself;
+// setRetryableTowardNetwork below holds the one copy of the flag logic.
 func (e *BaseError) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
+func (e *BaseError) setRetryableTowardNetwork(r bool) {
 	if e != nil {
 		if e.Details == nil {
 			e.Details = map[string]interface{}{}
 		}
 		e.Details["retryableTowardNetwork"] = r
 	}
-	return e
 }
 
 // WithPermanentMissingData marks a MissingData verdict as permanent — the data
@@ -478,6 +492,11 @@ var NewErrInvalidRequest = func(cause error) error {
 
 func (e *ErrInvalidRequest) ErrorStatusCode() int {
 	return http.StatusBadRequest
+}
+
+func (e *ErrInvalidRequest) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
 }
 
 type ErrInvalidUrlPath struct{ BaseError }
@@ -780,6 +799,15 @@ type ErrUpstreamRequest struct {
 	BaseError
 }
 
+// These two errors carry the metadata that LookupResponseMetadata hands to the
+// HTTP layer. Nothing else asserts the interface, so without these declarations
+// a drifting method signature drops the headers silently — the compiler would
+// not say a word.
+var (
+	_ ResponseMetadata = (*ErrUpstreamRequest)(nil)
+	_ ResponseMetadata = (*ErrUpstreamsExhausted)(nil)
+)
+
 const ErrCodeUpstreamRequest ErrorCode = "ErrUpstreamRequest"
 
 var NewErrUpstreamRequest = func(cause error, upstream Upstream, networkId, method string, duration time.Duration, attempts, retries, hedges int) error {
@@ -807,7 +835,11 @@ var NewErrUpstreamRequest = func(cause error, upstream Upstream, networkId, meth
 	}
 }
 
-func (e *ErrUpstreamRequest) IsObjectNull() bool {
+// The context argument is unused here — it exists so the signature matches
+// ResponseMetadata.IsObjectNull. Without the match this type silently stops
+// being a ResponseMetadata, LookupResponseMetadata returns nil, and the HTTP
+// layer writes no X-ERPC-Cache or X-ERPC-Upstream header on an error response.
+func (e *ErrUpstreamRequest) IsObjectNull(_ ...context.Context) bool {
 	return e == nil || e.Code == ""
 }
 
@@ -1038,7 +1070,9 @@ func (e *ErrUpstreamsExhausted) Upstreams() []Upstream {
 	return ups
 }
 
-func (e *ErrUpstreamsExhausted) IsObjectNull() bool {
+// See the note on ErrUpstreamRequest.IsObjectNull: the variadic context keeps
+// this type inside the ResponseMetadata interface.
+func (e *ErrUpstreamsExhausted) IsObjectNull(_ ...context.Context) bool {
 	return e == nil || e.Code == ""
 }
 
@@ -2075,6 +2109,11 @@ func (e *ErrEndpointClientSideException) ErrorStatusCode() int {
 	return http.StatusBadRequest
 }
 
+func (e *ErrEndpointClientSideException) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
 type ErrEndpointExecutionException struct{ BaseError }
 
 const ErrCodeEndpointExecutionException = "ErrEndpointExecutionException"
@@ -2095,6 +2134,11 @@ var NewErrEndpointExecutionException = func(cause error) error {
 func (e *ErrEndpointExecutionException) ErrorStatusCode() int {
 	// Reverted calls are expected to be a successful json-rpc response
 	return http.StatusOK
+}
+
+func (e *ErrEndpointExecutionException) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
 }
 
 type ErrEndpointTransportFailure struct{ BaseError }
@@ -2246,6 +2290,11 @@ func (e *ErrEndpointCapacityExceeded) ErrorStatusCode() int {
 	return http.StatusTooManyRequests
 }
 
+func (e *ErrEndpointCapacityExceeded) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
 type ErrEndpointBillingIssue struct{ BaseError }
 
 const ErrCodeEndpointBillingIssue = "ErrEndpointBillingIssue"
@@ -2302,6 +2351,11 @@ var NewErrEndpointMissingData = func(cause error, upstream Upstream) error {
 func (e *ErrEndpointMissingData) ErrorStatusCode() int {
 	// Many clients expect status code 200 but error body for "missing data" error variations
 	return http.StatusOK
+}
+
+func (e *ErrEndpointMissingData) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
 }
 
 type ErrUpstreamNodeTypeMismatch struct{ BaseError }

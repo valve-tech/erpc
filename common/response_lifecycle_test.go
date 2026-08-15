@@ -404,11 +404,8 @@ func TestNormalizedResponse_MarshalZerologObjectNamesTheUpstream(t *testing.T) {
 // copy must carry that client's own JSON-RPC id, or every client but one gets
 // a reply it will discard as unmatched.
 //
-// The original is parsed FIRST on purpose. Copying an unparsed response
-// deadlocks: CopyResponseForRequest holds the response's read lock
-// (common/response.go:623) and then calls JsonRpcResponse, which takes the same
-// non-reentrant mutex for writing (common/response.go:331). See the bug note in
-// the report — that path is left uncovered here rather than hanging the suite.
+// This case parses the original first. The unparsed case — the one multiplexing
+// actually produces — is covered by the two tests below.
 func TestCopyResponseForRequest_RewritesTheIdForTheNewRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), responseTestTimeout)
 	defer cancel()
@@ -469,19 +466,133 @@ func TestCopyResponseForRequest_BodylessOriginalCarriesTheParseError(t *testing.
 	defer cancel()
 
 	orig := NewNormalizedResponse()
-	// Parse first — see the deadlock note on the test above.
-	_, err := orig.JsonRpcResponse(ctx)
-	require.NoError(t, err)
 
 	req := NewNormalizedRequestFromJsonRpcRequest(&JsonRpcRequest{JSONRPC: "2.0", ID: 1, Method: "eth_call"})
 
-	copied, cerr := CopyResponseForRequest(ctx, orig, req)
+	// Bounded: this original is unparsed too, so a lock regression would hang here.
+	var copied *NormalizedResponse
+	var cerr error
+	runBounded(t, "CopyResponseForRequest on a bodyless original", func() {
+		copied, cerr = CopyResponseForRequest(ctx, orig, req)
+	})
 	require.NoError(t, cerr)
 	require.NotNil(t, copied)
 
 	jrr, err := copied.JsonRpcResponse(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, jrr.Error, "the parse failure must survive the copy")
+}
+
+// copyDeadline bounds every deadlock test below. A regression must FAIL in
+// seconds, not wedge the suite: a test that detects a deadlock by hanging looks
+// exactly like a slow pass until the whole run is killed.
+const copyDeadline = 5 * time.Second
+
+// runBounded runs fn on its own goroutine and fails the test if it does not
+// return within copyDeadline. A goroutine stuck on a self-deadlock cannot be
+// killed, so it is left behind deliberately — the test binary still reports the
+// failure and exits.
+func runBounded(t *testing.T, what string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(copyDeadline):
+		t.Fatalf("%s did not return within %s: the goroutine holds the response read lock "+
+			"and is waiting for the write lock on the same mutex", what, copyDeadline)
+	}
+}
+
+// Multiplexing is exactly the case where the shared response has NOT been parsed
+// yet — the first waiter to reach the copy is the one that parses it. Copying an
+// unparsed response must therefore complete, not block.
+func TestCopyResponseForRequest_UnparsedOriginalCompletes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), responseTestTimeout)
+	defer cancel()
+
+	orig, _ := responseWithBody(t, `{"jsonrpc":"2.0","id":1,"result":"0x64"}`)
+	require.Nil(t, orig.jsonRpcResponse.Load(), "the fixture must start unparsed")
+
+	req := NewNormalizedRequestFromJsonRpcRequest(&JsonRpcRequest{JSONRPC: "2.0", ID: 77, Method: "eth_blockNumber"})
+
+	var copied *NormalizedResponse
+	var cerr error
+	runBounded(t, "CopyResponseForRequest on an unparsed response", func() {
+		copied, cerr = CopyResponseForRequest(ctx, orig, req)
+	})
+	require.NoError(t, cerr)
+	require.NotNil(t, copied)
+
+	jrr, err := copied.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 77, jrr.ID())
+	require.Equal(t, `"0x64"`, jrr.GetResultString())
+
+	// The copy must have released the lock and left the original parsed and
+	// readable for the next waiter.
+	origJrr, err := orig.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, origJrr.ID())
+	require.Nil(t, orig.Request(), "Request() takes the same read lock and must not block")
+}
+
+// The fan-out is the whole point of this function: many waiting requests copy
+// ONE shared response. The copy must take a READ lock, so a copy in flight
+// cannot block another reader — or another copy.
+//
+// The long-lived reader below is what makes the assertion sharp. Taking the
+// write lock for the whole operation would also break the self-deadlock, but a
+// copy would then queue behind this reader and behind every sibling copy,
+// turning a parallel fan-out into a serial one.
+func TestCopyResponseForRequest_DoesNotSerialiseTheFanOut(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), responseTestTimeout)
+	defer cancel()
+
+	orig, _ := responseWithBody(t, `{"jsonrpc":"2.0","id":1,"result":"0x64"}`)
+	_, err := orig.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+
+	// Stand in for the rest of the pipeline still reading the shared response.
+	orig.RLock()
+	defer orig.RUnlock()
+
+	const waiters = 16
+	ids := make([]interface{}, waiters)
+	errs := make([]error, waiters)
+
+	runBounded(t, "a 16-way multiplexed fan-out", func() {
+		var wg sync.WaitGroup
+		wg.Add(waiters)
+		for i := 0; i < waiters; i++ {
+			go func(i int) {
+				defer wg.Done()
+				req := NewNormalizedRequestFromJsonRpcRequest(&JsonRpcRequest{
+					JSONRPC: "2.0", ID: i + 1, Method: "eth_blockNumber",
+				})
+				copied, cerr := CopyResponseForRequest(ctx, orig, req)
+				if cerr != nil {
+					errs[i] = cerr
+					return
+				}
+				jrr, jerr := copied.JsonRpcResponse(ctx)
+				if jerr != nil {
+					errs[i] = jerr
+					return
+				}
+				ids[i] = jrr.ID()
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	for i := 0; i < waiters; i++ {
+		require.NoError(t, errs[i])
+		require.EqualValues(t, i+1, ids[i], "each waiter must get its own id back")
+	}
 }
 
 // Parsing and releasing race in production: the writer parses while a deferred
