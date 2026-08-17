@@ -26,10 +26,7 @@ import (
 )
 
 const (
-	wsWriteWait       = 10 * time.Second
-	wsReconnectMin    = 1 * time.Second
-	wsReconnectMax    = 30 * time.Second
-	wsReconnectFactor = 2.0
+	wsWriteWait = 10 * time.Second
 )
 
 // Liveness windows. The peer must produce SOME traffic (a pong reply or a
@@ -47,6 +44,14 @@ const (
 var (
 	wsPingInterval = 30 * time.Second
 	wsPongWait     = 75 * time.Second
+
+	// Reconnect backoff ladder: the first retry waits wsReconnectMin, each
+	// further retry multiplies by wsReconnectFactor, and the wait saturates
+	// at wsReconnectMax. Same rationale as above — vars so tests can compress
+	// time, snapshotted into per-client fields at construction.
+	wsReconnectMin    = 1 * time.Second
+	wsReconnectMax    = 30 * time.Second
+	wsReconnectFactor = 2.0
 )
 
 // WsJsonRpcClient implements ClientInterface for WebSocket-based JSON-RPC upstream connections.
@@ -63,6 +68,14 @@ type WsJsonRpcClient struct {
 	// construction (before any goroutine starts).
 	pingInterval time.Duration
 	pongWait     time.Duration
+
+	// Reconnect backoff ladder, snapshotted from
+	// wsReconnectMin/wsReconnectMax/wsReconnectFactor at construction for
+	// the same reason: reconnect() runs in its own goroutine, so reading the
+	// package vars there would race any test that compresses them.
+	reconnectMin    time.Duration
+	reconnectMax    time.Duration
+	reconnectFactor float64
 
 	// Connection state
 	connMu sync.Mutex
@@ -164,6 +177,9 @@ func NewWsJsonRpcClient(
 		headers:         headers,
 		pingInterval:    wsPingInterval,
 		pongWait:        wsPongWait,
+		reconnectMin:    wsReconnectMin,
+		reconnectMax:    wsReconnectMax,
+		reconnectFactor: wsReconnectFactor,
 		projectId:       projectId,
 		upstream:        upstream,
 		appCtx:          appCtx,
@@ -569,7 +585,7 @@ func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
 }
 
 func (c *WsJsonRpcClient) reconnect() {
-	backoff := wsReconnectMin
+	backoff := c.reconnectMin
 	for {
 		if c.appCtx.Err() != nil {
 			return
@@ -584,9 +600,9 @@ func (c *WsJsonRpcClient) reconnect() {
 			case <-c.appCtx.Done():
 				return
 			}
-			backoff = time.Duration(float64(backoff) * wsReconnectFactor)
-			if backoff > wsReconnectMax {
-				backoff = wsReconnectMax
+			backoff = time.Duration(float64(backoff) * c.reconnectFactor)
+			if backoff > c.reconnectMax {
+				backoff = c.reconnectMax
 			}
 			continue
 		}
