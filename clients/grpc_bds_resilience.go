@@ -142,6 +142,11 @@ type bdsPool struct {
 	expectedChainId atomic.Uint64
 	stopCh          chan struct{}
 	stopOnce        sync.Once
+
+	// maintainWG joins the maintainer goroutine on Shutdown. Without it a
+	// tick already in flight can dial and install a replacement AFTER
+	// Shutdown walked the slots — that connection is then never closed.
+	maintainWG sync.WaitGroup
 }
 
 // newBdsPool builds a round-robin pool of poolSize independent connections.
@@ -201,6 +206,7 @@ func newBdsPool(
 			return nil, fmt.Errorf("BDS endpoint %s answers for chainId %d but this client expects chainId %d (cross-wired endpoint)", target, detected, expectedChainId)
 		}
 	}
+	p.maintainWG.Add(1)
 	go p.maintainLoop()
 	return p, nil
 }
@@ -231,6 +237,7 @@ func (p *bdsPool) verifyConn(ctx context.Context, c *bdsConn) (bool, uint64, err
 // Identity mismatches recycle immediately; age recycles are capped at one per
 // tick so the pool never churns in bulk. Exits on Shutdown / app shutdown.
 func (p *bdsPool) maintainLoop() {
+	defer p.maintainWG.Done()
 	ticker := time.NewTicker(bdsMaintainInterval)
 	defer ticker.Stop()
 	for {
@@ -492,10 +499,17 @@ func (p *bdsPool) replaceConn(c *bdsConn) {
 }
 
 // Shutdown stops the maintainer and closes every connection in the pool.
-// Idempotent. Takes the write lock to serialize with any in-flight
-// replaceConn (so we don't close a conn that's just been swapped out).
+// Idempotent. JOINS the maintainer before walking the slots: a tick already
+// in flight can dial and swap in a replacement, and a slot swapped after the
+// walk would leak its socket. Waiting happens OUTSIDE poolMu because the
+// maintainer takes that lock itself (swapInReplacement). The wait is bounded:
+// the maintainer's only blocking step is verifyConn, capped by
+// bdsVerifyTimeout. Takes the write lock afterwards to serialize with any
+// in-flight replaceConn (so we don't close a conn that's just been swapped
+// out).
 func (p *bdsPool) Shutdown() {
 	p.stopOnce.Do(func() { close(p.stopCh) })
+	p.maintainWG.Wait()
 	p.poolMu.Lock()
 	defer p.poolMu.Unlock()
 	for _, c := range p.conns {

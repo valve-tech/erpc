@@ -1263,6 +1263,74 @@ leaf validators something to reject, or drop the `error` return.
 
 ---
 
+## 53. The BDS pool leaks a connection when Shutdown races its maintainer
+
+**Status:** fixed-in-fork. **Severity: medium.** One leaked socket per race.
+
+`clients/grpc_bds_resilience.go:497` closed `stopCh` and then walked the
+connection slots. It never waited for the maintainer goroutine it started at
+`:204`.
+
+The maintainer wakes every `bdsMaintainInterval`, and a tick already in flight
+dials a replacement (`recycleConn`, `:290`) and swaps it into a slot
+(`swapInReplacement`, `:330`). Both steps run after `Shutdown` has read the
+slot it is about to overwrite. So a replacement installed after the walk is
+never closed, and its socket lives for the process lifetime.
+
+The window is one tick wide per pool, so it needs an unlucky shutdown. eRPC
+rebuilds clients on config reload, not only at process exit, so the leak
+accumulates across reloads on a long-lived process.
+
+The fix is a `sync.WaitGroup` on `bdsPool`: `Add(1)` before
+`go p.maintainLoop()`, `defer Done()` inside the loop, `Wait()` at the top of
+`Shutdown` — outside `poolMu`, because the maintainer takes that lock itself.
+The wait is bounded by `bdsVerifyTimeout`, the maintainer's only blocking step.
+
+The same missing join is why the maintainer could not be tested: without a
+happens-before edge, a test that compressed `bdsMaintainInterval` raced the
+maintainer's read of it, and `-race` said so. Pinned by
+`TestPoolShutdown_JoinsTheMaintainer`.
+
+## 54. `getHttpClient` uses the proxy client before checking the error
+
+**Status:** open. **Severity: low.** Latent; not reachable through today's
+config path.
+
+`clients/http_json_rpc_client.go:213-221`:
+
+```go
+client, err := c.proxyPool.GetClient()
+if c.isLogLevelTrace {
+    proxy, _ := client.Transport.(*http.Transport).Proxy(nil)   // :215
+    c.logger.Trace()....Msgf("using client from proxy pool")
+}
+if err != nil {                                                  // :218
+    ...
+    return c.httpClient
+}
+```
+
+`GetClient` returns `(nil, err)` when the pool holds no clients
+(`clients/proxy_pool_registry.go:24`). At trace level, line 215 dereferences
+that nil `*http.Client` before line 218 ever looks at `err`, and the request
+goroutine panics.
+
+Line 215 also asserts the transport type without the `, ok` form and calls
+`Proxy` without checking it is set, so a pool built with a plain
+`http.Client` panics there too.
+
+Today `createProxyPool` (`:70`) refuses a pool with no URLs, and
+`NewProxyPoolRegistry` propagates that error, so no empty pool ever reaches
+`GetClient`. The defect is the ordering, not the reachability: any future
+caller that builds a `ProxyPool` directly, or any pool that can empty at
+runtime, turns a logged error into a panic. Move the trace block below the
+error check.
+
+`TestProxyPool_GetClientOnAnEmptyPoolErrorsAndNamesThePool` pins the
+`GetClient` contract this depends on.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
@@ -1444,3 +1512,10 @@ reference, so an entry could be routed to another entry's chain.
   via `WriteTo`. This is a design fact.
 - **`MemoryConnector.WatchCounterInt64` is an inert no-op** (`data/memory.go:222`).
   Single process, no pub/sub needed. Every current caller selects with a timeout.
+- **The BDS maintainer recycles the FIRST over-age conn each tick**
+  (`clients/grpc_bds_resilience.go:277`). If a freshly dialled conn were
+  already over-age, slot 0 would be recycled every tick and later slots never.
+  It cannot happen: `bdsConnMaxAge` is 5 minutes and `bdsMaintainInterval` is
+  60 seconds, so a replacement always survives several ticks. Recorded because
+  the one-per-tick cap looks like starvation until those two constants are read
+  together. `TestMaintainLoop_AgeRecyclesAtMostOneConnPerTick` pins the cap.
