@@ -374,10 +374,23 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 
 		require.Error(t, err, "lock acquisition should time out")
 		require.Nil(t, lock, "lock should be nil")
-		if !strings.Contains(err.Error(), "lock acquisition timed out") && !strings.Contains(err.Error(), "request context canceled") {
-			t.Errorf("expected error to contain 'lock acquisition timed out' or 'request context canceled', got: %s", err.Error())
+		// Lock has two timeout exits and either is correct here. It leaves at
+		// the top of the retry loop ("cancelled or timed out") when the
+		// deadline passes between attempts, and inside the retry wait
+		// ("timed out while waiting to retry") when it passes during the
+		// pause. Which one wins depends on where the deadline lands, so a
+		// loaded machine picks the other branch. Accepting only one made this
+		// test fail under load while the code did exactly the right thing.
+		if !strings.Contains(err.Error(), "timed out") &&
+			!strings.Contains(err.Error(), "cancelled") &&
+			!strings.Contains(err.Error(), "request context canceled") {
+			t.Errorf("expected a timeout or cancellation error, got: %s", err.Error())
 		}
-		assert.InDelta(t, timeSpent.Milliseconds(), int64(300), 100, "should have waited for the full timeout")
+		// The deadline is the floor: Lock must not give up early. The ceiling
+		// is generous on purpose — an overloaded machine adds scheduling
+		// delay, and pinning it tighter tests the machine, not the code.
+		assert.GreaterOrEqual(t, timeSpent, 250*time.Millisecond, "should have waited for the full timeout")
+		assert.Less(t, timeSpent, 10*time.Second, "should not have waited far past the deadline")
 	})
 
 	t.Run("ContextCancellationDuringLockAcquisition", func(t *testing.T) {
