@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -293,9 +294,12 @@ func TestPostgreSQLConnector_WatchCleanupLeaksItsFallbackPoller(t *testing.T) {
 	require.NoError(t, err)
 	warmCleanup()
 	time.Sleep(500 * time.Millisecond)
-	runtime.GC()
 
-	base := runtime.NumGoroutine()
+	// Count the poller goroutines by their own stack frame rather than by
+	// runtime.NumGoroutine(). A process-wide count also moves when an
+	// unrelated goroutine (a pool health checker, a container client) starts
+	// or stops between the two samples, which made this test flake at 24 of 25.
+	base := countGoroutinesIn(t, pollerFrame)
 
 	cleanups := make([]func(), 0, watches)
 	for i := 0; i < watches; i++ {
@@ -309,12 +313,30 @@ func TestPostgreSQLConnector_WatchCleanupLeaksItsFallbackPoller(t *testing.T) {
 
 	// Give any goroutine that intends to exit a generous chance to do so.
 	time.Sleep(2 * time.Second)
-	runtime.GC()
-	after := runtime.NumGoroutine()
+	after := countGoroutinesIn(t, pollerFrame)
 
-	assert.GreaterOrEqual(t, after-base, watches,
+	assert.Equal(t, watches, after-base,
 		"upstream bug log entry 26: every stopped watch still leaks its fallback poller; "+
 			"if this fails because the leak was fixed, update the entry and delete this test")
+}
+
+// pollerFrame is the stack frame of the fallback poller WatchCounterInt64
+// spawns. Matching on it counts exactly those goroutines and nothing else.
+const pollerFrame = "data.(*PostgreSQLConnector).WatchCounterInt64.func1"
+
+// countGoroutinesIn reports how many live goroutines have frame on their stack.
+func countGoroutinesIn(t *testing.T, frame string) int {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, len(buf)*2)
+	}
+	return strings.Count(string(buf), frame)
 }
 
 // requireCounterValue waits for one state carrying want on the channel.
