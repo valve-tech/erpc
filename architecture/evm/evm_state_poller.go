@@ -1703,7 +1703,24 @@ func (e *EvmStatePoller) checkTraceDataProbe(ctx context.Context, block int64) (
 	return false, false, nil
 }
 
+var (
+	// errEarliestProbeUnsupported means the upstream does not implement the
+	// probe at all — every height answers "method not found". That is a missing
+	// capability, not a pruned history, so it must not become a block number.
+	errEarliestProbeUnsupported = errors.New("upstream does not support the availability probe")
+	// errEarliestBlockUnavailable means no block in the searched range answered
+	// the probe. Reporting a number here would claim the upstream retains
+	// history from that number upward, which the search did not observe.
+	errEarliestBlockUnavailable = errors.New("no block in the searched range answered the availability probe")
+)
+
 // binarySearchEarliest finds the first available block for the given probe in [low, high].
+//
+// It returns an error, rather than a block number, in the two cases where it
+// learned nothing: the upstream does not support the probe, and no probed block
+// answered. The caller treats an error as "bound unknown" and fails open. The
+// alternative — returning the converged value — reports the current tip as the
+// earliest retained block, which is the most restrictive bound possible.
 func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.EvmAvailabilityProbeType, low, high int64) (int64, error) {
 	eff := probe
 	if eff == "" {
@@ -1712,26 +1729,43 @@ func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.
 	if high < 0 {
 		return 0, nil
 	}
-	if low < 0 {
-		low = 0
+
+	// probeAt folds checkProbe's three-valued answer into (available, error).
+	// An unsupported probe is height-independent, so the first such answer
+	// settles the whole search and there is no point walking the range.
+	probeAt := func(block int64) (bool, error) {
+		ok, unsupported, err := e.checkProbe(ctx, eff, block)
+		if unsupported {
+			return false, fmt.Errorf("%w: probe=%s upstream=%s", errEarliestProbeUnsupported, eff, e.upstream.Config().Id)
+		}
+		// checkProbe's error is a pass-through: no probe implementation returns
+		// one today, each folding transport and JSON-RPC failures into
+		// "unavailable". The three `err != nil` checks below are therefore
+		// unreachable. They stay because checkProbe declares the error, and a
+		// probe that starts reporting one must abort the search rather than be
+		// read as "this height is pruned" — which is the bug this function had.
+		return ok, err
 	}
-	// Fast-path: block 0
-	if ok, _, err := e.checkProbe(ctx, eff, 0); err == nil && ok {
-		return 0, nil
-	} else if err != nil {
-		return 0, err
-	}
-	// Fast-path: block 1
-	if ok, _, err := e.checkProbe(ctx, eff, 1); err == nil && ok {
-		return 1, nil
-	} else if err != nil {
-		return 0, err
+
+	// Fast-path: block 0, then block 1.
+	for _, block := range []int64{0, 1} {
+		ok, err := probeAt(block)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return block, nil
+		}
 	}
 
 	l, r := low, high
+	// found records that r sits on a block the upstream answered for. The loop
+	// only ever moves r onto such a block, so found implies the converged value
+	// is available.
+	found := false
 	for l < r {
 		mid := l + (r-l)/2
-		ok, _, err := e.checkProbe(ctx, eff, mid)
+		ok, err := probeAt(mid)
 		if err != nil {
 			return 0, err
 		}
@@ -1745,8 +1779,22 @@ func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.
 			Msg("binary search iteration")
 		if ok {
 			r = mid
+			found = true
 		} else {
 			l = mid + 1
+		}
+	}
+	if !found {
+		// The loop never probes the value it converges on, so l is still
+		// unverified. An upstream that retains exactly the tip answers no
+		// midpoint, so this last probe is the only way to tell it apart from
+		// an upstream that answers nothing at all.
+		ok, err := probeAt(l)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return 0, fmt.Errorf("%w: probe=%s upstream=%s range=[%d,%d]", errEarliestBlockUnavailable, eff, e.upstream.Config().Id, low, high)
 		}
 	}
 	return l, nil
