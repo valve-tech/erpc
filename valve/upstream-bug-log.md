@@ -918,6 +918,67 @@ fails loudly once the guard is added.
 
 ---
 
+## 43. The missing-`evm` panic is six more vendors, not two
+
+**Status:** open. **Severity: medium.** Bootstrap crash instead of a config error.
+
+Entry 41 named Infura and Llama. A sweep of every `upstream.Evm` dereference in
+`thirdparty/` finds six more `GenerateConfigs` that read `upstream.Evm.ChainId`
+with no nil check, against eighteen that guard first:
+
+- `thirdparty/envio.go:223`
+- `thirdparty/erpc.go:116` and `thirdparty/erpc.go:134`
+- `thirdparty/etherspot.go:97`
+- `thirdparty/pimlico.go:176`
+- `thirdparty/routemesh.go:116`
+- `thirdparty/thirdweb.go:100`
+
+An operator who configures any of these six without an `evm` block crashes the
+process at bootstrap instead of reading which field is missing. eRPC's own
+vendor is the worst of the six: `erpc.go:116` sits on the preset-endpoint path,
+which is the normal way to configure it.
+
+The fix is the same one line the other eighteen already carry. Pinned by
+`TestSixVendors_GenerateConfigs_PanicOnAMissingEvmBlock`, which fails loudly
+once a guard lands.
+
+---
+
+## 44. Etherspot builds an endpoint with no host for an unknown chain
+
+**Status:** open. **Severity: medium.** A silent bad upstream, not a config error.
+
+`thirdparty/etherspot.go:126`. `generateUrl` declares `var etherspotURL string`
+and fills it only inside two `if` arms — one for a mainnet, one for a testnet. A
+chain in neither table leaves it empty. Nothing checks that, so the function
+formats `"?apikey=<key>"` and `url.Parse` accepts it without complaint.
+
+`GenerateConfigs` then returns success with `Endpoint: "?apikey=<key>"`. Every
+other vendor reports `"unsupported network chain ID for <vendor>: <id>"` here.
+
+An operator who names a chain Etherspot does not serve gets a registered
+upstream that can never connect, with no message saying why. Worse, the key is
+still in the string, so it reaches the logs of whatever tries to dial it.
+
+Pinned by
+`TestEtherspotVendor_GenerateConfigs_TheChainPicksTheHostAndAnUnknownChainPicksNone`.
+
+---
+
+## 45. QuickNode's endpoint walk holds one connection per page
+
+**Status:** open. **Severity: low.** The chainstack half of entry 42, unfixed.
+
+`thirdparty/quicknode.go:435`. `defer resp.Body.Close()` sits inside
+`fetchEndpoints`'s pagination loop, so every page's body stays open until the
+whole walk returns. This is the same defect entry 42 recorded for
+`chainstack.go:232`, which has since been repaired; QuickNode was not.
+
+An account with many endpoints holds one connection per 100-endpoint page for
+the length of the walk.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
