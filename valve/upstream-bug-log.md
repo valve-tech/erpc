@@ -976,6 +976,71 @@ whole walk returns. This is the same defect entry 42 recorded for
 
 An account with many endpoints holds one connection per 100-endpoint page for
 the length of the walk.
+## 46. The policy eval timeout races its own result, then throws it away
+
+**Status:** open. **Severity: high.** Verified under `-race`. An operator
+loses the "my policy is too slow" signal completely, and the existing
+`internal/policy/stdlib` suite flakes because of it.
+
+`internal/policy/slot.go:224-244`. `tickOnce` runs the eval on its own
+goroutine and shares two plain variables with it:
+
+```go
+var (
+    evalRes *EvalResult
+    evalErr error
+)
+done := make(chan struct{})
+go func() {
+    defer close(done)
+    evalRes, evalErr = runEval(...)          // :232 — writes evalErr
+}()
+
+if timeout > 0 {
+    select {
+    case <-done:
+    case <-time.After(timeout):
+        evalErr = fmt.Errorf("%w after %s", ErrEvalTimeout, timeout)  // :239
+        <-done                                // waits for the goroutine
+    }
+}
+```
+
+Two defects, one root cause.
+
+**The race.** On the timeout branch the parent writes `evalErr` at `:239`
+while the eval goroutine may write the same variable at `:232`. Nothing
+orders the two writes. The race detector reports exactly this pair.
+
+**The swallowed timeout.** The parent then blocks on `<-done`, so the
+goroutine's assignment lands **after** the parent's. A slow-but-successful
+eval overwrites `ErrEvalTimeout` with `nil`, and the slot proceeds to
+publish the late result as if it had arrived on time. A slow-and-failing
+eval reports the eval's own error instead. Either way `ErrEvalTimeout`
+never reaches the `Decision`, so `emitMetrics` cannot classify
+`kind="timeout"` and `selection_eval_errors_total{kind="timeout"}` is a
+counter that can never increment. `ErrEvalTimeout` is dead.
+
+An operator whose policy has grown past its `evalTimeout` therefore sees no
+error, no metric and no log — only a routing verdict computed from a stale
+snapshot, published later than the config allows.
+
+**How to see it.** Run `go test ./internal/policy/stdlib/ -race -count=2`.
+Those tests set `evalTimeout` to 50 ms; the stdlib primer alone costs about
+20 ms per fresh runtime under `-race`, so on a loaded machine the timeout
+fires and the race with it. The failures move around between runs — 8
+tests on one run, 1 on the next — which is the tell. `-count=1` usually
+passes.
+
+**Deliberately not pinned by a test**, on the same rule as entry 13: a test
+that asserts the correct behaviour fails today, and a test that asserts
+today's behaviour has to fire the timeout, which trips the race and fails
+the suite under `-race`. Fix first, then pin.
+
+The fix is small: have the goroutine publish through a result struct sent on
+a channel, and let the parent choose between the timeout error and the
+result. That removes the shared variables and makes the timeout the winner
+when it fires.
 
 ---
 
