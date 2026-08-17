@@ -918,6 +918,122 @@ fails loudly once the guard is added.
 
 ---
 
+## 43. A WebSocket client is sent an empty frame when a response cannot be written
+
+**Status:** open. **Severity: medium.** The client's call never resolves.
+
+`erpc/ws_server.go:583` — `writeNormalizedResponse` opens a frame with
+`NextWriter`, streams the response into it, and closes the frame. When
+`resp.WriteTo(w)` fails, eRPC logs at Debug and closes the frame anyway, so
+gorilla ships a complete text message with a zero-length payload.
+
+The client reads a message that is not JSON and carries no `id`. It cannot
+match it to a call and it cannot report an error, so the call waits for the
+client's own timeout. The HTTP path answers the same failure with a JSON-RPC
+error envelope (`erpc/http_server.go:1913` hands over to `writeFatalError`).
+
+Fix: on error, abandon the frame instead of closing it, or replace it with a
+JSON-RPC error carrying the request id.
+
+Pinned by `TestWsWriteNormalizedResponse_SendsAnEmptyFrameWhenItCannotSerialise`,
+which records the empty payload as the current behaviour.
+
+---
+
+## 44. The WebSocket batch writer discards every error it can produce
+
+**Status:** open. **Severity: medium.** No client signal, no server signal.
+
+`erpc/ws_server.go:641-644`:
+
+```go
+bw := NewBatchResponseWriter(responses)
+_, _ = bw.WriteTo(w)
+_ = w.Close()
+```
+
+`BatchResponseWriter.WriteTo` reports three distinct failures — a dead socket,
+an entry it cannot marshal, and a response with nothing to write. All three
+land here and all three are dropped. The client receives a truncated JSON array
+inside a complete text frame, which every JSON parser rejects, and the operator
+gets no log line at all. `writeNormalizedResponse` at least logs at Debug.
+
+Fix: log the error, and close the connection rather than shipping a frame the
+client cannot parse.
+
+Pinned by `TestWsWriteBatchResponse_AbandonsTheBatchWhenTheSocketDiesMidFrame`,
+which confirms eRPC stops writing but records nothing.
+
+---
+
+## 45. The "request premature context error" branch cannot run
+
+**Status:** open. **Severity: low.** An operator loses the log line.
+
+`erpc/http_server.go:770-780`:
+
+```go
+if err := httpCtx.Err(); err != nil {
+    if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+        cause := context.Cause(httpCtx)
+        ...
+        s.logger.Trace().Err(err).Msg("request premature context error")
+        writeFatalError(httpCtx, http.StatusInternalServerError, err)
+    }
+    ...
+}
+```
+
+`context.Context.Err()` returns exactly `context.Canceled` or
+`context.DeadlineExceeded` — that is the interface contract, and the otel
+wrappers between here and `r.Context()` delegate it unchanged. The inner block
+is therefore unreachable.
+
+Three consequences: `context.Cause` is never read, so a cancellation reason the
+code deliberately attaches is never surfaced; the trace line never prints, so an
+operator debugging "the client received nothing" has nothing to find; and
+`writeFatalError` never fires on this path. The response-release loop around it
+does run and is correct.
+
+Fix: read the cause unconditionally and log it, or delete the inner block.
+
+Pinned by `TestRequestHandler_WritesNothingWhenTheRequestContextIsAlreadyDone`,
+which covers the reachable half — eRPC releases the responses and writes
+nothing.
+
+---
+
+## 46. Three unreachable defensive branches in the WebSocket write path
+
+**Status:** open. **Severity: none.** Unexercised machinery.
+
+`erpc/ws_server.go:564`, `:598` and `:631` each guard
+`wsc.conn.SetWriteDeadline(...)` and give up on an error. gorilla's
+`Conn.SetWriteDeadline` (v1.5.3, `conn.go`) stores the deadline and returns
+`nil` unconditionally; it never touches the socket. All three branches are dead.
+
+The deadline itself is load-bearing and correct — only the error check is dead.
+
+---
+
+## 47. Two smaller write-path defects
+
+**Status:** open. **Severity: low.**
+
+- `erpc/http_batch_resp.go:71` — `fmt.Errorf("no bytes written for response %d
+  error: %w", i, err)` is reached only when `err == nil`, because the line above
+  returns on a non-nil `err`. Every message this produces ends in
+  `%!w(<nil>)`, and the error it wraps is always nothing.
+- `erpc/http_server.go:1909` and `:796`, both with `:864` — when a body fails
+  part-way through, `writeFatalError` calls `w.WriteHeader` a second time
+  (net/http logs "superfluous response.WriteHeader call") and appends a second
+  JSON document after the partial first one. With a dead socket nothing
+  arrives, so this is harmless; with a live socket and a non-transport failure
+  — an entry the batch writer cannot marshal, or a response with nothing to
+  write — the client receives one unparseable body.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
