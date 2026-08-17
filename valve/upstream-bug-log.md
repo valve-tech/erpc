@@ -1198,6 +1198,69 @@ The deadline itself is load-bearing and correct — only the error check is dead
   — an entry the batch writer cannot marshal, or a response with nothing to
   write — the client receives one unparseable body.
 
+## 53. The legacy upstream `failsafe:` object drops every key added since
+
+**Status:** pinned. **Severity: medium.**
+`TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys`
+(`common/config_backcompat_unmarshal_test.go`).
+
+`UpstreamConfig.UnmarshalYAML` (`common/config.go:1096`) decodes into a shadow
+struct. When that decode fails — which a legacy single-object `failsafe:`
+always causes — it falls back to `oldShadow` (`common/config.go:1123`) and
+copies field by field (`common/config.go:1150`).
+
+`oldShadow` has not grown with `UpstreamConfig`. It lacks
+`rateLimitCountMode` and `creditUnits`, so both are silently discarded for any
+upstream that still writes `failsafe:` as an object.
+
+An operator who configured credit-based rate limiting gets flat per-request
+counting instead. No warning, no error — their budget simply drains at the
+wrong rate. Every upstream key added after the fallback was written inherits
+the same fate.
+
+`NetworkDefaults.UnmarshalYAML` (`common/config.go:776`) and
+`NetworkConfig.UnmarshalYAML` (`common/config.go:2372`) have the same
+hand-listed fallback but escape the bug by accident: they decode into the
+RECEIVER, so the failed strict pass leaves the newer keys populated and the
+legacy pass only overwrites what it names. Fix the upstream path the same way,
+or the two shapes keep diverging.
+
+## 54. Two agent-name branches are shadowed and can never run
+
+**Status:** pinned. **Severity: low.**
+`TestSimplifyAgentName_EarlierBranchesShadowQuicknodeAndEdge`
+(`common/request_http_context_test.go`).
+
+`simplifyAgentName` (`common/request.go:1221`) is an ordered chain of substring
+tests. Two later branches are unreachable:
+
+- `"quicknode"` contains `"node"`, so the `node` test at
+  `common/request.go:1243` claims it first. The `quicknode` branch at
+  `common/request.go:1288` cannot run for any real QuickNode user agent.
+- Every Chromium browser sends `Chrome` in its user agent, so the `chrome`
+  test at `common/request.go:1261` claims Edge before the `edge` branch at
+  `common/request.go:1270`. Released Edge also spells itself `Edg/`, which
+  `"edge"` does not match at all.
+
+The operator sees no error. They see QuickNode SDK traffic filed under
+`nodejs` and Edge traffic filed under `chrome`, so a per-client breakdown
+names the wrong client. Order the specific tests before the general ones.
+
+## 55. Every failsafe defaulting error path in `common/defaults.go` is dead
+
+**Status:** open. **Severity: lowest.** No test, because no input reaches it.
+
+`FailsafeConfig.SetDefaults` (`common/defaults.go:2613`) can never return a
+non-nil error. Every leaf it calls — `TimeoutPolicyConfig`,
+`RetryPolicyConfig`, `HedgePolicyConfig`, `CircuitBreakerPolicyConfig`,
+`MisbehaviorsDestinationConfig` — returns a literal `nil` on every path, and
+`ConsensusPolicyConfig`'s only error comes from `MisbehaviorsDestinationConfig`.
+
+So every caller's wrapper is unreachable: `common/defaults.go:1061` and `:1074`
+(`policy #%d in failsafeForGets` / `ForSets`), `:1695`, `:1944`, `:1948`,
+`:1956`, `:1966`, `:2125`, `:2134`, `:2227` (`failsafe[%d]`). Either give the
+leaf validators something to reject, or drop the `error` return.
+
 ---
 
 # Redundant guards — not defects, recorded so they are not re-derived
@@ -1226,6 +1289,22 @@ unobservable. They are not bugs, and a test cannot pin them.
   redis, because the `Receive` confirmation at `:203` fails and the cleanup at
   `:207-211` clears `m.pubsub` anyway. The check saves a round trip; it does
   not decide the outcome.
+- `common/config.go:1117` and `common/config.go:2389` — the unknown-field guard
+  before each legacy-shape fallback. The legacy struct is a subset of the
+  strict one, so an unknown key fails both decodes and `return originalErr`
+  after the fallback produces the same error. Deleting either guard alone
+  changes nothing.
+- `common/defaults.go:1057` and `:1070` — `f.MatchMethod = "*"` for connector
+  failsafe policies, shadowed by the same default inside
+  `FailsafeConfig.SetDefaults` (`common/defaults.go:2619`).
+- `common/request.go:1225`, `:1228`, `:1234`, `:1237`, `:1249`, `:1255`,
+  `:1270`, `:1273`, `:1276`, `:1282` — the `curl`, `wget`, `insomnia`,
+  `httpie`, `java`, `ruby`, `edge`, `viem`, `ethers` and `alchemy` branches of
+  `simplifyAgentName`. For each client's canonical user agent the generic
+  first-word fallthrough already yields the same label, so the branch only
+  matters for the non-canonical spellings (`libcurl-agent/1.0`,
+  `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
+  path and these are optimisations, correctly.
 
 ---
 
