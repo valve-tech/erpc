@@ -1198,6 +1198,49 @@ The deadline itself is load-bearing and correct — only the error check is dead
   — an entry the batch writer cannot marshal, or a response with nothing to
   write — the client receives one unparseable body.
 
+## 53. A task started after shutdown wedges its whole Initializer
+
+**Status:** pinned. **Severity: high.** A hung shutdown and a hung request path.
+
+`util/initializer.go:298` runs every schedulable task under one
+`sync.WaitGroup`, and waits for all of them to *start* at `:397`. Each launched
+goroutine calls `wg.Done()` at `:346`, after it has built the task context.
+
+The goroutine returns early at `:337-342` when the app context is already
+cancelled — **without calling `wg.Done()`**. `attemptRemainingTasks` then blocks
+on `wg.Wait()` forever.
+
+The blast radius is the whole Initializer, not one task.
+`attemptRemainingTasks` takes `i.tasksMu` at `:299` and releases it through a
+`defer`, so the mutex is never released either. Every later `ExecuteTasks`
+(`:202`), `attemptRemainingTasks` and `Stop` (`:495`) on that Initializer blocks
+on the same mutex.
+
+One Initializer is shared across many resources (one bootstrap task per
+network/upstream), and `NetworksRegistry.GetNetwork` calls `ExecuteTasks` on the
+request path. So any request that races process shutdown — or any task
+scheduled after the app context is cancelled — strands every subsequent caller
+AND the shutdown sequence itself.
+
+The task's own state is recorded correctly (`TaskFailed`, with the context
+error); only the callers hang.
+
+Fix: call `wg.Done()` on that path too, or `defer wg.Done()` once at the top of
+the goroutine and drop the explicit call at `:346`.
+
+Pinned by `TestInitializer_AppContextAlreadyCancelledWedgesTheInitializer`,
+which asserts both the stranded `ExecuteTasks` and the stranded `Stop`.
+
+Adjacent, same function, **severity: low** — `util/initializer.go:376`. When a
+task returns `context.Canceled`, the handler tries
+`bt.lastErr.CompareAndSwap(nil, wrappedError{err: err})`. The CAS can never
+succeed: `:326` stored `wrappedError{err: nil}` into that `atomic.Value` before
+the attempt, so the current value is a `wrappedError`, never `nil`. The
+cancellation reason is dropped, and `Wait` (`:135`) substitutes
+`"task failed without specific error"`. The task is still counted as failed;
+only the reason is lost. Pinned by
+`TestInitializer_CancelledTaskIsReportedWithoutItsReason`.
+
 ---
 
 # Redundant guards — not defects, recorded so they are not re-derived
@@ -1205,6 +1248,14 @@ The deadline itself is load-bearing and correct — only the error check is dead
 Each of these is shadowed by another check, so a single-line mutation of it is
 unobservable. They are not bugs, and a test cannot pin them.
 
+- `consensus/rules.go:932` — the unassailable-lead short-circuit declines while
+  `preferNonEmpty` is set and the leading group is empty. The very next check at
+  `:936` already declines for any leader that is not non-empty, and both read the
+  same `best`. Unobservable.
+- `consensus/rules.go:103-105` — `prefer-highest-value-for` floors the agreement
+  threshold at 1. A response group always holds at least one response, so
+  `count < threshold` is already false for every threshold at or below 1. The
+  floor changes nothing.
 - `consensus/executor.go:1019` — empty-round guard, shadowed by `:1063`.
 - `consensus/executor.go:1200` — `continue`, unreachable given the guard at `:1205`.
 - `auth/authorizer.go:126` — empty-budget guard, shadowed by
