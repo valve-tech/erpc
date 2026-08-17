@@ -595,7 +595,7 @@ func pagedNodesServer(t *testing.T, pages int) (*httptest.Server, func() int) {
 // Holding them all open costs one connection per page for the whole walk,
 // which on a large account is a connection leak in everything but name.
 func TestChainstackFetchNodes_ReleasesEachPageBeforeTheNextRequest(t *testing.T) {
-	const pages = 4
+	const pages = 8
 	srv, maxOpen := pagedNodesServer(t, pages)
 	prev := chainstackNodesApiUrl
 	chainstackNodesApiUrl = srv.URL + "/"
@@ -608,6 +608,12 @@ func TestChainstackFetchNodes_ReleasesEachPageBeforeTheNextRequest(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Len(t, nodes, pages, "the walk must collect every page")
-	assert.Equal(t, 1, maxOpen(),
+	// The bound is 2, not 1. The decoder stops before the padding, so Go
+	// cannot return the connection to its pool and closes the socket instead.
+	// The server's ConnState hook can see the next StateNew before it sees
+	// that StateClosed, which shows up as a second connection. What matters
+	// is that the count stays flat: leave the close to the end of the walk
+	// and it becomes `pages`.
+	assert.LessOrEqual(t, maxOpen(), 2,
 		"page N's body must close before page N+1 is requested; deferring the close to the end of the walk holds one connection per page")
 }

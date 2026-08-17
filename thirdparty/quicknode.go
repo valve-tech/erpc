@@ -63,6 +63,11 @@ const DefaultQuicknodeCreditUnitsRecheckInterval = 7 * 24 * time.Hour
 // tests can point it at a mock server.
 var quicknodeApiCreditsBaseURL = "https://api.quicknode.com/v0/api-credits/" // #nosec G101 -- public API base URL, not a credential (gosec matches "Credits" in the name)
 
+// quicknodeEndpointsApiUrl is the paginated endpoint listing that
+// fetchEndpoints walks. Declared as a var so tests can point it at a mock
+// server, the same way alchemy, chainstack and drpc already do.
+var quicknodeEndpointsApiUrl = "https://api.quicknode.com/v0/endpoints"
+
 // CreditUnits implements common.CreditUnitsProvider: QuickNode's credit model
 // (account-accurate table from the Admin API when available, built-in
 // fallback otherwise), overridable per method via
@@ -386,7 +391,7 @@ func (v *QuicknodeVendor) fetchEndpoints(ctx context.Context, apiKey string, fil
 	var allEndpoints []*QuicknodeEndpoint
 
 	// Build URL with pagination
-	baseURL := "https://api.quicknode.com/v0/endpoints"
+	baseURL := quicknodeEndpointsApiUrl
 	limit := 100
 	offset := 0
 
