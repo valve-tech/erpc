@@ -1263,7 +1263,7 @@ leaf validators something to reject, or drop the `error` return.
 
 ---
 
-## 53. The BDS pool leaks a connection when Shutdown races its maintainer
+## 57. The BDS pool leaks a connection when Shutdown races its maintainer
 
 **Status:** fixed-in-fork. **Severity: medium.** One leaked socket per race.
 
@@ -1291,7 +1291,7 @@ happens-before edge, a test that compressed `bdsMaintainInterval` raced the
 maintainer's read of it, and `-race` said so. Pinned by
 `TestPoolShutdown_JoinsTheMaintainer`.
 
-## 54. `getHttpClient` uses the proxy client before checking the error
+## 58. `getHttpClient` uses the proxy client before checking the error
 
 **Status:** open. **Severity: low.** Latent; not reachable through today's
 config path.
