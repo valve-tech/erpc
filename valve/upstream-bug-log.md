@@ -550,8 +550,10 @@ Pinned by `TestDynamoDBConnector_WatchCounterNonPositivePollInterval`.
 
 ## 26. Watch cleanup can panic with send-on-closed-channel
 
-**Status:** open. **Severity: medium.** Not pinned — a deterministic
-reproduction needs to interpose on a network read.
+**Status:** open. **Severity: medium.** The PostgreSQL goroutine leak is now
+pinned. The panic itself is not, and cannot be: a panic in a background
+goroutine kills the test binary, so a test that triggers it fails the whole
+package instead of recording anything.
 
 - **DynamoDB** (`data/dynamodb.go:757-759`): `cleanup` runs `close(done)` then
   `close(updates)`. The polling goroutine can be inside `getSimpleValue` — a
@@ -571,6 +573,11 @@ network torn down — can therefore crash the process.
 
 The LISTEN broadcast path at `:909-916` is safe: `cleanup` removes the watcher
 under `listener.mu` before closing.
+
+The PostgreSQL goroutine leak is pinned by
+`TestPostgreSQLConnector_WatchCleanupLeaksItsFallbackPoller`: it starts 25
+watches on one key, stops all 25, and asserts the goroutine count stays up by
+25. Fixing the leak makes the test fail, which is the point.
 
 ---
 
@@ -1041,6 +1048,42 @@ The fix is small: have the goroutine publish through a result struct sent on
 a channel, and let the parent choose between the timeout error and the
 result. That removes the shared variables and makes the timeout the winner
 when it fires.
+## 47. A PostgreSQL listener connection is never released
+
+**Status:** open. **Severity: high.** Shared-state watches stop working once
+the process has watched `maxConns` distinct counter keys.
+
+`getOrCreateListener` (`data/postgresql.go:872`) takes one connection out of
+the listener pool per watched key — `connectListener` at `:880`, which calls
+`listenerPool.Acquire` at `:975` — and stores the listener in `p.listeners`
+(`:923`). Nothing ever gives that connection back.
+
+- `WatchCounterInt64`'s cleanup (`:692-706`) removes the caller's channel from
+  `listener.watchers` and closes it. It does not touch the listener, its
+  goroutine, or its connection.
+- The listener's reconnect branch (`:896-899`) overwrites `conn` with a fresh
+  one and never calls `Release()` on the old one, so every reconnect leaks
+  another pooled connection.
+- `p.listeners` (`:84`) has no `Delete` anywhere in the file.
+
+The listener pool is built with `MaxConns = p.maxConns` (`:957`). Once the
+connector has seen `maxConns` distinct keys, `Acquire` blocks. `connectListener`
+then retries every 5 seconds forever (`:976-979`), and `WatchCounterInt64`
+returns only when the caller's context ends — with
+`failed to create listener: context deadline exceeded`.
+
+eRPC watches one counter per tracked value per network, so a fleet with more
+networks than `maxConns` reaches the limit during normal startup. An operator
+sees shared-state watches fail one by one, with nothing reported at boot.
+
+Measured against a live container with `maxConns` 3: three watches succeed,
+all three cleanups run, and the fourth watch times out.
+
+Pinned by `TestPostgreSQLConnector_ListenerPoolIsExhaustedByWatchedKeys`.
+
+Related dead code in the same struct: `pgxListener.conn` (`:99`) is written at
+`:922` and never read. The reconnect branch does not update it either, so it
+would hand out a released connection if anything ever did read it.
 
 ---
 
@@ -1060,6 +1103,16 @@ unobservable. They are not bugs, and a test cannot pin them.
 - `clients/http_json_rpc_client.go:233` and `:341` — duplicate cancelled-request
   checks; `architecture/svm/handler.go:63` and `hooks.go:703` likewise. Both
   pairs are deliberate defence in depth.
+- `data/grpc.go:190-193` — the duplicate-server guard in the bootstrap task.
+  Dropping it lets the second server overwrite the first in
+  `clientByNetwork`, and both outcomes leave exactly one client that a caller
+  cannot tell apart. `TestNewGrpcConnector_TwoServersForOneChainLeaveOneClient`
+  covers the branch; no assertion can kill a mutation of it.
+- `data/redis_pubsub_manager.go:193` — the ping health check in
+  `reconnectPubSub`. Removing it does not install a subscription on a dead
+  redis, because the `Receive` confirmation at `:203` fails and the cleanup at
+  `:207-211` clears `m.pubsub` anyway. The check saves a round trip; it does
+  not decide the outcome.
 
 ---
 
