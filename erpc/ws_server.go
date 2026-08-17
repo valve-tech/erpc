@@ -553,6 +553,15 @@ func (wsc *WsConnection) isMethodAllowed(method string) bool {
 // wsWriteDeadline is the timeout applied to all WebSocket write operations.
 const wsWriteDeadline = 10 * time.Second
 
+// KEPT DELIBERATELY: the three `SetWriteDeadline(...) != nil` checks below are
+// unreachable with gorilla/websocket v1.5.3, whose Conn.SetWriteDeadline stores
+// the value and returns nil without touching the socket (conn.go:787). They stay
+// because the error is part of gorilla's published signature, and the net.Conn
+// deadline setters it names do report errors on a closed connection. If a later
+// gorilla delegates to the underlying conn, dropping the check would leave the
+// write unbounded — reintroducing exactly the writeMu starvation the comments
+// below describe. Three unexercised branches are the cheaper side of that trade.
+
 func (wsc *WsConnection) writeJSON(v interface{}) error {
 	wsc.writeMu.Lock()
 	defer wsc.writeMu.Unlock()

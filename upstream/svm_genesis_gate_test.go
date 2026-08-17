@@ -141,3 +141,30 @@ func TestSvmGenesisGate_UnknownClusterThatOptedInStillFailsClosed(t *testing.T) 
 	require.Error(t, u.svmVerifyGenesisHash(ctx),
 		"checkGenesisHash:true must not degrade to a best-effort check")
 }
+
+// TestSvmGenesisGate_RejectsAResultThatIsNotAHash covers the decode step. A
+// node that answers getGenesisHash with a number rather than a base58 string
+// speaks JSON-RPC well enough for Forward to call it a success, so the decode
+// is the only thing between that answer and a registered upstream.
+func TestSvmGenesisGate_RejectsAResultThatIsNotAHash(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	gock.New(svmTestEndpoint).
+		Post("").
+		Persist().
+		Filter(gockBodyContains("getGenesisHash")).
+		Reply(200).
+		JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":12345}`))
+
+	u := newSvmUpstream(t, &common.SvmUpstreamConfig{Chain: "solana", Cluster: "mainnet-beta"})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	err := u.svmVerifyGenesisHash(ctx)
+
+	require.Error(t, err, "a non-string result must not be registered as a genesis hash")
+	// Discriminating: the mismatch branch reports "genesis hash mismatch". This
+	// one has to say the result could not be read at all, or an operator goes
+	// looking for a cluster problem that is not there.
+	assert.Contains(t, err.Error(), "decode genesis hash")
+}

@@ -211,6 +211,31 @@ func TestBatchResponseWriter_ReportsAResponseItCannotStream(t *testing.T) {
 		"the array is left unterminated, which is exactly why the error must reach the caller")
 }
 
+// silentWriter accepts every call, reports zero bytes taken, and never errors.
+// That breaks io.Writer's contract, which is the point: it stands in for a
+// writer that swallows the batch without saying so.
+type silentWriter struct{}
+
+func (silentWriter) Write(p []byte) (int, error) { return 0, nil }
+
+// TestBatchResponseWriter_ReportsAnEntryThatWroteNothing covers the writer that
+// takes an entry and reports zero bytes without an error. The batch would
+// otherwise be counted as sent while the client received nothing, so the writer
+// has to say so — and say what happened, which means naming the entry rather
+// than formatting the nil error the caller already ruled out.
+func TestBatchResponseWriter_ReportsAnEntryThatWroteNothing(t *testing.T) {
+	_, err := NewBatchResponseWriter([]interface{}{
+		jsonRpcResponse(t, 1, "0x1"),
+	}).WriteTo(silentWriter{})
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no bytes written for response 0")
+	// Discriminating: this path is only reachable when err is nil, so any %w
+	// verb here renders as the literal below and tells the reader nothing.
+	require.NotContains(t, err.Error(), "%!w(<nil>)",
+		"the message wraps an error that is always nil")
+}
+
 // TestBatchResponseWriter_StopsAndReportsWhenTheClientHangsUp walks the write
 // failure across every position in the entry loop. Each stop must return the
 // transport error, and the count must never claim more bytes than the socket

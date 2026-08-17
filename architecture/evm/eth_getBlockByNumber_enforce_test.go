@@ -61,13 +61,25 @@ func TestBuildGetBlockByNumberRequest(t *testing.T) {
 		}
 	})
 
-	// UPSTREAM-CANDIDATE BUG, pinned as-is: the type switch accepts float64 —
-	// the type every JSON-decoded number arrives as — but common.NormalizeHex
-	// rejects it, so the branch can only ever produce an error. See the report.
-	t.Run("Float64IsAcceptedByTheSwitchThenRejected", func(t *testing.T) {
-		_, err := BuildGetBlockByNumberRequest(float64(436), false)
-		require.Error(t, err, "current behaviour: the float64 case in the switch is dead")
-		assert.Contains(t, err.Error(), "invalid block number or tag")
+	// float64 is the type every JSON-decoded number arrives as, so it has to
+	// render as hex like the integer types do. common.NormalizeHex has no
+	// float64 case, so the builder converts before calling it.
+	t.Run("NormalizesAJsonDecodedNumberToHex", func(t *testing.T) {
+		jrq, err := BuildGetBlockByNumberRequest(float64(436), false)
+		require.NoError(t, err)
+		assert.Equal(t, "0x1b4", jrq.Params[0])
+	})
+
+	t.Run("RejectsAFloatThatIsNotAWholeBlockNumber", func(t *testing.T) {
+		// A fraction, a negative height and a value past float64's exact
+		// integer range are all block references we cannot honour. Guessing a
+		// nearby integer would send the node a different block than the caller
+		// asked for.
+		for _, v := range []float64{436.5, -1, 1 << 54} {
+			_, err := BuildGetBlockByNumberRequest(v, false)
+			require.Error(t, err, "%v", v)
+			assert.Contains(t, err.Error(), "invalid block number or tag")
+		}
 	})
 
 	t.Run("RejectsAnUnknownTag", func(t *testing.T) {

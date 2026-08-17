@@ -679,25 +679,40 @@ func TestBinarySearchEarliest(t *testing.T) {
 		assert.Equal(t, len(up.allCalls()), up.callCount("eth_getBlockByNumber"))
 	})
 
-	// UPSTREAM-CANDIDATE BUG, pinned as-is so a fix has to be deliberate:
-	// when NO block in [low, high] answers the probe, the loop converges on
-	// `high` and returns it without ever probing `high`. The upstream is then
-	// recorded as retaining history from `high` upwards — i.e. exactly the tip —
-	// instead of signalling "nothing detected". See the report.
-	t.Run("NothingAvailableStillReportsHighAsEarliest", func(t *testing.T) {
+	// An upstream that answers nothing must not be recorded as retaining the
+	// tip. The search reports the failure so the caller fails open.
+	t.Run("NothingAvailableIsAnError", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return false }))
 		p := newGateTestPoller(t, up)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, 1024)
-		require.NoError(t, err)
-		assert.Equal(t, int64(1024), got,
-			"current behaviour: an upstream that answers nothing is reported as holding only the tip")
+		require.ErrorIs(t, err, errEarliestBlockUnavailable)
+		assert.Equal(t, int64(0), got)
+		// Discriminating: the loop converges on `high` without probing it, so
+		// the conclusion "nothing is available" is only sound once `high`
+		// itself has been asked.
+		assert.Contains(t, strings.Join(up.methodCalls("eth_getBlockByNumber"), "\n"), `"0x400"`,
+			"the search must probe the value it converges on (1024) before giving up")
 	})
 
-	// Same shape via the unsupported flag: binarySearchEarliest ignores it, so
-	// a node without a tracing engine looks like a node that pruned everything.
-	t.Run("UnsupportedProbeIsIndistinguishableFromPrunedHistory", func(t *testing.T) {
+	// The one case the post-loop probe rescues: the node kept exactly the tip.
+	// Every midpoint answers "no", so only probing `high` can find it.
+	t.Run("EarliestEqualToHighIsStillFound", func(t *testing.T) {
+		const tip = int64(1024)
+		up := newForwardingUpstream(123)
+		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= tip }))
+		p := newGateTestPoller(t, up)
+
+		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, tip)
+		require.NoError(t, err)
+		assert.Equal(t, tip, got)
+	})
+
+	// A node with no tracing engine answers -32601 at every height. That is a
+	// missing capability, not a pruned history, and the two must not collapse
+	// into the same answer.
+	t.Run("UnsupportedProbeIsReportedAsUnsupported", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return true }))
 		notFound := func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
@@ -709,16 +724,27 @@ func TestBinarySearchEarliest(t *testing.T) {
 		p := newGateTestPoller(t, up)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeTraceData, 0, 2048)
-		require.NoError(t, err)
-		assert.Equal(t, int64(2048), got,
-			"current behaviour: an unsupported probe narrows the bound to the tip")
+		require.ErrorIs(t, err, errEarliestProbeUnsupported)
+		assert.Equal(t, int64(0), got)
+		// Discriminating: the first unsupported answer settles it, so the
+		// search must stop instead of walking log2(2048) more heights.
+		assert.Less(t, up.callCount("trace_block"), 3,
+			"an unsupported probe must abort the search, not walk the range")
 	})
 
-	// NOTE: the `if low < 0 { low = 0 }` clamp has no observable effect. Every
-	// caller passes low = 0, and with a negative low the midpoints stay
-	// non-negative anyway, so the search converges on the same answer and sends
-	// the same requests. A test for it would pass with the clamp deleted, so
-	// there is none. See the report.
+	t.Run("AnUnknownProbeTypeIsUnsupported", func(t *testing.T) {
+		up := newForwardingUpstream(123)
+		p := newGateTestPoller(t, up)
+
+		got, err := p.binarySearchEarliest(context.Background(), common.EvmAvailabilityProbeType("magic"), 0, 2048)
+		require.ErrorIs(t, err, errEarliestProbeUnsupported)
+		assert.Equal(t, int64(0), got)
+		assert.Empty(t, up.allCalls(), "an unknown probe must not forward anything")
+	})
+
+	// NOTE: `binarySearchEarliest` is unexported and its single production
+	// caller passes low = 0 literally, so a negative `low` cannot occur. The
+	// old `if low < 0 { low = 0 }` clamp was therefore unreachable and is gone.
 }
 
 // --- PollEarliestBlockNumber ---

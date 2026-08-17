@@ -768,14 +768,19 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		defer writeResponseSpan.End()
 
 		if err := httpCtx.Err(); err != nil {
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				cause := context.Cause(httpCtx)
-				if cause != nil {
-					err = cause
-				}
-				s.logger.Trace().Err(err).Msg("request premature context error")
-				writeFatalError(httpCtx, http.StatusInternalServerError, err)
+			// httpCtx.Err() answers exactly context.Canceled or
+			// context.DeadlineExceeded, so filtering for a third error skipped
+			// every request. The reason lives in the cause instead — the
+			// timeout handler attaches ErrHandlerTimeout, the network executor
+			// attaches ErrDynamicTimeoutExceeded — so read it unconditionally.
+			// This log line is all an operator gets: eRPC deliberately writes
+			// nothing once the request is over (see
+			// TestRequestHandler_WritesNothingWhenTheRequestContextIsAlreadyDone),
+			// and the outer TimeoutHandler already owns the response body.
+			if cause := context.Cause(httpCtx); cause != nil {
+				err = cause
 			}
+			s.logger.Debug().Err(err).Msg("request context ended before the response was written")
 			// Ensure we do not retain responses when the request context is done
 			for _, resp := range responses {
 				if v, ok := resp.(*common.NormalizedResponse); ok && v != nil {

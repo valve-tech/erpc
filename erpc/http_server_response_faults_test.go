@@ -1,17 +1,21 @@
 package erpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/util"
 	"github.com/h2non/gock"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +29,13 @@ import (
 // returns its handler. Call it, then hand the handler a faultResponseWriter.
 func faultResponseHandler(t *testing.T) http.Handler {
 	t.Helper()
+	return faultResponseHandlerWithLogger(t, log.Logger)
+}
+
+// faultResponseHandlerWithLogger is faultResponseHandler with the server's
+// logger supplied, so a test can read what the handler reported.
+func faultResponseHandlerWithLogger(t *testing.T, logger zerolog.Logger) http.Handler {
+	t.Helper()
 
 	util.ResetGock()
 	t.Cleanup(util.ResetGock)
@@ -34,7 +45,6 @@ func faultResponseHandler(t *testing.T) http.Handler {
 		Reply(200).
 		JSON(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": "0x7b"})
 
-	logger := log.Logger
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -201,4 +211,51 @@ func TestRequestHandler_WritesNothingWhenTheRequestContextIsAlreadyDone(t *testi
 	require.Zero(t, w.Writes(), "eRPC wrote %d times to a request that is already over", w.Writes())
 	require.Zero(t, w.HeaderWrites(), "committing a status here would be a superfluous write")
 	require.Empty(t, w.Bytes())
+}
+
+// lockedBuffer collects log output from the handler goroutine and the response
+// releasers it spawns.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestRequestHandler_ReportsWhyTheRequestContextEnded is the other half of the
+// test above. eRPC writes nothing, which is correct, so the only thing an
+// operator debugging "the client received nothing" can find is the log line.
+// httpCtx.Err() only ever says "canceled" or "deadline exceeded"; the reason
+// lives in the cause the canceller attached, so the handler has to read it.
+func TestRequestHandler_ReportsWhyTheRequestContextEnded(t *testing.T) {
+	// The test harness disables logging globally; this test reads a log line.
+	prev := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
+
+	var out lockedBuffer
+	h := faultResponseHandlerWithLogger(t, zerolog.New(&out).Level(zerolog.DebugLevel))
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("upstream pool drained mid-flight"))
+
+	w := newFaultResponseWriter()
+	require.NotPanics(t, func() { h.ServeHTTP(w, faultRequest(singleCall).WithContext(ctx)) })
+
+	// Discriminating: "context canceled" alone is what Err() already said and
+	// tells the operator nothing. Only the cause names what happened.
+	require.Contains(t, out.String(), "upstream pool drained mid-flight",
+		"the cancellation cause the caller attached never reached the operator")
+	require.Zero(t, w.Writes(), "reporting the cause must not start writing a body")
+	require.Zero(t, w.HeaderWrites())
 }

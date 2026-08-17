@@ -22,6 +22,14 @@ import (
 const (
 	RedisDriverName         = "redis"
 	redisReverseIndexPrefix = "rvi"
+
+	// Redis answers TTL with -2 when the key is gone and -1 when it has no
+	// expiry. go-redis converts both with time.Duration(n) and skips the unit
+	// multiplier it applies to real TTLs (command.go, DurationCmd.readReply),
+	// so they arrive as -2ns and -1ns. Comparing them against -2*time.Second
+	// never matches.
+	redisTTLKeyMissing = time.Duration(-2)
+	redisTTLNoExpiry   = time.Duration(-1)
 )
 
 var _ Connector = &RedisConnector{}
@@ -406,13 +414,13 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 
 			if ttlErr != nil {
 				r.logger.Debug().Err(ttlErr).Str("key", resolvedKey).Msg("failed to check TTL for resolved key")
-			} else if ttl == -2*time.Second {
+			} else if ttl == redisTTLKeyMissing {
 				// Key doesn't exist (Redis returns -2 when key doesn't exist); treat as a miss
 				r.logger.Debug().Str("key", resolvedKey).Msg("resolved key from reverse index no longer exists")
 				err := common.NewErrRecordNotFound(partitionKey, rangeKey, RedisDriverName)
 				common.SetTraceSpanError(span, err)
 				return nil, err
-			} else if ttl == -1*time.Second {
+			} else if ttl == redisTTLNoExpiry {
 				// Key exists but has no TTL (persistent key), which is fine
 				r.logger.Trace().Str("key", resolvedKey).Msg("resolved key has no TTL (persistent)")
 			} else if ttl > 0 {

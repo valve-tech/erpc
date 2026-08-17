@@ -1178,7 +1178,15 @@ func shouldCacheResponse(
 		return false, nil
 	}
 
-	size := rpcResp.ResultLength()
+	// NormalizedResponse.JsonRpcResponse() answers (nil, nil) for a nil
+	// response, so both arguments can arrive nil together. ResultLength and
+	// GetResultBytes below lock the receiver and panic on a nil pointer, so the
+	// nil case is decided here — before either call — rather than in the
+	// isEmpty expression further down, which never got the chance to run.
+	size := 0
+	if rpcResp != nil {
+		size = rpcResp.ResultLength()
+	}
 	// Check if the response size is within the limits
 	if !policy.MatchesSizeLimits(size) {
 		lg.Debug().Int("size", size).Msg("skip caching because response size does not match policy limits")
@@ -1210,7 +1218,10 @@ func shouldCacheResponse(
 			}
 		}
 	}
-	result := rpcResp.GetResultBytes()
+	var result []byte
+	if rpcResp != nil {
+		result = rpcResp.GetResultBytes()
+	}
 	// Check if we should cache empty results
 	isEmpty := resp == nil || rpcResp == nil || result == nil || resp.IsObjectNull() || resp.IsResultEmptyish()
 	// Never cache an empty result for a not-yet-produced (future) block: the block

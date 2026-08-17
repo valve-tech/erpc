@@ -3,6 +3,7 @@ package evm
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,20 @@ func BuildGetBlockByNumberRequest(blockNumberOrTag interface{}, includeTransacti
 				return nil, fmt.Errorf("invalid block number or tag for eth_getBlockByNumber: %v", v)
 			}
 		}
-	case int, int64, float64:
+	case float64:
+		// A JSON-decoded number arrives as float64, and common.NormalizeHex has
+		// no float64 case. Convert here, but only when the value is a whole
+		// block height float64 represents exactly — rounding a fraction or a
+		// value past 2^53 would send the node a different block than the caller
+		// asked for.
+		if v != math.Trunc(v) || v < 0 || v > 1<<53 {
+			return nil, fmt.Errorf("invalid block number or tag for eth_getBlockByNumber: %v", v)
+		}
+		bkt, err = common.NormalizeHex(int64(v))
+		if err != nil {
+			return nil, fmt.Errorf("invalid block number or tag for eth_getBlockByNumber: %v", v)
+		}
+	case int, int64:
 		bkt, err = common.NormalizeHex(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid block number or tag for eth_getBlockByNumber: %v", v)
