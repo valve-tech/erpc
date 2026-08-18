@@ -246,3 +246,68 @@ func TestNewHttpServer_ResolvesResponseHeadersAtStartupAndSkipsEmptyOnes(t *test
 	}, srv.resolvedResponseHeaders,
 		"an unset variable must drop the header, not emit it empty")
 }
+
+// TestStart_RefusesToServePlaintextWhenTlsCannotBeLoaded is the failure an
+// operator meets after rotating a certificate to a path that is not there.
+// Start must abort: a server that fell back to plaintext on port 443 would
+// serve every request unencrypted while the config still said TLS.
+func TestStart_RefusesToServePlaintextWhenTlsCannotBeLoaded(t *testing.T) {
+	logger := log.Logger
+	port := 0
+	missing := filepath.Join(t.TempDir(), "not-written.pem")
+
+	v4 := &HttpServer{
+		serverV4: &http.Server{},
+		serverCfg: &common.ServerConfig{
+			ListenV4:   util.BoolPtr(true),
+			HttpHostV4: util.StringPtr("127.0.0.1"),
+			HttpPortV4: &port,
+			TLS:        &common.TLSConfig{Enabled: true, CertFile: missing, KeyFile: missing},
+		},
+	}
+	err := v4.Start(&logger)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to create TLS config")
+	require.Nil(t, v4.serverV4.TLSConfig, "no TLS config may be installed when loading it failed")
+
+	v6 := &HttpServer{
+		serverV6: &http.Server{},
+		serverCfg: &common.ServerConfig{
+			ListenV6:   util.BoolPtr(true),
+			HttpHostV6: util.StringPtr("::1"),
+			HttpPortV6: &port,
+			TLS:        &common.TLSConfig{Enabled: true, CertFile: missing, KeyFile: missing},
+		},
+	}
+	err = v6.Start(&logger)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to create TLS config")
+}
+
+// TestStart_ReportsAPortItCannotBind is the other startup failure, and the one
+// that proves Start really waits on its listener goroutine. A port already in
+// use has to end the process, not leave it running with no listener — the
+// supervisor would keep a dead node in rotation.
+func TestStart_ReportsAPortItCannotBind(t *testing.T) {
+	logger := log.Logger
+
+	// Hold the port for the length of the test so the bind below cannot win.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer held.Close()
+	port := held.Addr().(*net.TCPAddr).Port
+
+	srv := &HttpServer{
+		serverV4: &http.Server{},
+		serverCfg: &common.ServerConfig{
+			ListenV4:   util.BoolPtr(true),
+			HttpHostV4: util.StringPtr("127.0.0.1"),
+			HttpPortV4: &port,
+		},
+	}
+
+	err = srv.Start(&logger)
+	require.Error(t, err, "Start must return the listener's failure, not nil")
+	require.Contains(t, err.Error(), "IPv4 server error")
+	require.Contains(t, err.Error(), "address already in use")
+}
