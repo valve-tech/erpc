@@ -102,9 +102,16 @@ func buildIntegrityNetwork(t *testing.T, ctx context.Context) *Network {
 	// Seed a finalized head so corroboration's per-finality verdict is
 	// deterministic (any block below this is finalized). Harmless for the
 	// intrinsic-check tests, which don't consult finality.
+	//
+	// Seeded, not suggested. SuggestFinalizedBlock hands the write to a
+	// goroutine behind a TryLock and returns; a suggestion that arrives while
+	// an earlier one is in flight is dropped, not queued. Dropping it here
+	// leaves the finalized head at 0, every block reads as unfinalized, and
+	// corroboration silently stops running — the wrong receipt is then served
+	// and the test fails on the value, not on the cause.
 	for _, ups := range upr.GetNetworkUpstreams(ctx, util.EvmNetworkId(123)) {
 		if sp := ups.EvmStatePoller(); sp != nil && !sp.IsObjectNull() {
-			sp.SuggestFinalizedBlock(0x11117FFF)
+			seedEvmFinalizedHead(t, ctx, upr, ups, 0x11117FFF)
 		}
 	}
 	return ntw
