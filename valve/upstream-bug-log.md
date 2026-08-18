@@ -1792,6 +1792,85 @@ trial permit**. The breaker then stays open until the process restarts.
 The per-batch-entry goroutine captured `architecture` and `chainId` by
 reference, so an entry could be routed to another entry's chain.
 
+## G. The state poller dereferences a nil response it just tested for
+
+**Status:** upstream candidate. `architecture/evm/evm_state_poller.go:1303`
+and `:1368`.
+
+Both `fetchBlock` and `fetchSyncingState` do this:
+
+```go
+jrr, err := resp.JsonRpcResponse()
+if err != nil { return 0, 0, err }
+if jrr == nil || jrr.Error != nil {
+    return 0, 0, jrr.Error        // <- nil pointer dereference when jrr == nil
+}
+```
+
+`NormalizedResponse.JsonRpcResponse` returns `(nil, nil)` for a nil receiver
+(`common/response.go:315`), so `jrr` is nil exactly when `Forward` answered
+`(nil, nil)`. That pair is reachable: `Upstream.Forward` logs it by name —
+"upstream request ended with nil response and nil error"
+(`upstream/upstream.go:~803`) — and then returns `nrs, nil` with `nrs` nil,
+which `failsafeExecutor.Run` passes straight through.
+
+The guard's own author meant to return the error member. Instead the poller
+panics inside the `Poll` fan-out goroutine, which has no recover, so the
+process dies. An operator sees eRPC exit with a SIGSEGV stack in
+`(*EvmStatePoller).fetchBlock` and no upstream named in the log.
+
+The same shape in the three availability probes
+(`evm_state_poller.go:1568`, `:1616`, `:1666`) is written safely — it returns
+`(false, false, nil)` — so the two poll helpers are the odd ones out.
+`TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported` pins the
+safe form.
+
+## H. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
+
+**Status:** upstream candidate, latent. `architecture/evm/json_rpc_cache.go:818`.
+
+`shouldCacheResponse` documents and guards the nil case explicitly
+(`json_rpc_cache.go:1181-1189`: "both arguments can arrive nil together").
+Its caller does not. With `resp == nil` and a policy whose empty behaviour is
+`only` or `allow`, `shouldCacheResponse` returns `true`, and the very next
+line runs `rpcResp.GetResultBytes()` on a nil `*JsonRpcResponse`.
+
+The only production caller guards with `if resp != nil`
+(`erpc/networks.go:2394`), so it cannot fire today — but that caller also
+wraps the goroutine in a recover, which is what would keep the process alive
+if it ever did. Either the guard at 818 is missing or the guard inside
+`shouldCacheResponse` is unnecessary; the two disagree.
+
+## I. Four dead branches found while raising `architecture/evm` coverage
+
+**Status:** upstream candidates, all cosmetic-to-behaviour but each hides a
+guard that reads as active.
+
+1. **`json_rpc_cache.go:565-586`** — the `CacheEmptyBehaviorIgnore` arm of the
+   post-fan-out emptiness switch cannot run. Every winner is filtered by the
+   identical condition inside the fan-out goroutine at `:375`
+   (`jrr.IsResultEmptyish() && policy.EmptyState() == Ignore` reports a miss
+   and returns), so no emptyish-under-ignore result ever reaches `:563`.
+   Five statements of miss telemetry that never fire.
+2. **`evm_state_poller.go:365-367`** — the `else` arm of the syncing-failure
+   handler. It runs only when the local `skip` is true, but `skip` is read at
+   `:324` and the function returns at `:335` whenever it is true. The
+   `if !skip` at `:360` is therefore always taken.
+3. **`eth_getLogs.go:280-282`** — capping the split threshold by
+   `getLogsMaxAllowedRange` can never change the outcome. The cap only applies
+   when `threshold > maxRange`, and a split needs `requestRange > threshold`,
+   which implies `requestRange > maxRange` — already rejected with an error at
+   `:254`.
+4. **`eth_getLogs.go:224`** — `topicCount = 1` for a scalar `topics[0]` is
+   unobservable. The only reader is `topicCount > maxTopics` with
+   `maxTopics > 0`, so a count of one can never reject.
+
+Also confirmed unreachable, and correctly documented as such in the source:
+`evm_state_poller.go:1769` and `:1793` (`binarySearchEarliest`'s pass-through
+of a `checkProbe` error no probe implementation produces).
+
+---
+
 ---
 
 # Not a bug — recorded so it is not "fixed" by mistake
