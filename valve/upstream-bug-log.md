@@ -1532,6 +1532,12 @@ unobservable. They are not bugs, and a test cannot pin them.
   strict one, so an unknown key fails both decodes and `return originalErr`
   after the fallback produces the same error. Deleting either guard alone
   changes nothing.
+- `common/defaults.go:1462` and `:1402` — the "failed to convert upstream
+  (id: %s) to provider" wrap, written twice on the same error path: once inside
+  `convertUpstreamToProvider` and once around the call. Removing either alone
+  leaves the operator with the same message; removing both drops the upstream
+  id, which
+  `TestConvertUpstreamToProvider_UnknownVendorAbortsTheLoad` catches.
 - `common/request.go:279` and `:289` — the nil-receiver guards in
   `NormalizedRequest.CreditUnitsTotal` and `CreditUnitsByVendor`. `ExecState()`
   already returns nil for a nil request, and `ExecState.CreditUnitsTotal`
