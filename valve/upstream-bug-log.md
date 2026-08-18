@@ -1551,6 +1551,38 @@ cannot be determined, so that is what goes on the wire now. Pinned by
 
 ---
 
+## 88. `go vet ./...` fails on a copied `sync.Map` in a test helper
+
+**Status:** open. **Severity: low.** The repo's own vet gate is red.
+
+```
+$ go vet ./...
+erpc/query_executor_test.go:341:60: call of setUnexportedField copies lock value: sync.Map contains sync.noCopy
+```
+
+The helper builds an atomic snapshot, stores into it, then passes it BY VALUE:
+
+```go
+atomicMap := &sync.Map{}
+atomicMap.Store(networkID, upstreams)
+setUnexportedField(t, registry, "networkUpstreamsAtomic", *atomicMap)
+```
+
+A `sync.Map` holds a mutex and pointers to its own internal maps. Copying one
+after a `Store` duplicates the mutex state and shares the internal `dirty` map
+with the original. Here the original is dropped immediately, so the test passes
+— but the pattern is exactly what `sync.noCopy` marks as forbidden.
+
+This predates the fuzzing work (it arrived with `70a1f17`, the unified
+selection policy commit) and is unrelated to it. It is recorded because it
+makes `go vet ./...` non-zero for every contributor, which trains people to
+ignore vet output.
+
+`setUnexportedField` already takes an `interface{}`, so passing `atomicMap`
+instead of `*atomicMap` — and reading the field as a pointer — clears it.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
