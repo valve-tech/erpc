@@ -11118,13 +11118,29 @@ func setupTestNetworkWithFullAndArchiveNodeUpstreams(
 	)
 	assert.NoError(t, err)
 
-	_ = upstreamsRegistry.BootstrapAndWait(ctx)
+	// This helper KEEPS the fire-and-forget Bootstrap and its naps, unlike every
+	// other setup in this package. Swapping in BootstrapAndWait changes what the
+	// tests see, not just when they see it: with both upstreams registered
+	// before PrepareUpstreamsForNetwork, the full node joins the eligible set
+	// earlier and the getLogs splitter chunks against a different upstream's
+	// threshold, so
+	// TestNetwork_EvmGetLogs/UseCacheWhenOneOfSubRequestsIsAlreadyCached asks
+	// for a sub-range none of its mocks cover.
+	//
+	// Measured (2026-08): with BootstrapAndWait that subtest fails whenever it
+	// runs after TestServedTip in the same process at -count=3; with the naps
+	// it passes. The tests here were written against a partly-registered fleet
+	// and need their mocks rewritten before this helper can be converted —
+	// that is a behaviour change, not a flakiness fix.
+	upstreamsRegistry.Bootstrap(ctx)
+	time.Sleep(100 * time.Millisecond)
 
 	err = upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	assert.NoError(t, err)
 
 	err = network.Bootstrap(ctx)
 	assert.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
 
 	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upstreamsRegistry)
 	upstreamsRegistry.OverrideOrderForTest(util.EvmNetworkId(123))
