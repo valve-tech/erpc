@@ -134,8 +134,7 @@ func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConf
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(50 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 
 	require.NoError(t, network.Bootstrap(ctx))
@@ -146,8 +145,7 @@ func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConf
 	upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 	for _, ups := range upsList {
 		require.NoError(t, ups.Bootstrap(ctx))
-		ups.EvmStatePoller().SuggestLatestBlock(1000)
-		ups.EvmStatePoller().SuggestFinalizedBlock(900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, ups, 1000, 900)
 	}
 	expectedCount := len(upstreamConfigs)
 	// Wait until the registry returns every configured upstream — the
@@ -325,43 +323,91 @@ func upstreamHostFromID(id string) string { return "http://" + id + ".localhost"
 var statePollerHeads = map[string][2]int64{}
 
 // seedEvmHeads writes an upstream's latest and finalized heads and returns only
-// once both are readable. It is the deterministic alternative to
-// `Suggest*Block` + `require.Eventually`.
+// once both are readable. It is the deterministic replacement for
+// `Suggest*Block` followed by a sleep or an `Eventually`.
 //
-// `SuggestFinalizedBlock` cannot be waited on reliably. It hands the write to a
-// goroutine, and it takes `finalizedUpdateInProgress` with TryLock — so a
+// A suggestion cannot be waited on. `SuggestFinalizedBlock` hands the write to
+// a goroutine and takes `finalizedUpdateInProgress` with TryLock, so a
 // suggestion issued while an earlier one is still in flight is DROPPED, not
-// queued. When the drop happens the value does not arrive late, it never
-// arrives, and no ceiling on `Eventually` can rescue it. That is what timed the
+// queued. `SuggestLatestBlock` routes a major forward jump through an
+// out-of-band chain-identity check that drops on the same kind of contention.
+// When the drop happens the value does not arrive late — it never arrives, and
+// no ceiling on `Eventually` can rescue it. That is what timed the
 // fallback-tier test out at 20.26s under `make test-fast`.
 //
 // The shared counters the poller reads are ordinary registry objects keyed by
 // upstream, and `GetCounterInt64` returns the instance the poller already holds.
 // Writing them through `TryUpdate` is synchronous, so the caller can assert the
-// value instead of waiting for it. The read-back below also pins the key
-// formula: if it ever drifts from the poller's, this fails at once and loudly
-// rather than seeding an orphan counter.
+// value instead of waiting for it. The read-back also pins the key formula: if
+// it ever drifts from the poller's, this fails at once and loudly rather than
+// seeding an orphan counter.
+//
+// Three entry points share one write:
+//
+//	seedEvmHeads         — both heads, each asserted
+//	seedEvmLatestHead    — latest only, asserted
+//	seedEvmFinalizedHead — finalized only, asserted
+//	writeEvmHeadCounter  — no assertion; returns the value the counter settled
+//	                       on, for a test that drives a retreat the counter is
+//	                       EXPECTED to reject
 //
 // Callers that also let a poll land must pin the mock heads to the SAME numbers
 // via `statePollerHeads`; otherwise the poll writes its own value over the seed.
-func seedEvmHeads(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry, up *upstream.Upstream, latest, finalized int64) {
+func seedEvmHeads(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, latest, finalized int64) {
 	t.Helper()
+	seedEvmLatestHead(t, ctx, reg, up, latest)
+	seedEvmFinalizedHead(t, ctx, reg, up, finalized)
+}
 
-	ssr := reg.SharedStateRegistry()
-	require.NotNil(t, ssr, "upstreams registry has no shared state registry")
+// seedEvmLatestHead seeds only the latest head. Use it where the test says
+// nothing about the finalized head; seeding a finalized value the test never
+// asked for is an extra commitment the assertions do not cover.
+func seedEvmLatestHead(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, latest int64) {
+	t.Helper()
+	got := writeEvmHeadCounter(t, ctx, reg, up, evmLatestHeadCounter, latest)
+	require.Equal(t, latest, got,
+		"seeded latest head is not visible on %s — shared-counter key formula drifted?", up.Id())
+}
 
-	counter := func(kind string) data.CounterInt64SharedVariable {
-		key := data.CounterValueSchemaVersion + "/" + kind + "/" + common.UniqueUpstreamKey(up)
-		return ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback)
-	}
-	counter("latestBlock").TryUpdate(ctx, latest)
-	counter("finalizedBlock").TryUpdate(ctx, finalized)
+// seedEvmFinalizedHead seeds only the finalized head.
+func seedEvmFinalizedHead(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, finalized int64) {
+	t.Helper()
+	got := writeEvmHeadCounter(t, ctx, reg, up, evmFinalizedHeadCounter, finalized)
+	require.Equal(t, finalized, got,
+		"seeded finalized head is not visible on %s — shared-counter key formula drifted?", up.Id())
+}
+
+const (
+	evmLatestHeadCounter    = "latestBlock"
+	evmFinalizedHeadCounter = "finalizedBlock"
+)
+
+// writeEvmHeadCounter writes one shared head counter and returns the value the
+// counter settled on. `TryUpdate` decides the write before it returns, so the
+// caller never waits. The counter is monotonic within its rollback tolerance,
+// so a retreat inside that tolerance settles on the OLD value — callers that
+// drive a deliberate retreat read the return value instead of asserting it.
+func writeEvmHeadCounter(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, kind string, value int64) int64 {
+	t.Helper()
+	require.NotNil(t, reg.SharedStateRegistry(), "upstreams registry has no shared state registry")
+	return setEvmHeadCounter(ctx, reg.SharedStateRegistry(), up, kind, value)
+}
+
+// setEvmHeadCounter is the same write for fixture builders that hold the shared
+// state registry directly and have no *testing.T to report through.
+func setEvmHeadCounter(ctx context.Context, ssr data.SharedStateRegistry, up common.EvmUpstream, kind string, value int64) int64 {
+	key := data.CounterValueSchemaVersion + "/" + kind + "/" + common.UniqueUpstreamKey(up)
+	ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback).TryUpdate(ctx, value)
 
 	sp := up.EvmStatePoller()
-	require.Equal(t, latest, sp.LatestBlock(),
-		"seeded latest head is not visible on %s — shared-counter key formula drifted?", up.Id())
-	require.Equal(t, finalized, sp.FinalizedBlock(),
-		"seeded finalized head is not visible on %s — shared-counter key formula drifted?", up.Id())
+	switch kind {
+	case evmLatestHeadCounter:
+		return sp.LatestBlock()
+	case evmFinalizedHeadCounter:
+		return sp.FinalizedBlock()
+	default:
+		panic("unknown evm head counter " + kind)
+	}
 }
 
 func mockStatePollerForHost(host string) {
@@ -1042,18 +1088,15 @@ func setupSelectionPolicyNetworkWithEval(t *testing.T, ctx context.Context, upst
 		rateLimitersRegistry, upstreamsRegistry, metricsTracker, policyEngine)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(50 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 
 	upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 	for _, ups := range upsList {
 		require.NoError(t, ups.Bootstrap(ctx))
-		ups.EvmStatePoller().SuggestLatestBlock(1000)
-		ups.EvmStatePoller().SuggestFinalizedBlock(900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, ups, 1000, 900)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	resetGockHits()
 	return network

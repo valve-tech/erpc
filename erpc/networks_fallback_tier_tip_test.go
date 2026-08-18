@@ -188,11 +188,9 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 			rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 		require.NoError(t, upstreamsRegistry.GetInitializer().WaitForTasks(ctx))
 		require.NoError(t, network.Bootstrap(ctx))
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)

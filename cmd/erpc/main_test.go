@@ -23,6 +23,31 @@ import (
 
 var mainMutex sync.Mutex
 
+// waitForServer probes baseURL until the process answers it.
+//
+// Booting eRPC means reading a config, building every registry and binding a
+// socket. The old code slept a flat 100ms and then made ONE request, which is
+// a bet on how long that takes on the busiest machine that ever runs this
+// test. Probing costs nothing when the server is already up — the first probe
+// returns — and the deadline below is a failure deadline, not a wait.
+func waitForServer(t *testing.T, baseURL string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for {
+		resp, err := http.Get(baseURL)
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			t.Fatalf("expected server to be running on %s, last error: %v", baseURL, lastErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Test default command with real config file, using config flag arg
 func TestMain_Default_FlagConfigFile(t *testing.T) {
 	mainMutex.Lock()
@@ -41,14 +66,8 @@ func TestMain_Default_FlagConfigFile(t *testing.T) {
 	os.Args = []string{"erpc-test", "--config", f.Name()}
 	go main()
 
-	time.Sleep(100 * time.Millisecond)
-
-	// check if the server is running
-	if _, err := http.Get(localBaseUrl); err != nil {
-		t.Fatalf("expected server to be running, got %v", err)
-	} else {
-		t.Logf("server is running on %s", localBaseUrl)
-	}
+	waitForServer(t, localBaseUrl)
+	t.Logf("server is running on %s", localBaseUrl)
 }
 
 // Test default command with real config file, using positional config arg
@@ -69,12 +88,7 @@ func TestMain_Default_PositionalConfigFile(t *testing.T) {
 	os.Args = []string{"erpc-test", f.Name()}
 	go main()
 
-	time.Sleep(100 * time.Millisecond)
-
-	// check if the server is running
-	if _, err := http.Get(localBaseUrl); err != nil {
-		t.Fatalf("expected server to be running, got %v", err)
-	}
+	waitForServer(t, localBaseUrl)
 }
 
 // Test start command with real config file, using config flag arg
@@ -95,12 +109,7 @@ func TestMain_Start_FlagConfigFile(t *testing.T) {
 	os.Args = []string{"erpc-test", "start", "--config", f.Name()}
 	go main()
 
-	time.Sleep(100 * time.Millisecond)
-
-	// check if the server is running
-	if _, err := http.Get(localBaseUrl); err != nil {
-		t.Fatalf("expected server to be running, got %v", err)
-	}
+	waitForServer(t, localBaseUrl)
 }
 
 // Test start command with real config file, using positional config arg
@@ -121,12 +130,7 @@ func TestMain_Start_PositionalConfigFile(t *testing.T) {
 	os.Args = []string{"erpc-test", "start", f.Name()}
 	go main()
 
-	time.Sleep(100 * time.Millisecond)
-
-	// check if the server is running
-	if _, err := http.Get(localBaseUrl); err != nil {
-		t.Fatalf("expected server to be running, got %v", err)
-	}
+	waitForServer(t, localBaseUrl)
 }
 
 func TestMain_Start_MissingConfigFile(t *testing.T) {

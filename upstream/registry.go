@@ -118,6 +118,23 @@ func (u *UpstreamsRegistry) Bootstrap(ctx context.Context) {
 	}()
 }
 
+// BootstrapAndWait registers the configured upstreams on the caller's own
+// goroutine and returns once every registration task has settled. It runs the
+// same work Bootstrap runs, minus the goroutine.
+//
+// Bootstrap is fire-and-forget by design, so no caller can tell when
+// registration finished — the only signal is a log line. A caller that must
+// observe a registered upstream before it does anything else has nothing to
+// wait on, and waiting a fixed duration instead is a guess. This is that
+// signal.
+//
+// The error is the initializer's: it reports the tasks that failed this
+// attempt. The auto-retry loop keeps retrying them afterwards either way, so a
+// caller that tolerates a partly-registered fleet may ignore it.
+func (u *UpstreamsRegistry) BootstrapAndWait(ctx context.Context) error {
+	return u.registerUpstreams(ctx, u.upsCfg...)
+}
+
 func (u *UpstreamsRegistry) NewUpstream(cfg *common.UpstreamConfig) (*Upstream, error) {
 	// Warn about deprecated upstream-level eth_getLogs hard limits that are ignored now
 	if cfg != nil && cfg.Evm != nil {

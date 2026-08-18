@@ -78,8 +78,7 @@ func TestEarliestDetection_FailOpenWhenNoEarliestConfigured(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(150 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -192,8 +191,7 @@ func TestEarliestDetection_BlocksRequestAfterSuccessfulDetection(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(300 * time.Millisecond) // Allow detection to complete
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -288,15 +286,13 @@ func TestEarliestDetection_InitialDetectionAlwaysRunsOnBootstrap(t *testing.T) {
 
 	// Now bootstrap - detection should still run despite existing shared state value
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(300 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	time.Sleep(200 * time.Millisecond)
 
 	// Should have at least 1 detection call (initial detection on bootstrap)
 	calls := atomic.LoadInt32(&detectionCalls)
@@ -380,7 +376,6 @@ func TestEarliestDetection_SchedulerHandlesPeriodicUpdates(t *testing.T) {
 	network.PinUpstreamOrderForTest()
 
 	// Get initial call count after bootstrap
-	time.Sleep(300 * time.Millisecond)
 	initialCalls := atomic.LoadInt32(&detectionCalls)
 
 	// Wait for scheduler to run a few times (updateRate = 200ms)
@@ -471,8 +466,7 @@ func TestEarliestDetection_InvalidRangeTriggersFailOpen(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -637,8 +631,7 @@ func TestEarliestDetection_StaleHighValueInSharedState(t *testing.T) {
 
 	// NOW bootstrap upstream - detection should find ~13M and OVERRIDE the stale 46M value
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(500 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Create network and bootstrap
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
@@ -646,7 +639,6 @@ func TestEarliestDetection_StaleHighValueInSharedState(t *testing.T) {
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	time.Sleep(300 * time.Millisecond)
 
 	// The counter should now have been updated to the detected value (around 13M)
 	currentValue := staleCounter.GetValue()

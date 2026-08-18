@@ -87,10 +87,9 @@ func TestConsensusPolicy(t *testing.T) {
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 				// upstream 1 is leader
-				ups[0].EvmStatePoller().SuggestLatestBlock(500)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 500)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
+				seedEvmLatestHead(t, ctx, reg, ups[2], 100)
 			},
 		},
 		{
@@ -378,10 +377,9 @@ func TestConsensusPolicy(t *testing.T) {
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 				// Set unique leader: upstream 1 has highest latest block
-				ups[0].EvmStatePoller().SuggestLatestBlock(300)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 300)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
+				seedEvmLatestHead(t, ctx, reg, ups[2], 100)
 			},
 		},
 		{
@@ -402,10 +400,9 @@ func TestConsensusPolicy(t *testing.T) {
 			expectedResult: &expectedResult{jsonRpcResult: `"0xleader"`},
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
-				ups[0].EvmStatePoller().SuggestLatestBlock(300)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 300)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
+				seedEvmLatestHead(t, ctx, reg, ups[2], 100)
 			},
 		},
 		{
@@ -426,10 +423,9 @@ func TestConsensusPolicy(t *testing.T) {
 			expectedResult: &expectedResult{jsonRpcResult: `"0xagreed"`},
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
-				ups[0].EvmStatePoller().SuggestLatestBlock(300)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				ups[2].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 300)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
+				seedEvmLatestHead(t, ctx, reg, ups[2], 100)
 			},
 		},
 		{
@@ -449,9 +445,8 @@ func TestConsensusPolicy(t *testing.T) {
 			expectedResult: &expectedResult{jsonRpcResult: `"0xleader"`},
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
-				ups[0].EvmStatePoller().SuggestLatestBlock(300)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 300)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
 			},
 		},
 		{
@@ -471,9 +466,8 @@ func TestConsensusPolicy(t *testing.T) {
 			expectedError: &expectedError{code: common.ErrCodeConsensusLowParticipants, contains: "not enough participants"},
 			setupFn: func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry) {
 				ups := reg.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
-				ups[0].EvmStatePoller().SuggestLatestBlock(300)
-				ups[1].EvmStatePoller().SuggestLatestBlock(100)
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[0], 300)
+				seedEvmLatestHead(t, ctx, reg, ups[1], 100)
 			},
 		},
 		{
@@ -2993,8 +2987,7 @@ func setupNetworkForConsensusTest(t *testing.T, ctx context.Context, tc consensu
 	)
 	require.NoError(t, err)
 
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	require.NoError(t, err)
 	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upsReg)

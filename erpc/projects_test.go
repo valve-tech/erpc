@@ -103,8 +103,7 @@ func TestProject_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		prj, err := prjReg.GetProject("prjA")
 		if err != nil {
@@ -238,8 +237,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		// Mock an upstream request that will definitely exceed 50 ms.
 		gock.New("http://rpc1.localhost").
@@ -347,8 +345,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		// Mock a delay that exceeds the 50ms network timeout
 		gock.New("http://rpc2.localhost").
@@ -470,8 +467,7 @@ func TestProject_LazyLoadNetworkDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create ProjectsRegistry: %v", err)
 		}
-		reg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = reg.BootstrapAndWait(ctx)
 
 		// Get the project. Next, we'll forward a request to "evm:9999".
 		prj, err := reg.GetProject("test_lazy_load")
@@ -587,8 +583,7 @@ func TestProject_NetworkAlias(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		prj, err := prjReg.GetProject("prjA")
 		if err != nil {

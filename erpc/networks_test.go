@@ -143,8 +143,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 		err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -248,8 +247,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
@@ -281,7 +279,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -376,8 +373,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2, up3}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
@@ -415,7 +411,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -493,8 +488,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -513,7 +507,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -587,8 +580,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -608,7 +600,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -673,8 +664,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -693,7 +683,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -773,8 +762,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -802,7 +790,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -885,8 +872,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -905,7 +891,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -991,8 +976,7 @@ func TestNetwork_Forward(t *testing.T) {
 			panic(err)
 		}
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -1020,7 +1004,6 @@ func TestNetwork_Forward(t *testing.T) {
 			t.Fatal(err)
 		}
 		ntw.Bootstrap(ctx)
-		time.Sleep(50 * time.Millisecond)
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
 		fakeReq := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xabc","latest"],"id":1}`))
@@ -1139,8 +1122,7 @@ func TestNetwork_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 		err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1237,8 +1219,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1362,8 +1343,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1516,8 +1496,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1681,8 +1660,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1836,8 +1814,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -1900,11 +1877,8 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
-		poller := pup1.EvmStatePoller()
-		poller.SuggestLatestBlock(9)
-		poller.SuggestFinalizedBlock(8)
+		seedEvmHeads(t, ctx, upr, pup1, 9, 8)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -2038,8 +2012,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -2100,19 +2073,11 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
-		poller1 := pup1.EvmStatePoller()
-		poller1.SuggestLatestBlock(9)
-		poller1.SuggestFinalizedBlock(8)
-
-		poller2 := pup2.EvmStatePoller()
-		poller2.SuggestLatestBlock(9)
-		poller2.SuggestFinalizedBlock(8)
+		seedEvmHeads(t, ctx, upr, pup1, 9, 8)
+		seedEvmHeads(t, ctx, upr, pup2, 9, 8)
 
 		pup1.EvmStatePoller().SetSyncingState(common.EvmSyncingStateSyncing)
-
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -2248,8 +2213,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -2308,15 +2272,9 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
-		poller1 := pup1.EvmStatePoller()
-		poller1.SuggestLatestBlock(9)
-		poller1.SuggestFinalizedBlock(8)
-
-		poller2 := pup2.EvmStatePoller()
-		poller2.SuggestLatestBlock(9)
-		poller2.SuggestFinalizedBlock(8)
+		seedEvmHeads(t, ctx, upr, pup1, 9, 8)
+		seedEvmHeads(t, ctx, upr, pup2, 9, 8)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -2440,8 +2398,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -2500,15 +2457,9 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
-		poller1 := pup1.EvmStatePoller()
-		poller1.SuggestLatestBlock(9)
-		poller1.SuggestFinalizedBlock(8)
-
-		poller2 := pup2.EvmStatePoller()
-		poller2.SuggestLatestBlock(9)
-		poller2.SuggestFinalizedBlock(8)
+		seedEvmHeads(t, ctx, upr, pup1, 9, 8)
+		seedEvmHeads(t, ctx, upr, pup2, 9, 8)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -2630,8 +2581,7 @@ func TestNetwork_Forward(t *testing.T) {
 		})
 
 		upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		_ = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 
 		// Create clients
@@ -2796,8 +2746,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -2858,17 +2807,9 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
-		poller1 := pup1.EvmStatePoller()
-		poller1.SuggestLatestBlock(9)
-		poller1.SuggestFinalizedBlock(8)
-
-		poller2 := pup2.EvmStatePoller()
-		poller2.SuggestLatestBlock(9)
-		poller2.SuggestFinalizedBlock(8)
-
-		time.Sleep(100 * time.Millisecond)
+		seedEvmHeads(t, ctx, upr, pup1, 9, 8)
+		seedEvmHeads(t, ctx, upr, pup2, 9, 8)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -3007,8 +2948,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -3061,7 +3001,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -3200,8 +3139,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -3254,7 +3192,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -3383,8 +3320,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -3439,7 +3375,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -3597,8 +3532,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -3663,7 +3597,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -3818,8 +3751,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 			t.Fatal(err)
 		}
@@ -3871,7 +3803,6 @@ func TestNetwork_Forward(t *testing.T) {
 		}
 
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -4009,8 +3940,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4060,7 +3990,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -4197,8 +4126,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4248,7 +4176,6 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// Bootstrap the network and make the simulated request
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upr)
 		upr.OverrideOrderForTest(util.EvmNetworkId(123))
@@ -4366,8 +4293,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4498,8 +4424,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4654,8 +4579,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4804,8 +4728,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -4936,8 +4859,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5059,8 +4981,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 		)
 
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 
 		err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
@@ -5177,8 +5098,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5310,8 +5230,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5439,8 +5358,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5573,8 +5491,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5713,8 +5630,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -5866,8 +5782,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6017,8 +5932,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6168,8 +6082,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6302,8 +6215,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6443,8 +6355,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		time.Sleep(50 * time.Millisecond)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
@@ -6589,8 +6500,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6734,8 +6644,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -6872,8 +6781,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -7009,8 +6917,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -7161,8 +7068,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatal(err)
@@ -7316,8 +7222,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatalf("Failed to prepare upstreams for network: %v", err)
@@ -7452,8 +7357,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatalf("Failed to prepare upstreams for network: %v", err)
@@ -7574,8 +7478,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatalf("Failed to prepare upstreams for network: %v", err)
@@ -7696,8 +7599,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		err = upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		if err != nil {
 			t.Fatalf("Failed to prepare upstreams for network: %v", err)
@@ -7806,8 +7708,7 @@ func TestNetwork_Forward(t *testing.T) {
 			nil,
 		)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		err = upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, networkID)
 		assert.NoError(t, err)
@@ -7868,7 +7769,6 @@ func TestNetwork_Forward(t *testing.T) {
 		allMethods := []string{"eth_getLogs", "eth_traceTransaction", "eth_call"}
 
 		upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, networkID)
-		time.Sleep(2 * time.Second)
 
 		upstreamsRegistry.RefreshUpstreamNetworkMethodScores()
 		time.Sleep(2 * time.Second)
@@ -8010,8 +7910,7 @@ func TestNetwork_Forward(t *testing.T) {
 			mt,
 			nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 
 		ntw, err := NewNetwork(
 			ctx,
@@ -8421,9 +8320,7 @@ func TestNetwork_Forward(t *testing.T) {
 
 		// seed the poller with our two known block heights
 		ups := network.upstreamsRegistry.GetNetworkUpstreams(ctx, "evm:123")[0]
-		poller := ups.EvmStatePoller()
-		poller.SuggestLatestBlock(9)
-		poller.SuggestFinalizedBlock(8)
+		seedEvmHeads(t, ctx, network.upstreamsRegistry, ups, 9, 8)
 
 		// prepare the JSON‑RPC request
 		reqBody := []byte(`{
@@ -9233,6 +9130,15 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		// KEEP THIS SLEEP (below) until someone finds a real gate for it. It
+		// waits out the state poller's 1s head-staleness debounce so the
+		// getLogs range check re-polls and sees 0x11119999. Measured
+		// (2026-08): delete it and the subtest still PASSES — it falls into
+		// the best-effort branch below and asserts only "block not found",
+		// so it stops testing the enforced re-poll it is named for.
+		// Shrinking the upstream's statePollerDebounce instead does NOT work:
+		// the extra polls consume the single-use 0x11119999 mock before the
+		// request reaches it.
 		network := setupTestNetworkWithFullAndArchiveNodeUpstreams(t, ctx, common.EvmNodeTypeArchive, 0, common.EvmNodeTypeFull, 128, nil)
 
 		network.cfg.Evm.Integrity = &common.EvmIntegrityConfig{
@@ -9261,7 +9167,6 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 			}
 		}
 
-		// Wait for state poller debounce to pass
 		time.Sleep(1010 * time.Millisecond)
 
 		// Disable auto-splitting so we only issue a single getLogs call covered by mocks
@@ -9651,12 +9556,10 @@ func TestNetwork_EvmGetLogs(t *testing.T) {
 			network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 			require.NoError(t, err)
 
-			upstreamsRegistry.Bootstrap(ctx)
-			time.Sleep(200 * time.Millisecond)
+			_ = upstreamsRegistry.BootstrapAndWait(ctx)
 			require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 			require.NoError(t, network.Bootstrap(ctx))
 			network.PinUpstreamOrderForTest()
-			time.Sleep(50 * time.Millisecond)
 
 			// toBlock is higher than initial latest, but latest update is delayed beyond best-effort budget
 			req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x11118899","address":"0x0000000000000000000000000000000000000000"}]}`))
@@ -10584,8 +10487,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 			ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg},
 			ssr, rlr, vr, pr, nil, mt, nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 
 		ntwCfg := &common.NetworkConfig{
 			Architecture: common.ArchitectureEvm,
@@ -10774,8 +10676,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 			ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg},
 			ssr, rlr, vr, pr, nil, mt, nil,
 		)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 
 		ntwCfg := &common.NetworkConfig{
 			Architecture: common.ArchitectureEvm,
@@ -10809,9 +10710,14 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 		require.Equal(t, int64(10), poller.LatestBlock())
 
 		//----------------------------------------------------------------------
-		// 3) Sleep 1.1 s so the cached value becomes "stale"
+		// 3) No wait before the herd
 		//----------------------------------------------------------------------
-		time.Sleep(1100 * time.Millisecond) // TryUpdateIfStale default is 1 s
+		// No stale-out nap here. The comment it replaced said "TryUpdateIfStale
+		// default is 1 s", but THIS upstream pins statePollerDebounce to 5s (see
+		// upCfg above), so 1100ms never made the cached head stale — the herd
+		// below was always suppressed by the debounce, which is exactly what the
+		// `polled == 1` assertion measures. The nap only added a way to lose: a
+		// machine slow enough to drift past 5s would see a second poll and fail.
 
 		//----------------------------------------------------------------------
 		// 4) Fire 1 000 concurrent PollLatestBlockNumber calls directly
@@ -10981,8 +10887,7 @@ func TestNetwork_ThunderingHerdProtection(t *testing.T) {
 			nil,
 		)
 
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 		require.NoError(t, ntw.Bootstrap(ctx))
 
@@ -11095,12 +11000,10 @@ func setupTestNetworkSimple(t *testing.T, ctx context.Context, upstreamConfig *c
 	)
 	assert.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	err = network.Bootstrap(ctx)
 	assert.NoError(t, err)
-	time.Sleep(100 * time.Millisecond)
 
 	if upstreamConfig.Id == "test" {
 		h, _ := common.HexToInt64("0x1273c18")
@@ -11109,9 +11012,7 @@ func setupTestNetworkSimple(t *testing.T, ctx context.Context, upstreamConfig *c
 		if err != nil {
 			t.Fatal(err)
 		}
-		upsList[0].EvmStatePoller().SuggestFinalizedBlock(h)
-		upsList[0].EvmStatePoller().SuggestLatestBlock(h)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmHeads(t, ctx, upstreamsRegistry, upsList[0], h, h)
 	}
 
 	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upstreamsRegistry)
@@ -11217,12 +11118,25 @@ func setupTestNetworkWithFullAndArchiveNodeUpstreams(
 	)
 	assert.NoError(t, err)
 
+	// This helper KEEPS the fire-and-forget Bootstrap and its naps, unlike every
+	// other setup in this package. Swapping in BootstrapAndWait changes what the
+	// tests see, not just when they see it: with both upstreams registered
+	// before PrepareUpstreamsForNetwork, the full node joins the eligible set
+	// earlier and the getLogs splitter chunks against a different upstream's
+	// threshold, so
+	// TestNetwork_EvmGetLogs/UseCacheWhenOneOfSubRequestsIsAlreadyCached asks
+	// for a sub-range none of its mocks cover.
+	//
+	// Measured (2026-08): with BootstrapAndWait that subtest fails whenever it
+	// runs after TestServedTip in the same process at -count=3; with the naps
+	// it passes. The tests here were written against a partly-registered fleet
+	// and need their mocks rewritten before this helper can be converted —
+	// that is a behaviour change, not a flakiness fix.
 	upstreamsRegistry.Bootstrap(ctx)
 	time.Sleep(100 * time.Millisecond)
 
 	err = upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	assert.NoError(t, err)
-	time.Sleep(100 * time.Millisecond)
 
 	err = network.Bootstrap(ctx)
 	assert.NoError(t, err)
@@ -11236,17 +11150,14 @@ func setupTestNetworkWithFullAndArchiveNodeUpstreams(
 	if err != nil {
 		t.Fatal(err)
 	}
-	upsList[0].EvmStatePoller().SuggestFinalizedBlock(fb1)
 	lb1, _ := common.HexToInt64("0x11118888")
-	upsList[0].EvmStatePoller().SuggestLatestBlock(lb1)
+	seedEvmHeads(t, ctx, upstreamsRegistry, upsList[0], lb1, fb1)
 
 	if len(upsList) > 1 && upsList[1] != nil {
 		fb2, _ := common.HexToInt64("0x22227777")
-		upsList[1].EvmStatePoller().SuggestFinalizedBlock(fb2)
 		lb2, _ := common.HexToInt64("0x22228888")
-		upsList[1].EvmStatePoller().SuggestLatestBlock(lb2)
+		seedEvmHeads(t, ctx, upstreamsRegistry, upsList[1], lb2, fb2)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	return network
 }
@@ -11349,8 +11260,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -11358,7 +11268,6 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)
@@ -11376,9 +11285,8 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		require.NotNil(t, syncedUpstream)
 
 		// Set up block numbers - syncing node has higher block number
-		syncingUpstream.EvmStatePoller().SuggestLatestBlock(2000) // Higher block
-		syncedUpstream.EvmStatePoller().SuggestLatestBlock(1000)  // Lower block
-		time.Sleep(50 * time.Millisecond)
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, syncingUpstream, 2000) // Higher block
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, syncedUpstream, 1000)  // Lower block
 
 		// Set syncing states
 		syncingUpstream.EvmStatePoller().SetSyncingState(common.EvmSyncingStateSyncing)
@@ -11495,8 +11403,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -11504,7 +11411,6 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(100 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)
@@ -11522,9 +11428,8 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		require.NotNil(t, includedUpstream)
 
 		// Set up block numbers - excluded node has higher block number
-		excludedUpstream.EvmStatePoller().SuggestLatestBlock(3000) // Higher block
-		includedUpstream.EvmStatePoller().SuggestLatestBlock(2000) // Lower block
-		time.Sleep(50 * time.Millisecond)
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, excludedUpstream, 3000) // Higher block
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, includedUpstream, 2000) // Lower block
 
 		// Create metrics to make excluded upstream have high error rate
 		metricsTracker.RecordUpstreamRequest(excludedUpstream, "*", common.DataFinalityStateUnknown)
@@ -11653,8 +11558,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -11662,7 +11566,6 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)
@@ -11681,10 +11584,9 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 
 		// Set up block numbers
 		// Clamped node: raw latest = 2000, effective = 2000 - 100 = 1900
-		clampedUpstream.EvmStatePoller().SuggestLatestBlock(2000)
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, clampedUpstream, 2000)
 		// Unclamped node: raw latest = 1500, effective = 1500
-		unclampedUpstream.EvmStatePoller().SuggestLatestBlock(1500)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, unclampedUpstream, 1500)
 
 		// Should return max of effective blocks: max(1900, 1500) = 1900
 		highest := common.EvmHighestLatestBlockNumber(network, ctx)
@@ -11781,8 +11683,7 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -11790,14 +11691,12 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 1)
 
 		// Set latest block to 2000 (less than upper bound of 5000)
-		upsList[0].EvmStatePoller().SuggestLatestBlock(2000)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmLatestHead(t, ctx, upstreamsRegistry, upsList[0], 2000)
 
 		// Since upper bound (5000) > latest (2000), should return raw latest (2000)
 		highest := common.EvmHighestLatestBlockNumber(network, ctx)
@@ -11916,8 +11815,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -11925,7 +11823,6 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)
@@ -11945,13 +11842,10 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		// Set up block numbers
 		// Clamped node: latest = 2000, finalized = 1900, upper bound = 2000 - 200 = 1800
 		// So effective finalized = min(1900, 1800) = 1800
-		clampedUpstream.EvmStatePoller().SuggestLatestBlock(2000)
-		clampedUpstream.EvmStatePoller().SuggestFinalizedBlock(1900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, clampedUpstream, 2000, 1900)
 		// Unclamped node: latest = 1500, finalized = 1400, no upper bound
 		// So effective finalized = 1400
-		unclampedUpstream.EvmStatePoller().SuggestLatestBlock(1500)
-		unclampedUpstream.EvmStatePoller().SuggestFinalizedBlock(1400)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmHeads(t, ctx, upstreamsRegistry, unclampedUpstream, 1500, 1400)
 
 		// Should return max of effective finalized blocks: max(1800, 1400) = 1800
 		highest := common.EvmHighestFinalizedBlockNumber(network, ctx)
@@ -12048,8 +11942,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -12057,15 +11950,12 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 1)
 
 		// Set blocks: latest = 3000, finalized = 2000 (both less than upper bound of 5000)
-		upsList[0].EvmStatePoller().SuggestLatestBlock(3000)
-		upsList[0].EvmStatePoller().SuggestFinalizedBlock(2000)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmHeads(t, ctx, upstreamsRegistry, upsList[0], 3000, 2000)
 
 		// Since upper bound (5000) > finalized (2000), should return raw finalized (2000)
 		highest := common.EvmHighestFinalizedBlockNumber(network, ctx)
@@ -12178,8 +12068,7 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		upstreamsRegistry.Bootstrap(ctx)
-		time.Sleep(200 * time.Millisecond)
+		_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 		initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 		require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -12187,7 +12076,6 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		err = network.Bootstrap(ctx)
 		require.NoError(t, err)
 		network.PinUpstreamOrderForTest()
-		time.Sleep(250 * time.Millisecond)
 
 		upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 		require.Len(t, upsList, 2)
@@ -12206,12 +12094,9 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 
 		// Syncing node has higher effective finalized: latest = 3000, finalized = 2900, upper = 3000 - 50 = 2950
 		// effective finalized = min(2900, 2950) = 2900
-		syncingUpstream.EvmStatePoller().SuggestLatestBlock(3000)
-		syncingUpstream.EvmStatePoller().SuggestFinalizedBlock(2900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, syncingUpstream, 3000, 2900)
 		// Synced node has lower finalized: latest = 2000, finalized = 1800
-		syncedUpstream.EvmStatePoller().SuggestLatestBlock(2000)
-		syncedUpstream.EvmStatePoller().SuggestFinalizedBlock(1800)
-		time.Sleep(50 * time.Millisecond)
+		seedEvmHeads(t, ctx, upstreamsRegistry, syncedUpstream, 2000, 1800)
 
 		// Mark one as syncing
 		syncingUpstream.EvmStatePoller().SetSyncingState(common.EvmSyncingStateSyncing)

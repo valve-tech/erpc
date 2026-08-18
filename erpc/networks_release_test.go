@@ -215,12 +215,10 @@ func TestNetworkForward_ConsensusErrorPathClearsLVRWithoutDoubleFree(t *testing.
 	)
 	require.NoError(t, err)
 
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	require.NoError(t, upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upsReg)
 	upsReg.OverrideOrderForTest(util.EvmNetworkId(123))
-	time.Sleep(200 * time.Millisecond)
 
 	// All 3 upstreams return JSON-RPC errors (execution reverts)
 	for i := 1; i <= 3; i++ {
