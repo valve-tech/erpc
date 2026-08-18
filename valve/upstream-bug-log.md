@@ -1792,7 +1792,7 @@ trial permit**. The breaker then stays open until the process restarts.
 The per-batch-entry goroutine captured `architecture` and `chainId` by
 reference, so an entry could be routed to another entry's chain.
 
-## G. The state poller dereferences a nil response it just tested for
+## 66. The state poller dereferences a nil response it just tested for
 
 **Status:** upstream candidate. `architecture/evm/evm_state_poller.go:1303`
 and `:1368`.
@@ -1825,7 +1825,7 @@ The same shape in the three availability probes
 `TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported` pins the
 safe form.
 
-## H. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
+## 67. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
 
 **Status:** upstream candidate, latent. `architecture/evm/json_rpc_cache.go:818`.
 
@@ -1841,7 +1841,7 @@ wraps the goroutine in a recover, which is what would keep the process alive
 if it ever did. Either the guard at 818 is missing or the guard inside
 `shouldCacheResponse` is unnecessary; the two disagree.
 
-## I. Four dead branches found while raising `architecture/evm` coverage
+## 68. Four dead branches found while raising `architecture/evm` coverage
 
 **Status:** upstream candidates, all cosmetic-to-behaviour but each hides a
 guard that reads as active.
