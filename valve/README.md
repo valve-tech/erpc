@@ -12,6 +12,7 @@ Next.js documentation site, and it changes on most merges.
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |
 | [merge-review.md](merge-review.md) | Review of that merge. Carries a correction: the first pass recorded the `erpc` package as green when the run had been truncated by Go's default 600s timeout. |
 | [fallback-escape-decision.md](fallback-escape-decision.md) | Why the per-request fallback escape belongs in the selection policy, not in Go. |
+| [polyglot-live-run.md](polyglot-live-run.md) | One binary serving EVM, SVM and BTC at once against live public endpoints. Tests the "a chain is configuration, not Go" claim end to end. Config: [polyglot-live-pool.yaml](polyglot-live-pool.yaml). |
 
 ## Running the tests
 
