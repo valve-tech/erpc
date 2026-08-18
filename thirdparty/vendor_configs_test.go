@@ -265,18 +265,20 @@ func TestStaticTableVendors_SupportsNetworkAgreesWithGenerateConfigs(t *testing.
 //   - the chain decides the host, and an unknown chain has no host at all
 //     (etherspot).
 
-// Six vendors read upstream.Evm.ChainId with no nil check, unlike the eighteen
-// that guard first: envio.go:223, erpc.go:116 and :134, etherspot.go:97,
+// Six vendors read the chain id with no nil check, unlike the eighteen that
+// guard first: envio.go:223, erpc.go:116 and :134, etherspot.go:97,
 // pimlico.go:176, routemesh.go:116 and thirdweb.go:100. A provider configured
-// without an evm block crashes the process at bootstrap instead of naming the
-// missing field. This test pins today's behaviour and fails once a guard lands;
-// see the report.
-func TestSixVendors_GenerateConfigs_PanicOnAMissingEvmBlock(t *testing.T) {
+// without an evm block crashed the process at bootstrap instead of naming the
+// missing field. Every vendor now reads the chain id through
+// UpstreamConfig.EvmChainId, which reports zero for a missing block, so the
+// operator gets the same "chainId to be defined" message the sibling vendors
+// already return.
+func TestSixVendors_GenerateConfigs_AMissingEvmBlockIsAConfigError(t *testing.T) {
 	logger := zerolog.Nop()
 	ctx := context.Background()
 
 	// Each entry supplies the settings that get past the vendor's earlier
-	// guards, so the nil dereference is what the call reaches.
+	// guards, so the missing evm block is what the call reaches.
 	cases := []struct {
 		name     string
 		vendor   common.Vendor
@@ -296,9 +298,16 @@ func TestSixVendors_GenerateConfigs_PanicOnAMissingEvmBlock(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Panics(t, func() {
-				_, _ = tc.vendor.GenerateConfigs(ctx, &logger, tc.upstream, tc.settings)
-			}, "an operator who omits the evm block should get a config error, not a crash")
+			var cfgs []*common.UpstreamConfig
+			var err error
+			require.NotPanics(t, func() {
+				cfgs, err = tc.vendor.GenerateConfigs(ctx, &logger, tc.upstream, tc.settings)
+			}, "an operator who omits the evm block must get a config error, not a crash")
+
+			require.Error(t, err)
+			assert.Nil(t, cfgs)
+			assert.Equal(t, tc.vendor.Name()+" vendor requires upstream.evm.chainId to be defined", err.Error(),
+				"the message must name the field the operator has to add")
 		})
 	}
 }

@@ -220,7 +220,7 @@ func (v *EnvioVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logge
 			rootDomain = DefaultEnvioRootDomain
 		}
 		apiKey, _ := settings["apiKey"].(string)
-		chainID := upstream.Evm.ChainId
+		chainID := upstream.EvmChainId()
 		if chainID == 0 {
 			return nil, fmt.Errorf("envio vendor requires upstream.evm.chainId to be defined")
 		}

@@ -94,7 +94,7 @@ func (v *EtherspotVendor) GenerateConfigs(ctx context.Context, logger *zerolog.L
 
 	if upstream.Endpoint == "" {
 		if apiKey, ok := settings["apiKey"].(string); ok && apiKey != "" {
-			chainID := upstream.Evm.ChainId
+			chainID := upstream.EvmChainId()
 			if chainID == 0 {
 				return nil, fmt.Errorf("etherspot vendor requires upstream.evm.chainId to be defined")
 			}

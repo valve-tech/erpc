@@ -111,9 +111,14 @@ func (v *ErpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 				endpoint = strings.TrimPrefix(endpoint, "evm+")
 			}
 
+			chainID := upstream.EvmChainId()
+			if chainID == 0 {
+				return nil, fmt.Errorf("erpc vendor requires upstream.evm.chainId to be defined")
+			}
+
 			// Parse the endpoint URL directly - parseEndpointURL handles erpc:// prefix
 			// and preserves all query parameters
-			parsedURL, err := v.parseEndpointURL(endpoint, "", upstream.Evm.ChainId)
+			parsedURL, err := v.parseEndpointURL(endpoint, "", chainID)
 			if err != nil {
 				return nil, err
 			}
@@ -131,7 +136,12 @@ func (v *ErpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 
 	secret, _ := settings["secret"].(string)
 
-	parsedURL, err := v.parseEndpointURL(endpoint, secret, upstream.Evm.ChainId)
+	chainID := upstream.EvmChainId()
+	if chainID == 0 {
+		return nil, fmt.Errorf("erpc vendor requires upstream.evm.chainId to be defined")
+	}
+
+	parsedURL, err := v.parseEndpointURL(endpoint, secret, chainID)
 	if err != nil {
 		return nil, err
 	}
