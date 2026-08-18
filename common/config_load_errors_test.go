@@ -89,15 +89,15 @@ func TestLoadConfig_TypeScriptWithoutDefaultExportIsRejected(t *testing.T) {
 //
 // This test PINS the defect. If someone guards Exports(), it fails and points
 // here: swap it for the clean-error assertion the sibling test uses.
-func TestLoadConfig_TypeScriptWithNoExportsPanics(t *testing.T) {
-	withoutLegacyTranslate(t)
-
-	path := writeTS(t, "const cfg = { logLevel: 'warn' };")
-
-	assert.Panics(t, func() {
-		_, _ = LoadConfig(afero.NewOsFs(), path, &DefaultOptions{})
-	}, "today an operator who forgets `export default` gets a panic, not the guidance at config.go:3255")
-}
+// TestLoadConfig_TypeScriptWithNoExportsPanics used to live here. It asserted
+// the panic an operator got for forgetting `export default`, and its own
+// message said the guidance was unreachable. Entry 80 in the fork's bug log
+// fixed that: Runtime.Exports now returns nil for an absent, null or undefined
+// `exports`, and the caller reports the missing default export.
+//
+// The behaviour is pinned by TestLoadConfig_TypeScriptWithNoExportsExplainsItself
+// in config_ts_exports_test.go, which uses the same input and asserts both that
+// the load does not panic and that the message names the fix.
 
 // The TypeScript path decodes with the same strict schema as the YAML path. A
 // typo must fail the load instead of being dropped on the floor.
