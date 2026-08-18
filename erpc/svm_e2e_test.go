@@ -22,6 +22,24 @@ import (
 
 // svmNet wires up a minimal Network + registry for a single SVM mainnet-beta
 // project. All upstreams passed in must already carry type:svm + svm.cluster.
+// pollSvmUpstreams drives every SVM upstream's state poller once, on the
+// caller's own goroutine.
+//
+// SvmStatePoller.Bootstrap only starts a ticker; unlike the EVM poller it does
+// not poll before it returns. So a test that needs published slots either waits
+// for a tick — which is a bet on the tick landing in time — or drives one.
+// Driving one is exact, and it fails loudly when the poll itself fails.
+func pollSvmUpstreams(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry, networkId string) {
+	t.Helper()
+	for _, u := range reg.GetNetworkUpstreams(ctx, networkId) {
+		sp := u.SvmStatePoller()
+		if sp == nil || sp.IsObjectNull() {
+			continue
+		}
+		require.NoError(t, sp.Poll(ctx), "svm state poll failed for upstream %s", u.Id())
+	}
+}
+
 func setupTestSvmNetwork(t *testing.T, ctx context.Context, upstreams []*common.UpstreamConfig) *Network {
 	t.Helper()
 
@@ -65,11 +83,9 @@ func setupTestSvmNetwork(t *testing.T, ctx context.Context, upstreams []*common.
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
-	// Allow state poller to run one tick.
-	time.Sleep(150 * time.Millisecond)
+	pollSvmUpstreams(t, ctx, upstreamsRegistry, util.SvmNetworkId("", "mainnet-beta"))
 	return network
 }
 
@@ -349,9 +365,7 @@ func TestSvm_GenesisHashMismatch_FailsBootstrap(t *testing.T) {
 		[]*common.UpstreamConfig{upCfg}, ssr, rateLimiters, vr, pr,
 		nil, mt, nil,
 	)
-	reg.Bootstrap(ctx)
-	// Give bootstrap a moment to run detectFeatures + state poller + genesis check.
-	time.Sleep(300 * time.Millisecond)
+	_ = reg.BootstrapAndWait(ctx)
 
 	// Short-deadline context: Prepare waits for at least one ready upstream; with
 	// bootstrap failing there will never be one, so we want the wait to time out
@@ -544,8 +558,7 @@ func TestSvm_MixedProjectWithEvm(t *testing.T) {
 		nil, nil,
 	)
 	require.NoError(t, err)
-	reg.Bootstrap(ctx)
-	time.Sleep(300 * time.Millisecond)
+	_ = reg.BootstrapAndWait(ctx)
 
 	prj, err := reg.GetProject("mixed")
 	require.NoError(t, err)
@@ -693,10 +706,9 @@ func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 	net, err := NewNetwork(ctx, &log.Logger, "test", netCfg, rateLimiters, upsReg, mt, nil)
 	require.NoError(t, err)
 
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	require.NoError(t, upsReg.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
-	time.Sleep(300 * time.Millisecond) // let pollers run at least one tick
+	pollSvmUpstreams(t, ctx, upsReg, util.SvmNetworkId("", "mainnet-beta"))
 
 	// Seed per-upstream finalized slots. The counter only moves forward
 	// (CounterInt64SharedVariable uses rollback protection), so we advance the
@@ -882,9 +894,8 @@ func setupTestSvmNetworkFinalized(t *testing.T, ctx context.Context, upstreams [
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
-	time.Sleep(150 * time.Millisecond)
+	pollSvmUpstreams(t, ctx, upstreamsRegistry, util.SvmNetworkId("", "mainnet-beta"))
 	return network, upstreamsRegistry
 }

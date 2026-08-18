@@ -60,8 +60,7 @@ func setupTestNetworkForInterpolation(t *testing.T, ctx context.Context, network
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	if networkConfig == nil {
 		networkConfig = &common.NetworkConfig{
@@ -76,9 +75,6 @@ func setupTestNetworkForInterpolation(t *testing.T, ctx context.Context, network
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-
-	// Wait for state poller to initialize
-	time.Sleep(500 * time.Millisecond)
 
 	return network, upr
 }
@@ -2005,8 +2001,7 @@ func TestInterpolation_UpstreamSkipping_OnInterpolatedLatest(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", upCfgs, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	networkConfig := &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -2124,8 +2119,7 @@ func TestInterpolation_UpstreamSkipping_DisabledByMethodConfig(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", upCfgs, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Network config disables enforcement for eth_getBalance
 	falseVal := false

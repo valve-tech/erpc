@@ -136,8 +136,7 @@ func setupTwoUpstreamNetworkForSkip(
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkCfg, rlr, upr, mt, pe)
 	require.NoError(t, err)
 
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 

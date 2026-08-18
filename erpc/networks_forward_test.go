@@ -65,8 +65,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			[]*common.UpstreamConfig{up1},
 			ssr, rlr, vr, pr, nil, mt, nil,
 		)
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 		upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 
 		ntw, _ := NewNetwork(
@@ -79,7 +78,6 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			nil,
 		)
 		ntw.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`))
 
@@ -148,8 +146,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		}
 
 		upr := upstream.NewUpstreamsRegistry(ctx, logger, "testProject", []*common.UpstreamConfig{up1}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 
 		ntw, err := NewNetwork(
@@ -166,7 +163,6 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NoError(t, ntw.Bootstrap(ctx))
-		time.Sleep(50 * time.Millisecond)
 
 		// Request with UseUpstream directive targeting the only upstream
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`))
@@ -271,8 +267,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		)
 
 		// Bootstrap upstreams
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 
 		// Prepare upstreams for the network
 		err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
@@ -306,7 +301,6 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 		// Bootstrap network
 		err = ntw.Bootstrap(ctx)
 		require.NoError(t, err)
-		time.Sleep(100 * time.Millisecond)
 
 		// Create a request for eth_getBlockByNumber which all upstreams will skip
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`))
@@ -450,8 +444,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			nil,
 		)
 
-		upsReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upsReg.BootstrapAndWait(ctx)
 
 		err = upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		require.NoError(t, err)
@@ -475,7 +468,6 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 
 		err = ntw.Bootstrap(ctx)
 		require.NoError(t, err)
-		time.Sleep(100 * time.Millisecond)
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`))
 
@@ -540,8 +532,7 @@ func TestNetwork_Forward_UseUpstreamTagSelector(t *testing.T) {
 		}
 
 		upr := upstream.NewUpstreamsRegistry(ctx, logger, "testProject", []*common.UpstreamConfig{systx, standard}, ssr, rlr, vr, pr, nil, mt, nil)
-		upr.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = upr.BootstrapAndWait(ctx)
 		require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 
 		ntw, err := NewNetwork(ctx, logger, "testProject",
@@ -553,7 +544,6 @@ func TestNetwork_Forward_UseUpstreamTagSelector(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NoError(t, ntw.Bootstrap(ctx))
-		time.Sleep(100 * time.Millisecond)
 		return ntw
 	}
 

@@ -3,7 +3,6 @@ package erpc
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -202,13 +201,17 @@ func TestEvmJsonRpcCache_FanOut_FirstHitCancelsPeer(t *testing.T) {
 	conns[0].On("Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything).
 		Return([]byte(cached), nil) // immediate hit
 
-	var slowSawCancel atomic.Bool
+	// The slow peer signals on a channel rather than setting a flag the test
+	// polls. A poll needs a ceiling on the HAPPY path — the old 200ms one
+	// expired under load even when cancellation worked — while a receive wakes
+	// the instant the goroutine signals.
+	slowSawCancel := make(chan struct{})
 	conns[1].On("Get", mock.Anything, mock.Anything, "evm:123:1", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			callCtx := args.Get(0).(context.Context)
 			select {
 			case <-callCtx.Done():
-				slowSawCancel.Store(true)
+				close(slowSawCancel)
 			case <-time.After(time.Second):
 			}
 		}).
@@ -225,9 +228,15 @@ func TestEvmJsonRpcCache_FanOut_FirstHitCancelsPeer(t *testing.T) {
 	assert.Equal(t, cached, jrr.GetResultString())
 	assert.Less(t, elapsed, 500*time.Millisecond,
 		"slow peer should be cancelled once fast peer wins (took %v)", elapsed)
-	// Allow up to 200ms for the slow goroutine to observe cancellation.
-	assert.Eventually(t, slowSawCancel.Load, 200*time.Millisecond, 5*time.Millisecond,
-		"slow peer goroutine should observe context cancellation after first hit wins")
+	// This deadline is a failure deadline, not a wait: a working cancellation
+	// closes the channel and the receive returns at once. It must clear the
+	// mock's own 1s fallback, past which the goroutine leaves without
+	// signalling and no longer can.
+	select {
+	case <-slowSawCancel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow peer goroutine never observed context cancellation after first hit won")
+	}
 }
 
 func TestEvmJsonRpcCache_FanOut_ParentContextCancellationStopsAll(t *testing.T) {

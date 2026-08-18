@@ -2503,8 +2503,7 @@ func setupSendRawTxNetwork(t *testing.T, ctx context.Context, upstreamConfigs []
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	return network
 }

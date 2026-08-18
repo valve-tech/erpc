@@ -70,8 +70,7 @@ func buildIntegrityNetwork(t *testing.T, ctx context.Context) *Network {
 	require.NoError(t, err)
 
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{up1, up2}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	for _, uc := range []*common.UpstreamConfig{up1, up2} {
 		pup, err := upr.NewUpstream(uc)
@@ -99,7 +98,6 @@ func buildIntegrityNetwork(t *testing.T, ctx context.Context) *Network {
 	}, rlr, upr, mt, nil)
 	require.NoError(t, err)
 	ntw.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
 	upr.OverrideOrderForTest(util.EvmNetworkId(123))
 	// Seed a finalized head so corroboration's per-finality verdict is
 	// deterministic (any block below this is finalized). Harmless for the

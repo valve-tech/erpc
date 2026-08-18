@@ -204,6 +204,22 @@ func (nr *NetworksRegistry) Bootstrap(appCtx context.Context) {
 	}()
 }
 
+// BootstrapAndWait registers the statically-defined networks on the caller's
+// own goroutine and returns once every task has settled. Bootstrap runs the
+// same work fire-and-forget, so a caller that must observe a prepared network
+// has nothing to wait on. See UpstreamsRegistry.BootstrapAndWait.
+func (nr *NetworksRegistry) BootstrapAndWait(appCtx context.Context) error {
+	nr.project.cfgMu.RLock()
+	nl := nr.project.Config.Networks
+	nr.project.cfgMu.RUnlock()
+
+	tasks := []*util.BootstrapTask{}
+	for _, nwCfg := range nl {
+		tasks = append(tasks, nr.buildNetworkBootstrapTask(nwCfg.NetworkId()))
+	}
+	return nr.initializer.ExecuteTasks(appCtx, tasks...)
+}
+
 func (nr *NetworksRegistry) GetNetwork(ctx context.Context, networkId string) (*Network, error) {
 	// If network already prepared, return it
 	if pn, ok := nr.preparedNetworks.Load(networkId); ok {
