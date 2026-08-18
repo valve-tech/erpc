@@ -1514,6 +1514,95 @@ delayed.
 
 ---
 
+## 59. A TypeScript config with no exports panics instead of explaining itself
+
+**Status:** pinned. **Severity: medium.**
+`TestLoadConfig_TypeScriptWithNoExportsPanics`
+(`common/config_load_errors_test.go`).
+
+`loadConfigFromTypescript` (`common/config.go:3254`) calls
+`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:55`)
+is `r.vm.GlobalObject().Get("exports").ToObject(r.vm)`. When the compiled
+module declares no exports at all, that global is JS `null`, and sobek's
+`ToObject` raises a TypeError that unwinds out of the Go call as a panic.
+
+The very next statement (`common/config.go:3255`) exists to catch exactly this
+mistake: it returns "config object must be default exported from TypeScript
+code AND must be the last statement in the file". It never runs for the
+no-export case, so the operator who forgot `export default` gets a Go stack
+trace with `TypeError: Cannot convert undefined or null to object` instead of
+the sentence that tells them what to type.
+
+`export default undefined` and `export default null` DO reach the friendly
+error, because those leave a real `exports` object behind. The difference is
+invisible from the config file, which is what makes the panic surprising.
+
+One guard in `Runtime.Exports` — return nil when the value is null or
+undefined — fixes it, and the existing check at `:3255` then handles the rest.
+
+## 60. A mistyped current-schema key is reported against the legacy shadow
+
+**Status:** pinned. **Severity: medium.**
+`TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow` and
+`TestNetworkConfig_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow`
+(`common/config_unmarshal_gaps_test.go`).
+
+`NetworkDefaults.UnmarshalYAML` (`common/config.go:776`) and
+`NetworkConfig.UnmarshalYAML` (`common/config.go:2372`) decode the node into
+the current schema, and on failure decode the SAME node into a hand-listed
+legacy shadow struct. The shadow is a subset: it has no `multiplexing` and no
+`failover`.
+
+So a plain type mistake in one of those keys produces this:
+
+```yaml
+networkDefaults:
+  multiplexing: yes-please      # a string where a bool belongs
+```
+
+```
+yaml: unmarshal errors:
+  line 1: field multiplexing not found in type common.oldNetworkDefaults
+```
+
+Two things are wrong for the operator. The message says a key they wrote does
+not exist, when it does and is valid. And it names `common.oldNetworkDefaults`,
+an unexported struct declared inside the function body, which appears in no
+documentation and in no config they can edit.
+
+The real error — `cannot unmarshal !!str into bool` — is what
+`return originalErr` (`common/config.go:812` and `:2411`) intends to deliver.
+It does not arrive: the legacy attempt's unknown-field complaint is recorded
+against the decoder and surfaces from the outer `Decode` instead. A key that
+BOTH shapes declare (`rateLimitBudget`) reports correctly, which is why this
+was never noticed.
+
+The fix is to stop feeding unknown keys to the legacy shadow — decide from the
+document which shape it is, or add the current-only keys to the shadow. Entry
+53 above asks for the same structural change to the upstream path for a
+different symptom.
+
+## 61. A rate-limit rule logs nanoseconds under a key that says milliseconds
+
+**Status:** pinned. **Severity: low.**
+`TestRateLimitRuleConfig_MarshalZerologObject`
+(`common/config_unmarshal_gaps_test.go`).
+
+`RateLimitRuleConfig.MarshalZerologObject` (`common/config.go:3105`) writes
+`Str("waitTimeMs", fmt.Sprintf("%d", c.WaitTime))`. `WaitTime` is a
+`common.Duration` (`common/duration.go:8`), which is `time.Duration` — a
+nanosecond count. `%d` prints that count verbatim.
+
+An operator who writes `waitTime: 1s` sees `"waitTimeMs":"1000000000"` and
+reads it as a wait of eleven and a half days. The other three fields on the
+same line are correct, which makes the wrong one easy to trust.
+
+`Dur`/`Int64` with `.Milliseconds()` fixes it, or renaming the key to
+`waitTime` and using the type's own `String()` — the sibling `period` field on
+the same line already takes the `String()` route.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
@@ -1553,6 +1642,22 @@ unobservable. They are not bugs, and a test cannot pin them.
   strict one, so an unknown key fails both decodes and `return originalErr`
   after the fallback produces the same error. Deleting either guard alone
   changes nothing.
+- `common/defaults.go:1462` and `:1402` — the "failed to convert upstream
+  (id: %s) to provider" wrap, written twice on the same error path: once inside
+  `convertUpstreamToProvider` and once around the call. Removing either alone
+  leaves the operator with the same message; removing both drops the upstream
+  id, which
+  `TestConvertUpstreamToProvider_UnknownVendorAbortsTheLoad` catches.
+- `common/request.go:279` and `:289` — the nil-receiver guards in
+  `NormalizedRequest.CreditUnitsTotal` and `CreditUnitsByVendor`. `ExecState()`
+  already returns nil for a nil request, and `ExecState.CreditUnitsTotal`
+  (`common/exec_state.go:176`) and `CreditUnitsByVendor` guard their own nil
+  receiver, so removing either outer guard changes nothing an assertion can see.
+- `common/json_rpc.go:551-553` — the `else` arm that logs `errBytes` as a plain
+  string when it is not semi-valid JSON. `ParseError` (`common/json_rpc.go:421`)
+  is the only writer of `errBytes` and writes only after the payload already
+  parsed into a JSON-RPC error object, so those bytes always start with `{`.
+  The arm is unreachable, not untested.
 - `common/defaults.go:1057` and `:1070` — `f.MatchMethod = "*"` for connector
   failsafe policies, shadowed by the same default inside
   `FailsafeConfig.SetDefaults` (`common/defaults.go:2619`).

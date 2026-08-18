@@ -44,12 +44,14 @@ func TestInitializeTracing_DisabledLeavesTracingOff(t *testing.T) {
 			resetTracingInitOnce(t)
 			IsTracingEnabled = true
 			IsTracingDetailed = true
+			SetTracingDetailed(true)
 
 			logger := zerolog.Nop()
 			require.NoError(t, InitializeTracing(ctx, &logger, tc.cfg))
 
 			assert.False(t, IsTracingEnabled, "a disabled config must turn tracing off")
 			assert.False(t, IsTracingDetailed, "a disabled config must turn detailed tracing off")
+			assert.False(t, TracingDetailed(), "a disabled config must turn detailed tracing off for accessor readers too")
 		})
 	}
 }
@@ -110,6 +112,7 @@ func TestInitializeTracing_EnabledSetsGlobalsAndMatchers(t *testing.T) {
 
 	assert.True(t, IsTracingEnabled, "an enabled config must turn tracing on")
 	assert.True(t, IsTracingDetailed, "detailed:true must reach IsTracingDetailed")
+	assert.True(t, TracingDetailed(), "detailed:true must reach accessor readers too")
 	assert.NotNil(t, tracer, "the package tracer must be installed")
 	assert.NotNil(t, tracerProvider, "the package tracer provider must be installed")
 	assert.Equal(t, []*ForceTraceMatcher{matcher}, forceTraceMatchers,
