@@ -49,19 +49,17 @@ func TestRule_AllParticipantsAnsweredWithNothingReportsLowParticipants(t *testin
 	assert.Nil(t, sr.Result, "no upstream produced a payload to serve")
 }
 
-// TestRule_LowParticipantsAcceptMostCommonCanServeNothingAtAll pins a defect:
-// the low-participants + accept-most-common rule can return a winner with
-// neither a result nor an error, which the executor hands straight to the
-// caller as (nil, nil).
+// TestRule_LowParticipantsAcceptMostCommonServesTheRealError pins the fix for
+// upstream bug 69.
 //
-// getBestError ranks infrastructure-error groups alongside consensus-valid
-// ones. Here the result-less group is the larger of the two, so it wins the
-// ranking, and its FirstError is nil. The rule returns &slotResult{Error: nil}
-// and (*executor).Run returns (nil, nil) to the network layer.
+// getBestError used to rank the result-less group alongside the groups that
+// hold an error. Here the result-less group is the larger one, so it won the
+// ranking and the rule returned &slotResult{Error: nil} with no Result.
+// (*executor).Run then handed the network layer (nil, nil).
 //
-// Logged as upstream bug 59. The assertions below record today's behaviour; a
-// fix flips them.
-func TestRule_LowParticipantsAcceptMostCommonCanServeNothingAtAll(t *testing.T) {
+// getBestError now skips a group that holds no error, so the rule serves one
+// of the two reverts instead. The client gets an error it can read.
+func TestRule_LowParticipantsAcceptMostCommonServesTheRealError(t *testing.T) {
 	cfg := &config{
 		maxParticipants:         4,
 		agreementThreshold:      3,
@@ -86,6 +84,8 @@ func TestRule_LowParticipantsAcceptMostCommonCanServeNothingAtAll(t *testing.T) 
 
 	sr := winnerOf(cfg, a)
 	require.NotNil(t, sr)
-	assert.Nil(t, sr.Result, "bug 59: the winner carries no payload")
-	assert.NoError(t, sr.Error, "bug 59: the winner carries no error either, so Run returns (nil, nil)")
+	assert.Nil(t, sr.Result, "no upstream produced a payload")
+	require.Error(t, sr.Error, "the winner must carry an error, or Run returns (nil, nil)")
+	assert.Contains(t, sr.Error.Error(), "execution reverted",
+		"the round saw real reverts, so one of them is the honest answer")
 }

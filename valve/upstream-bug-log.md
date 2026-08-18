@@ -1485,7 +1485,8 @@ only the reason is lost. Pinned by
 
 ## 62. `SuggestFinalizedBlock` drops a suggestion under contention; the latest twin does not
 
-**Status:** open. **Severity: low in production, high in tests.**
+**Status:** FIXED. **Severity: medium.** Raised from "low in production" —
+see the second reproduction below.
 
 `architecture/evm/evm_state_poller.go:825` — `SuggestFinalizedBlock` takes
 `finalizedUpdateInProgress` with `TryLock` and RETURNS when the lock is held.
@@ -1511,6 +1512,48 @@ arrive. The fix there was to stop routing test seeds through `Suggest*` at all
 (see `seedEvmHeads` in `erpc/networks_selection_policy_test.go`); a wider
 `Eventually` ceiling cannot help, since the write was dropped rather than
 delayed.
+
+**Second reproduction, and why the severity rose.**
+`TestSuggestFinalizedBlock_MajorJumpMatchingApplies`
+(`architecture/evm/evm_state_poller_suggest_gate_test.go:226`) fails under
+`go test -race` with "Condition never satisfied". The race detector reports no
+data race — it only slows the process down, which widens the window until the
+drop is reliable. On this machine the unfixed code failed 2 of 20 `-race` runs
+scoped to that one test, and every failure cost the full 2s `Eventually`
+ceiling.
+
+The mechanism is not contention. The goroutine published the new value and only
+then ran its deferred `Unlock`, so the value was visible while the lock was
+still held. Any caller that reacts to the value it just observed lands in that
+window, with no concurrency of its own:
+
+    p.SuggestFinalizedBlock(1000)
+    require.Eventually(... p.FinalizedBlock() == 1000 ...)   // returns at publish
+    p.SuggestFinalizedBlock(major)                            // TryLock fails, discarded
+
+**Fix.** `SuggestFinalizedBlock` now has the same shape as
+`SuggestLatestBlock`. It applies the suggestion inline, and hands only a MAJOR
+forward jump to `verifyThenSuggestFinalizedBlock`, a background goroutine that
+runs the chain-identity check under its own `finalizedMajorVerifyInProgress`
+lock. The common path takes no lock at all, so nothing can drop it.
+
+This deletes structure rather than adding it: the bespoke
+"every suggestion behind one TryLock" arrangement is gone, and the two counters
+now have one delivery guarantee instead of two. Coalescing the pending
+suggestion was the alternative; it keeps the goroutine and adds a slot plus a
+re-read loop to protect a path that no longer needs protecting.
+
+One drop remains, on both counters: a MAJOR jump arriving while another major
+jump is verifying. That one is forced — the check makes a live `eth_chainId`
+call, so it must be asynchronous and serialized. It is now logged at Debug on
+both paths (the latest twin used to return silently), and it is re-observed on
+the next suggestion or verified poll.
+
+Pinned by `TestSuggestFinalizedBlock_SmallAdvanceAppliesInline` and
+`TestSuggestFinalizedBlock_SmallAdvanceSurvivesAMajorJumpVerification`
+(`architecture/evm/evm_state_poller_suggest_drop_test.go`). The second test
+parks the major jump inside `eth_chainId` on a gate it controls, so the drop is
+deterministic and needs no race detector.
 
 ---
 
@@ -1908,8 +1951,7 @@ reference, so an entry could be routed to another entry's chain.
 
 ## 66. The state poller dereferences a nil response it just tested for
 
-**Status:** upstream candidate. `architecture/evm/evm_state_poller.go:1303`
-and `:1368`.
+**Status:** FIXED. `architecture/evm/evm_state_poller.go:1303` and `:1368`.
 
 Both `fetchBlock` and `fetchSyncingState` do this:
 
@@ -1938,6 +1980,24 @@ The same shape in the three availability probes
 `(false, false, nil)` — so the two poll helpers are the odd ones out.
 `TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported` pins the
 safe form.
+
+**Fix.** Each guard now splits the nil case from the error case, and each
+returns what its own signature can express honestly.
+
+`fetchBlock` returns `(0, 0, nil)` — the same triple a `null` result produces.
+The two callers already handle that pair exactly: `err != nil || blockNum == 0`
+counts a failed poll and latches `skipLatestBlockCheck` /
+`skipFinalizedCheck` after ten of them. So the fix adds no new path.
+
+`fetchSyncingState` returns an `ErrEvmStatePoller` error. It has no neutral
+value: `false` claims the node is fully synced, and the poller learned nothing.
+Its caller counts the failure and logs it.
+
+Pinned by `TestFetchBlock_ANilAnswerReportsNoBlockInsteadOfPanicking` and
+`TestFetchSyncingState_ANilAnswerIsAnErrorNotANotSyncingClaim`
+(`architecture/evm/evm_state_poller_nil_response_test.go`). Both drive the real
+helpers through a `forwardingUpstream` that answers `(nil, nil)`, and both
+produce a real SIGSEGV against the unfixed code.
 
 ## 67. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
 
@@ -2013,7 +2073,7 @@ of a `checkProbe` error no probe implementation produces).
 
 ## 69. A consensus round can return neither a response nor an error
 
-**Status:** pinned. **Severity: medium.** The caller gets `(nil, nil)`.
+**Status:** FIXED. **Severity: medium.** The caller got `(nil, nil)`.
 
 `consensus/rules.go:740-742` — the "low participants + accept-most-common"
 rule returns the best error group's `FirstError`:
@@ -2042,11 +2102,34 @@ An operator sees a request that produced no response body and no error, with no
 consensus dispute or low-participants error to explain it. The same round with
 one fewer result-less participant answers normally, so it looks intermittent.
 
-Fix: have `getBestError` skip groups with no error, or make the rule fall
-through to its low-participants branch when `FirstError` is nil — the branch is
-already written at `rules.go:743-745` and is unreachable today.
+**Correction to the trigger.** `inner` returning `(nil, nil)` cannot reach the
+analysis: `executeParticipant` (`consensus/executor.go:792`) filters that pair
+and sends a bare `nil` down the response channel. The reachable trigger is the
+other half of the same branch — a participant that returns a NON-nil
+`*NormalizedResponse` whose `JsonRpcResponse` is `(nil, nil)`.
+`classifyAndHashResponse` has an explicit arm for it (`analysis.go`, the
+"Successful response" block, `jr == nil`), and `NormalizedResponse.Release`
+produces exactly that shape: it frees the parsed payload and stores `nil` over
+the cached pointer, after `parseOnce` has already run. The consensus executor
+releases responses itself.
 
-Pinned by `TestRule_LowParticipantsAcceptMostCommonCanServeNothingAtAll`.
+**Fix.** `getBestError` now skips any group whose `FirstError` is nil. The
+function's single caller returns `FirstError` straight to the client, so a group
+with no error is never a useful answer. Skipping it lets the rule serve a real
+error from a smaller group, and leaves the low-participants branch at
+`rules.go:743-745` reachable when no group holds an error at all. The fix adds
+no branch — it makes one that was already written reachable.
+
+Rejected alternative: making the rule fall through when `FirstError` is nil. It
+answers "not enough participants" even when the round really saw an execution
+revert, so it discards an error the operator can act on.
+
+Pinned by `TestConsensus_PayloadFreeParticipantsDoNotProduceANilNilAnswer`
+(`consensus/executor_nil_winner_test.go`), which drives the whole executor and
+asserts `Run` does not answer `(nil, nil)`, and by
+`TestRule_LowParticipantsAcceptMostCommonServesTheRealError`
+(`consensus/rules_infra_group_test.go`), which was the old pin recording the
+defect and now records the fix.
 `TestRule_AllParticipantsAnsweredWithNothingReportsLowParticipants` covers the
 neighbouring rule (`rules.go:808-816`), which handles the same group shape
 correctly.
@@ -2380,3 +2463,66 @@ overcounts by however many hook short-circuits the traffic contains — for
 `"cache"` / `"upstream"` label, or a separate counter for hook
 short-circuits, would make the three readable apart. Until then, no dashboard
 should derive cache hit-rate from `upstream="n/a"`.
+
+---
+
+## 76. A released `NormalizedResponse` reads as `(nil, nil)`, exactly like a nil one
+
+**Status:** upstream candidate. **Severity: medium.** `common/response.go:309`
+and `:488`.
+
+`NormalizedResponse.JsonRpcResponse` returns `(nil, nil)` for a nil receiver.
+It returns the same pair for a NON-nil receiver that has been released:
+
+    r.releaseOnce.Do(func() {
+        ...
+        r.jsonRpcResponse.Store(nil)      // response.go:503
+        ...
+    })
+
+`Release` stores nil over the cached pointer. A later read finds nothing
+cached, and `parseOnce` has already run, so `parseOnce.Do` is a no-op and the
+function returns `r.jsonRpcResponse.Load(), nil` — nil, and no error saying
+why.
+
+Two callers therefore cannot tell "no response" from "the response was freed
+under me". `classifyAndHashResponse` (`consensus/analysis.go`) files it as an
+infrastructure error with no error attached, which is the shape that produced
+bug 69. The state poller dereferenced it, which was bug 66.
+
+The ordering matters: releasing BEFORE the first parse leaves `parseOnce`
+armed, so the next read parses a nil body and gets a real "no body available to
+parse" JSON-RPC error. Releasing AFTER the first parse produces the silent nil.
+The same object answers differently depending on when it was released.
+
+Weaken it by making the released state say so: return a typed
+"response already released" error instead of `(nil, nil)`. Then every existing
+`if err != nil` guard catches it, and no caller has to add a nil check it
+currently forgets.
+
+Found while fixing bugs 66 and 69, which are both consequences of this.
+
+## 77. `(*executor).Run` still has one silent `(nil, nil)` route
+
+**Status:** upstream candidate, latent. **Severity: low.**
+`consensus/executor.go:163-166`.
+
+    out := e.executeConsensus(...)
+    if out == nil {
+        return nil, nil
+    }
+
+`executeConsensus` returns `outcome.winner`, and `runAnalyzer` assigns
+`winner` on the same two lines that assign `analysis`
+(`executor.go:545-546` and `:578-579`). `determineWinner` never returns nil —
+every rule action builds a `slotResult`, and the unmatched fallthrough builds a
+dispute error. So the branch cannot fire today.
+
+It is worth deleting anyway. It is the last route by which `Run` can hand the
+network layer an empty body with no explanation, and it converts a future
+regression — one new rule action that returns nil — into exactly the silent
+outcome bug 69 was. Every other no-winner case in this package produces a named
+error. An `ErrConsensusLowParticipants` here would cost nothing and would fail
+loud instead.
+
+Found while fixing bug 69.
