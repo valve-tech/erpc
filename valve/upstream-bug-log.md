@@ -2687,3 +2687,77 @@ error. An `ErrConsensusLowParticipants` here would cost nothing and would fail
 loud instead.
 
 Found while fixing bug 69.
+
+---
+
+## 95. `NewUpstream` hands a vendor its logger, then overwrites it
+
+**Status: FIXED in the fork.** Upstream still carries it.
+**Severity: medium.** A data race in the bootstrap path.
+
+`upstream/upstream.go:275` passed `&lg` into `common.GenerateVendorConfigs`.
+A vendor may keep that pointer past the call: `AlchemyVendor.GenerateConfigs`
+starts an async credit-unit refresh (`thirdparty/alchemy.go:297` ->
+`thirdparty/remote_cache.go:191`) whose goroutine logs from it later.
+
+Line 298 then rewrote `lg` IN PLACE to add the `vendorName` field:
+
+    lg = pup.logger.With().Str("vendorName", pup.VendorName()).Logger()
+
+So the refresh goroutine reads the `zerolog.Logger` struct while bootstrap
+writes it. `go test -race ./erpc/` reports four races on adjacent fields of
+that struct. It needs only a config with an Alchemy upstream.
+
+The rewrite is a retro-fit: it adds a field to a logger whose pointer four
+earlier lines (237, 251, 259, 275) already handed out. That works only while
+no holder logs concurrently, and the async refresh broke that assumption.
+
+Fix: the vendor call gets its own copy (`vlg := lg`), so nothing mutates a
+value another goroutine holds. The retro-fit itself stays — see 97.
+
+## 96. Concurrent network bootstrap corrupts the shared selection policy
+
+**Status: FIXED in the fork.** Upstream still carries it.
+**Severity: high.** It affects the DEFAULT configuration of any project with
+more than one network.
+
+`internal/policy/default_policy.go` — `upgradeDefaultPolicy` rewrites three
+fields on the config it is given:
+
+    cfg.EvalFunc = DefaultPolicySource()
+    cfg.EvalFuncOriginal = cfg.EvalFunc
+    cfg.CompiledProgram = program
+
+`Engine.RegisterNetwork` calls it BEFORE taking `e.mu`, so the write is
+unguarded. Networks bootstrap concurrently (`erpc/networks_registry.go:284`
+-> `erpc/networks.go:259`), and every network that leaves `selectionPolicy`
+at the default arrives with the SAME `*SelectionPolicyConfig`. Two goroutines
+therefore write `CompiledProgram` at once. `go test -race` reports it as a
+write/write race.
+
+A torn `CompiledProgram` does not fail at bootstrap. It surfaces later as a
+selection policy that will not evaluate, on a config the operator never
+edited.
+
+Fix: serialise the rewrite. The function's own early return already makes it
+idempotent — the second caller sees the replaced `EvalFunc` and stops — so a
+mutex is all it needs.
+
+## 97. The policy engine edits a config it does not own
+
+**Status:** open. The design behind 95 and 96, recorded so the shallow fixes
+are not mistaken for the real one.
+
+Both races come from the same habit: a component mutates an object the caller
+owns and may share. `upgradeDefaultPolicy` rewrites the caller's
+`SelectionPolicyConfig`; `NewUpstream` rewrites a logger it already lent out.
+Each fix above stops one race. Neither stops the next one.
+
+The weakening in both cases is to stop writing shared input. The engine can
+keep the upgraded source and compiled program in its own per-network
+`networkRegistration`, which it already builds under `e.mu` and already owns.
+`NewUpstream` can build the vendor-labelled logger once, before it hands any
+pointer out, rather than retro-fitting a field afterwards.
+
+Neither is done here, because both are wider than a race fix and each needs
+its own pin.

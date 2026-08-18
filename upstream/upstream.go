@@ -272,7 +272,17 @@ func NewUpstream(
 	pup.initRateLimitAutoTuner()
 
 	if vn != nil {
-		cfgs, err := common.GenerateVendorConfigs(appCtx, vn, &lg, cfg, nil)
+		// The vendor gets its OWN logger value, not &lg.
+		//
+		// A vendor may hand this pointer to a goroutine that outlives the call:
+		// Alchemy's GenerateConfigs starts an async credit-unit refresh which
+		// keeps the logger and writes from it later. Line ~299 below then
+		// rewrites `lg` in place to add the vendorName field, so the background
+		// goroutine reads the struct while this one writes it. `go test -race`
+		// reports that as four separate races on adjacent Logger fields, at
+		// bootstrap, on any config with an Alchemy upstream.
+		vlg := lg
+		cfgs, err := common.GenerateVendorConfigs(appCtx, vn, &vlg, cfg, nil)
 		if err != nil {
 			return nil, err
 		}

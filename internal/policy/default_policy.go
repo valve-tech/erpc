@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/erpc/erpc/common"
 	"github.com/rs/zerolog"
@@ -45,10 +46,27 @@ func DefaultPolicySource() string {
 // (`common.DefaultSelectionPolicySource`) for the rich default-policy.js
 // at engine-register time. common/ can't reach this package, so the
 // upgrade must happen here.
+// upgradeDefaultPolicyMu serialises the rewrite below.
+//
+// The config it edits is SHARED. Networks bootstrap concurrently, and every
+// network that leaves selectionPolicy at the default reaches this function
+// with the same *SelectionPolicyConfig, so two goroutines wrote EvalFunc,
+// EvalFuncOriginal and CompiledProgram at once. `go test -race` reports it as
+// a write/write race at networks.go:259, and a torn CompiledProgram would
+// surface later as a selection policy that fails to evaluate.
+//
+// The early return below already makes the rewrite idempotent — the second
+// caller sees the replaced EvalFunc and stops — so serialising is all this
+// needs. The deeper fix is for the engine to stop editing a config it does
+// not own; that is logged as a separate finding.
+var upgradeDefaultPolicyMu sync.Mutex
+
 func upgradeDefaultPolicy(cfg *common.SelectionPolicyConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	upgradeDefaultPolicyMu.Lock()
+	defer upgradeDefaultPolicyMu.Unlock()
 	if strings.TrimSpace(cfg.EvalFunc) != strings.TrimSpace(common.DefaultSelectionPolicySource) {
 		return nil
 	}
