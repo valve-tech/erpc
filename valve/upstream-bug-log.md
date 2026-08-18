@@ -2137,3 +2137,35 @@ break) instead of re-reading the cursor afterwards.
 
 Pinned by
 `TestPostgreSQLConnector_DatabasePaths/List_truncates_at_the_limit_and_never_offers_a_next_page`.
+
+---
+
+# Hazards — safe today, only because every caller happens to cooperate
+
+## H1. `GetNetworkUpstreams` returns aliased memory on one path and a copy on the other
+
+`upstream/registry.go:402-421`. The lock-free fast path returns the stored
+slice itself:
+
+    if v, ok := u.networkUpstreamsAtomic.Load(networkId); ok {
+        if arr, ok2 := v.([]*Upstream); ok2 {
+            return arr          // the registry's own backing array
+        }
+    }
+
+The fallback path returns a fresh copy (`cp`). So the same function hands back
+either shared or owned memory, and which one you get depends on whether the
+snapshot is warm — that is, on timing.
+
+All 19 production callers only range over the result or copy it out, so
+nothing is broken today. But a future caller that sorts the result in place
+(`sort.Slice(ups, ...)`, the obvious way to rank upstreams) would reorder the
+registry's shared snapshot for every other reader, concurrently and without a
+lock. Nothing in the signature or the doc comment warns about it.
+
+Weaken it by making the contract single-valued: copy on the fast path too, or
+return a read-only type. Do not rely on callers staying polite.
+
+Found while fixing a `go vet` failure in `erpc/query_executor_test.go`, which
+copied a populated `sync.Map` over the registry's field. That fixture bug is
+fixed; this one is upstream's.
