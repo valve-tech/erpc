@@ -1670,6 +1670,120 @@ unobservable. They are not bugs, and a test cannot pin them.
   `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
   path and these are optimisations, correctly.
 
+## 59. A static method is refused as a missing historical block
+
+**Status:** pinned. **Severity: high.** Every `eth_chainId` and `net_version`
+fails on any upstream that declares a lower availability bound.
+
+`architecture/evm/block_ref.go:356` gives block-agnostic, cache-forever methods
+the block reference `*` and the block number **1** — the comment says so: "We
+use block number 1 as a signal to indicate data is finalized on first ever
+block". It is a cache sentinel, not a block anybody asked for.
+
+`erpc/networks.go:2867-2894` (`checkUpstreamBlockAvailability`) reads that
+sentinel as a real block. It takes `EvmBlockNumber()`, finds 1, compares it
+against the upstream's resolved lower bound and returns
+`ErrUpstreamBlockUnavailable{blockNumber: 1}` with `retryable=false`. The lower
+bound arrives from `evm.blockAvailability.lower` **or** from the much more
+common `maxAvailableRecentBlocks`, which resolves to `latest - N`
+(`upstream/upstream.go:1022-1029`) — so any non-archive node in the pool is
+affected.
+
+`erpc/networks.go:2940-2969` (`eligibleUpstreamIDsForBoundary`) reads the same
+sentinel and returns an empty boundary lane for those methods when
+`selectionPolicy.evalPerBoundary` is on.
+
+What an operator sees: on a fleet of pruned nodes, `eth_chainId` and
+`net_version` fail on every upstream and come back as upstreams-exhausted,
+while `eth_getBalance` against `latest` on the same nodes succeeds — because a
+tip-bound read resolves to block number 0 and skips the gate. Chain-id probes
+are also how eRPC validates an upstream, so the same sentinel can put a healthy
+node out of service.
+
+The gate needs to distinguish "no block dependency" from "block one". Reading
+the block *reference* (`*`) rather than the number is enough.
+
+`TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound`
+(`erpc/networks_boundary_test.go`) pins both halves.
+
+## 60. The gRPC query surface ignores every `queryShim` limit
+
+**Status:** pinned. **Severity: medium.** A cost and blast-radius control that
+covers only half the traffic.
+
+`upstreams[].evm.queryShim` carries `enabled`, `allowedMethods`,
+`maxBlockRange`, `maxLimit`, `defaultLimit` and `concurrency`. The JSON-RPC
+surface honours all of them: `architecture/evm/eth_query.go:74-91` gates on
+`enabled` and `allowedMethods`, and `eth_query_helpers.go:361` reads the rest.
+
+The BDS gRPC `QueryService` runs a second, independent shim in `erpc/` and
+reads none of it. `erpc/query_shim.go:458` (`queryLimit`) hard-codes a default
+of 100 and enforces no maximum; `erpc/query_executor.go:276`
+(`resolveQueryBounds`) checks only `from <= to` and enforces no range cap.
+
+What an operator sees: `maxBlockRange: 2` on an upstream, and a single gRPC
+`QueryBlocks` for a 17-block range still issues 17 `eth_getBlockByNumber`
+calls to that upstream — all billed, all against its rate budget. Setting
+`enabled: false` does not turn the gRPC path off either.
+
+`TestGrpcQueryBlocks_WalksAWiderRangeThanTheUpstreamsQueryShimAllows` and
+`TestGrpcQueryBlocks_ServesTheQueryEvenWhenTheShimIsTurnedOff`
+(`erpc/query_shim_limits_test.go`) pin both.
+
+## 61. `shimQueryTraces` drops the cursor when a page ends on genesis
+
+**Status:** pinned. **Severity: medium.** Silent short answer.
+
+`erpc/query_shim.go:246`:
+
+```go
+var cursor *evm.CursorBlock
+if hasMore && lastIncluded > 0 {
+    cursor = cursorFromNumber(lastIncluded)
+}
+```
+
+`lastIncluded` is a plain block number, and 0 is a real block. A query that
+starts at `earliest` and fills its limit inside genesis therefore returns a
+full page with **no cursor**. A client reads a missing cursor as "the range is
+exhausted" and stops, so every block after genesis is dropped from the answer
+with nothing said.
+
+`shimQueryTransactions` (`:99`) does not have this problem — it guards on a
+`*evm.BlockHeader` being non-nil, which separates "block 0" from "no block".
+The same fix applies here.
+
+`shimQueryTransfers` inherits it: it copies the trace page's cursor through
+untouched (`:291`).
+
+`TestShimQueryTraces_DropsTheCursorWhenItStopsOnBlockZero` and
+`TestShimQueryTransfers_InheritsTheSameLostCursor`
+(`erpc/query_shim_cursor_test.go`) pin it, and
+`TestShimQueryTraces_CarriesACursorWhenItStopsOnABlockAboveGenesis` is the
+positive control that isolates the block number rather than the pagination
+rule.
+
+## 62. Four dead methods on `networkExecutor`
+
+**Status:** open. **Severity: low.** Dead code, one of it a bypassed wrapper.
+
+`erpc/network_executor.go` declares `Timeout()` (`:112`), `HasHedge()`
+(`:134`), `HasRetry()` (`:142`) and `shouldRetry()` (`:374`). None of them has
+a single caller anywhere in the module. `networkExecutor` is unexported, so
+nothing outside the package can reach them either.
+
+`shouldRetry` is the interesting one. Its doc comment says "Returning true
+causes the caller to emit a `network_retry_attempt_total{reason}` metric", but
+`runRetry` (`:281`) calls `shouldRetryWithReason` directly and never goes
+through the wrapper. The upstream-scope twin does use both — `upstreamExecutor`
+calls its own `Timeout()` (`upstream/upstream.go:980`) and `shouldRetry()`
+(`upstream/upstream_executor.go:201`) — so these four look like a copied
+surface that was never wired.
+
+Delete them, or wire `runRetry` through `shouldRetry` so the comment is true.
+
+---
+
 ---
 
 # Bugs in the FORK's own code — ours to fix, not upstream's
