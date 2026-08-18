@@ -2205,7 +2205,24 @@ until entry 91 is fixed.
 
 ## 91. `IsValidNetwork` enumerates two architectures, so a provider cannot name a third
 
-**Status:** open, inherited from upstream (`common/network.go:95`).
+**Status: FIXED in the fork.** Inherited from upstream (`common/network.go:95`).
+Upstream still carries it.
+
+The fix separates the two questions the function was conflating. The chain
+family owns the ID shape, so `IsValidNetwork` now asks the registry through
+`util.IsValidNetworkId` — the same property `IsValidArchitecture` twelve lines
+above already had. Config policy stays behind: EVM still requires a positive
+chain id, because `util.IsEvmNetworkIdBody` accepts a negative integer on
+purpose (see its comment) and delegating outright would start loading
+`evm:0` and `evm:-1`.
+
+Pinned by three tests in `common/network_validation_test.go`. The registry test
+registers a FAKE family rather than naming btc: `common` cannot import
+`architecture/btc` without a cycle, and pinning one real family would test the
+wrong thing — what matters is that any registered family is accepted, including
+the next one nobody has written. Three mutations staged, three detected:
+restoring the enumerated prefix match, dropping the chain-id policy, and
+loosening it to `>= 0`.
 
 `IsValidNetwork` matches the `evm:` prefix, then the `svm:` prefix, then
 returns false:

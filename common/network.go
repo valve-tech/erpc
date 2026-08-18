@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -92,58 +93,33 @@ func IsValidArchitecture(architecture string) bool {
 	return ok
 }
 
+// IsValidNetwork reports whether a config may name this network.
+//
+// Two questions live here, and they are not the same question:
+//
+//  1. IS THE ID WELL FORMED? That belongs to the chain family, so this asks
+//     the registry through util.IsValidNetworkId. A family registers its own
+//     rule at init, so adding a chain needs no edit here — the same property
+//     IsValidArchitecture above already has. This function used to match
+//     "evm:" and then "svm:" and then return false, which meant a config
+//     naming btc:mainnet under providers[].onlyNetworks failed to load even
+//     though every other gate in the request path accepted it.
+//
+//  2. DOES CONFIG ACCEPT IT? That is policy, and it stays here. EVM is the
+//     one family with a rule of this kind: a chain id must be positive.
+//     util.IsEvmNetworkIdBody deliberately accepts a negative integer (see its
+//     comment) because it answers question 1 only. Delegating outright would
+//     therefore start accepting "evm:0" and "evm:-1" in config, so the check
+//     stays, right next to the other thing config decides.
 func IsValidNetwork(network string) bool {
-	if strings.HasPrefix(network, "evm:") {
-		chainId, err := strconv.ParseInt(strings.TrimPrefix(network, "evm:"), 10, 64)
-		if err != nil {
-			return false
-		}
-		return chainId > 0
+	if !util.IsValidNetworkId(network) {
+		return false
 	}
-	if strings.HasPrefix(network, "svm:") {
-		rest := strings.TrimPrefix(network, "svm:")
-		if rest == "" {
-			return false
-		}
-		// Two shapes: "svm:<cluster>" (implicit solana, back-compat) and
-		// "svm:<chain>:<cluster>". Accept known (chain, cluster) pairs
-		// outright; accept unknown ones that look like valid identifiers so
-		// users can run private chains/clusters behind eRPC (bootstrap still
-		// enforces the genesis hash when CheckGenesisHash is set).
-		parts := strings.SplitN(rest, ":", 3)
-		if len(parts) > 2 {
-			return false
-		}
-		var chain, cluster string
-		if len(parts) == 1 {
-			cluster = parts[0]
-		} else {
-			chain, cluster = parts[0], parts[1]
-		}
-		if cluster == "" {
-			return false
-		}
-		if IsValidSvmCluster(chain, cluster) {
-			return true
-		}
-		isIdentifier := func(s string) bool {
-			if s == "" {
-				return true // empty chain is fine — means implicit solana
-			}
-			for _, r := range s {
-				if !(r == '-' || r == '_' || r == '.' ||
-					(r >= 'a' && r <= 'z') ||
-					(r >= 'A' && r <= 'Z') ||
-					(r >= '0' && r <= '9')) {
-					return false
-				}
-			}
-			return true
-		}
-		return isIdentifier(chain) && isIdentifier(cluster)
+	if body, ok := strings.CutPrefix(network, "evm:"); ok {
+		chainId, err := strconv.ParseInt(body, 10, 64)
+		return err == nil && chainId > 0
 	}
-
-	return false
+	return true
 }
 
 type QuantileTracker interface {
