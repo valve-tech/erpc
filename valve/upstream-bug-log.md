@@ -1483,7 +1483,7 @@ only the reason is lost. Pinned by
 
 ---
 
-## 53. `SuggestFinalizedBlock` drops a suggestion under contention; the latest twin does not
+## 62. `SuggestFinalizedBlock` drops a suggestion under contention; the latest twin does not
 
 **Status:** open. **Severity: low in production, high in tests.**
 
@@ -1514,7 +1514,7 @@ delayed.
 
 ---
 
-## 59. A TypeScript config with no exports panics instead of explaining itself
+## 63. A TypeScript config with no exports panics instead of explaining itself
 
 **Status:** pinned. **Severity: medium.**
 `TestLoadConfig_TypeScriptWithNoExportsPanics`
@@ -1540,7 +1540,7 @@ invisible from the config file, which is what makes the panic surprising.
 One guard in `Runtime.Exports` — return nil when the value is null or
 undefined — fixes it, and the existing check at `:3255` then handles the rest.
 
-## 60. A mistyped current-schema key is reported against the legacy shadow
+## 64. A mistyped current-schema key is reported against the legacy shadow
 
 **Status:** pinned. **Severity: medium.**
 `TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow` and
@@ -1582,7 +1582,7 @@ document which shape it is, or add the current-only keys to the shadow. Entry
 53 above asks for the same structural change to the upstream path for a
 different symptom.
 
-## 61. A rate-limit rule logs nanoseconds under a key that says milliseconds
+## 65. A rate-limit rule logs nanoseconds under a key that says milliseconds
 
 **Status:** pinned. **Severity: low.**
 `TestRateLimitRuleConfig_MarshalZerologObject`
