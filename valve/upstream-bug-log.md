@@ -1670,7 +1670,7 @@ unobservable. They are not bugs, and a test cannot pin them.
   `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
   path and these are optimisations, correctly.
 
-## 59. A static method is refused as a missing historical block
+## 72. A static method is refused as a missing historical block
 
 **Status:** pinned. **Severity: high.** Every `eth_chainId` and `net_version`
 fails on any upstream that declares a lower availability bound.
@@ -1706,7 +1706,7 @@ the block *reference* (`*`) rather than the number is enough.
 `TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound`
 (`erpc/networks_boundary_test.go`) pins both halves.
 
-## 60. The gRPC query surface ignores every `queryShim` limit
+## 73. The gRPC query surface ignores every `queryShim` limit
 
 **Status:** pinned. **Severity: medium.** A cost and blast-radius control that
 covers only half the traffic.
@@ -1730,7 +1730,7 @@ calls to that upstream — all billed, all against its rate budget. Setting
 `TestGrpcQueryBlocks_ServesTheQueryEvenWhenTheShimIsTurnedOff`
 (`erpc/query_shim_limits_test.go`) pin both.
 
-## 61. `shimQueryTraces` drops the cursor when a page ends on genesis
+## 74. `shimQueryTraces` drops the cursor when a page ends on genesis
 
 **Status:** pinned. **Severity: medium.** Silent short answer.
 
@@ -1763,7 +1763,7 @@ untouched (`:291`).
 positive control that isolates the block number rather than the pagination
 rule.
 
-## 62. Four dead methods on `networkExecutor`
+## 75. Four dead methods on `networkExecutor`
 
 **Status:** open. **Severity: low.** Dead code, one of it a bypassed wrapper.
 
