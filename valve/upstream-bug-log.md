@@ -1897,7 +1897,7 @@ of a `checkProbe` error no probe implementation produces).
 
 ---
 
-## 59. A consensus round can return neither a response nor an error
+## 69. A consensus round can return neither a response nor an error
 
 **Status:** pinned. **Severity: medium.** The caller gets `(nil, nil)`.
 
@@ -1939,7 +1939,7 @@ correctly.
 
 ---
 
-## 60. `BootstrapTask.Wait` busy-spins on a full core and ignores its context
+## 70. `BootstrapTask.Wait` busy-spins on a full core and ignores its context
 
 **Status:** pinned. **Severity: low.** Wasted CPU, and an uncancellable wait.
 
@@ -1980,7 +1980,7 @@ Pinned by
 
 ---
 
-## 61. `PostgreSQLConnector.List` can never hand out a next-page token
+## 71. `PostgreSQLConnector.List` can never hand out a next-page token (DUPLICATE of 24 — independently rediscovered, kept as corroboration)
 
 **Status:** pinned. **Severity: medium.** Silent truncation.
 
