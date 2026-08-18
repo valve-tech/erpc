@@ -61,7 +61,7 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// Pin what a poll will WRITE to match what the Suggest calls below SET.
+		// Pin what a poll will WRITE to match what seedEvmHeads below SETS.
 		//
 		// setupSelectionPolicyNetwork seeds every upstream to latest=1000 /
 		// finalized=900, and ups.Bootstrap starts a poll that can land after
@@ -92,16 +92,16 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		primaryUp := upstreamByID(t, network, "primary-node").(*upstream.Upstream)
 		fallbackUp := upstreamByID(t, network, "fallback-node").(*upstream.Upstream)
 
-		primaryUp.EvmStatePoller().SuggestLatestBlock(1000)
-		primaryUp.EvmStatePoller().SuggestFinalizedBlock(1000)
-		fallbackUp.EvmStatePoller().SuggestLatestBlock(1010)
-		fallbackUp.EvmStatePoller().SuggestFinalizedBlock(1010)
+		// The fallback MUST be ahead for the assertions below to mean anything:
+		// with both upstreams on 1000 the tip is 1000 no matter who votes.
+		// seedEvmHeads writes the heads synchronously and asserts them, so the
+		// precondition is a fact by the next line — nothing has to converge.
+		seedEvmHeads(t, ctx, network.upstreamsRegistry, primaryUp, 1000, 1000)
+		seedEvmHeads(t, ctx, network.upstreamsRegistry, fallbackUp, 1010, 1010)
 
-		require.Eventually(t, func() bool {
-			return primaryUp.EvmEffectiveFinalizedBlock() == 1000 &&
-				fallbackUp.EvmEffectiveFinalizedBlock() == 1010
-		}, 20*time.Second, 10*time.Millisecond,
-			"seeded heads should settle before the tip is read")
+		require.Equal(t, int64(1000), primaryUp.EvmEffectiveFinalizedBlock())
+		require.Equal(t, int64(1010), fallbackUp.EvmEffectiveFinalizedBlock(),
+			"the fallback must be ahead, else the tip assertions pass vacuously")
 
 		policy.TickForTest(network.policyEngine, network.networkId, "*")
 
@@ -209,16 +209,15 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		require.NotNil(t, primaryUp)
 		require.NotNil(t, fallbackUp)
 
-		primaryUp.EvmStatePoller().SuggestLatestBlock(1000)
-		primaryUp.EvmStatePoller().SuggestFinalizedBlock(1000)
-		fallbackUp.EvmStatePoller().SuggestLatestBlock(1050)
-		fallbackUp.EvmStatePoller().SuggestFinalizedBlock(1050)
+		// Synchronous seed — see seedEvmHeads. No eth_getBlockByNumber mock is
+		// staged for either host here, so no poll can write a head and these
+		// two writes are the only ones the counters ever see.
+		seedEvmHeads(t, ctx, upstreamsRegistry, primaryUp, 1000, 1000)
+		seedEvmHeads(t, ctx, upstreamsRegistry, fallbackUp, 1050, 1050)
 
-		require.Eventually(t, func() bool {
-			return primaryUp.EvmEffectiveFinalizedBlock() == 1000 &&
-				fallbackUp.EvmEffectiveFinalizedBlock() == 1050
-		}, 20*time.Second, 10*time.Millisecond,
-			"seeded heads should settle before the tip is read")
+		require.Equal(t, int64(1000), primaryUp.EvmEffectiveFinalizedBlock())
+		require.Equal(t, int64(1050), fallbackUp.EvmEffectiveFinalizedBlock(),
+			"the fallback must be ahead, else the tip assertions pass vacuously")
 
 		assert.Equal(t, int64(1000), network.EvmHighestFinalizedBlockNumber(ctx),
 			"N=2 majority is the lower head: one upstream out ahead never defines the tip")
