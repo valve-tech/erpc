@@ -1,11 +1,30 @@
 package util
 
 import (
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// counterKeyRun makes the counter keys below unique to one execution.
+//
+// IncrementAndGetIndex counts in a package-global map that nothing resets, so
+// a test asserting "the first index is 1" against a fixed key can only be true
+// the first time it runs. That made `-count=2` fail — and `-count=N` is the
+// way anyone checks whether a test is stable, so the suite could not be
+// examined with its own standard tool.
+//
+// Clearing the global would be the wrong fix: this package has parallel tests,
+// and one of them asserts that IncrementAndGetIndex never repeats. A fresh key
+// per run touches no shared state at all.
+var counterKeyRun atomic.Int64
+
+func uniqueCounterKey(prefix string) string {
+	return prefix + "-run" + strconv.FormatInt(counterKeyRun.Add(1), 10)
+}
 
 // EvmNetworkId builds the network ID that keys the cache, the metrics
 // labels and the upstream registry. A change in its shape silently splits
@@ -61,18 +80,20 @@ func TestIsValidIdentifier_AcceptsOnlyAlnumDashUnderscore(t *testing.T) {
 // collide on a name overwrite each other in the registry, so the counter
 // must be per-key and must never repeat a value under concurrency.
 func TestIncrementAndGetIndex_CountsPerKeyAndStartsAtOne(t *testing.T) {
-	require.Equal(t, "1", IncrementAndGetIndex("test-per-key", "alpha"))
-	require.Equal(t, "2", IncrementAndGetIndex("test-per-key", "alpha"))
-	require.Equal(t, "1", IncrementAndGetIndex("test-per-key", "beta"),
+	key := uniqueCounterKey("test-per-key")
+	require.Equal(t, "1", IncrementAndGetIndex(key, "alpha"))
+	require.Equal(t, "2", IncrementAndGetIndex(key, "alpha"))
+	require.Equal(t, "1", IncrementAndGetIndex(key, "beta"),
 		"a different key must keep its own counter")
-	require.Equal(t, "3", IncrementAndGetIndex("test-per-key", "alpha"))
+	require.Equal(t, "3", IncrementAndGetIndex(key, "alpha"))
 }
 
 func TestIncrementAndGetIndex_SeparatesPartsUnambiguously(t *testing.T) {
 	// ("ab","c") and ("a","bc") must not share a counter. A naive
 	// concatenation would merge them and hand out a duplicate index.
-	require.Equal(t, "1", IncrementAndGetIndex("test-sep-ab", "c"))
-	require.Equal(t, "1", IncrementAndGetIndex("test-sep-a", "bc"))
+	run := uniqueCounterKey("test-sep")
+	require.Equal(t, "1", IncrementAndGetIndex(run+"ab", "c"))
+	require.Equal(t, "1", IncrementAndGetIndex(run+"a", "bc"))
 }
 
 func TestIncrementAndGetIndex_NeverRepeatsUnderConcurrency(t *testing.T) {

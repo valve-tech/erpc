@@ -246,20 +246,35 @@ func TestInitializer_MultipleTasksMixedResultsInitializing(t *testing.T) {
 	appCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// The retry delay is the width of the window in which StatePartial is
+	// observable: the failed task is retried after it, and a successful retry
+	// moves the initializer to Ready. At 250ms a loaded machine could close
+	// that window before the assertion ran, so the delay is now a second.
 	init := setupInitializer(t, appCtx, &InitializerConfig{
-		TaskTimeout:   time.Second,
+		TaskTimeout:   5 * time.Second,
 		AutoRetry:     true,
-		RetryMinDelay: time.Millisecond * 250,
-		RetryMaxDelay: time.Millisecond * 250,
+		RetryMinDelay: time.Second,
+		RetryMaxDelay: time.Second,
 	})
 
 	// We'll define three tasks:
-	// 1) A task that takes time (so the initializer stays "Initializing" briefly).
+	// 1) A task the TEST decides when to finish, so "Initializing" is a fact
+	//    rather than a 50ms guess.
 	// 2) A task that fails on the first run.
 	// 3) A task that succeeds immediately.
+	//
+	// This test used to sleep 5ms and assert Initializing, then sleep 50ms and
+	// assert Partial. The second assertion raced the 50ms task with 5ms of
+	// margin, and it lost under the load of a full suite run: the task was
+	// still running, so the state was still Initializing.
+	releaseLongTask := make(chan struct{})
 	longRunningTask := NewBootstrapTask("long-running", func(ctx context.Context) error {
-		time.Sleep(50 * time.Millisecond)
-		return nil
+		select {
+		case <-releaseLongTask:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	})
 
 	attempts := 0
@@ -281,14 +296,25 @@ func TestInitializer_MultipleTasksMixedResultsInitializing(t *testing.T) {
 		_ = init.ExecuteTasks(appCtx, longRunningTask, failingTaskFirst, immediateSuccess)
 	}()
 
-	// Give an instant for tasks to start so we can observe StateInitializing.
-	time.Sleep(5 * time.Millisecond)
-	assert.Equal(t, StateInitializing, init.State(), "one or more tasks should still be running")
-	time.Sleep(50 * time.Millisecond)
-	assert.Equal(t, StatePartial, init.State(), "one task must be failed")
+	// The long task holds until this test releases it, so Initializing is not
+	// a race: it stays true until the next line.
+	require.Eventually(t, func() bool { return init.State() == StateInitializing },
+		5*time.Second, time.Millisecond, "a blocked task must hold the initializer in Initializing")
 
-	// Wait again for the retry attempt to finish
-	time.Sleep(250 * time.Millisecond)
+	close(releaseLongTask)
+
+	// Now every task in the first attempt has settled: two succeeded and one
+	// failed, so the initializer must report Partial until the retry runs.
+	require.Eventually(t, func() bool { return init.State() == StatePartial },
+		900*time.Millisecond, time.Millisecond, "one task must be failed")
+
+	// The retry runs a second after the failure. Wait for its effect rather
+	// than for the clock: WaitForTasks reports the CURRENT outcome, so calling
+	// it before the retry lands returns the first attempt's error. That is what
+	// the deleted `time.Sleep(250ms)` was really for.
+	require.Eventually(t, func() bool { return init.State() == StateReady },
+		5*time.Second, 5*time.Millisecond, "the retried task must succeed")
+
 	err := init.WaitForTasks(appCtx)
 	require.NoError(t, err, "the second attempt should succeed, no further errors expected")
 
