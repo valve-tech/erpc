@@ -643,8 +643,15 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 	}
 	n += int64(nn)
 
-	// Write ID
-	nn, err = w.Write(r.idBytes)
+	// Write ID. An upstream that omits the id member leaves idBytes empty, and
+	// writing nothing here emits `{"jsonrpc":"2.0","id":,…}` — a body no client
+	// can parse. JSON-RPC 2.0 names null as the id for a response whose id
+	// cannot be determined, so write that instead.
+	idBytes := r.idBytes
+	if len(idBytes) == 0 {
+		idBytes = []byte("null")
+	}
+	nn, err = w.Write(idBytes)
 	if err != nil {
 		return n + int64(nn), err
 	}

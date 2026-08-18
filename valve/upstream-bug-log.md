@@ -1404,6 +1404,153 @@ delayed.
 
 ---
 
+## 85. One stray dash in a YAML config kills eRPC at boot
+
+**Status:** fixed-in-fork (`common/config.go`). **Severity: high.** Bootstrap
+crash instead of a config error.
+
+An operator writes a list item and leaves it empty:
+
+```yaml
+projects:
+  -
+```
+
+YAML decodes that item as a nil pointer. `SetDefaults` then dereferences it and
+the process dies with a nil-pointer panic before the logger says anything
+useful. The operator sees a stack trace, not the line to fix.
+
+The whole eleven-byte input is `projects:\n-`.
+
+Every list of config objects carries the same defect, and so does one map. Each
+site below is a distinct nil receiver, all reached from `Config.SetDefaults`
+(`common/defaults.go:95`):
+
+| container | panic site |
+| --- | --- |
+| `projects` | `common/defaults.go:1340` |
+| `projects[].upstreams` | `common/defaults.go:1894` |
+| `projects[].networks` | `common/defaults.go:2223` |
+| `projects[].providers` | `common/defaults.go:1743` |
+| `projects[].providers[].overrides` (map) | `common/defaults.go:1751` |
+| `projects[].auth.strategies` | `common/defaults.go:3136` |
+| `rateLimiters.budgets` | `common/defaults.go:3312` |
+| `database.evmJsonRpcCache.connectors` | `common/defaults.go:1049` |
+| `database.evmJsonRpcCache.policies` | `common/defaults.go:772` |
+
+The map case needs a key with an empty value:
+
+```yaml
+projects:
+  - id: a
+    providers:
+      - vendor: alchemy
+        overrides:
+          evm:1:
+```
+
+`FuzzLoadConfigYaml` (`common/config_fuzz_test.go`) found the first one in
+under two seconds. The rest came from walking the same shape across the config
+tree.
+
+The fork rejects an empty entry before `SetDefaults` runs and names it:
+
+```
+config: projects[0].upstreams[0] has no content, remove the entry or fill it in
+config: projects[0].providers[0].overrides[evm:1] has no content, remove the entry or fill it in
+```
+
+`rejectEmptyListItems` walks the decoded config once and errors on any nil
+pointer inside a list or a map. It is generic rather than a guard per
+container, so a list added later is covered too. A `null` inside a `params`
+list stays legal — that is a JSON-RPC value, not an empty entry.
+
+One behaviour changes beyond the crash: an empty
+`networks[].methods.definitions` key used to decode to nil and get ignored in
+silence. It is now an error. An empty definition carries no fields, so the only
+thing it can express is a typo.
+
+Pinned by `TestLoadConfig_AnEmptyListItemNamesItselfInsteadOfPanicking`,
+`TestLoadConfig_AnEmptyMapValueNamesItselfInsteadOfPanicking` and
+`TestLoadConfig_ANullParamSurvivesTheEmptyItemCheck`.
+
+---
+
+## 86. A corrupt cache entry becomes an HTTP 200 with a broken body
+
+**Status:** open. **Severity: medium.** Silent protocol violation toward the
+client.
+
+The cache read path builds a response straight out of the stored bytes and
+never checks that they are JSON:
+
+- `architecture/evm/json_rpc_cache.go:1158`
+- `architecture/svm/json_rpc_cache.go:435`
+
+Both call `common.NewJsonRpcResponseFromBytes(nil, resultBytes, nil)`, which
+stores the bytes as the result verbatim. `WriteTo` then copies them onto the
+wire.
+
+Store the value `{"number":"0x1b4` — a value truncated mid-string — under the
+key for `eth_getBlockByNumber("0x1b4")`, and the next cache hit answers:
+
+```
+HTTP 200
+{"jsonrpc":"2.0","id":11,"result":{"number":"0x1b4}
+```
+
+No layer reports an error. `cache.Get` returns nil error, `WriteTo` returns nil
+error, and the log stays quiet. The client raises a JSON syntax error and the
+operator has nothing to correlate it with.
+
+The cache is a SHARED store — Redis, PostgreSQL, S3 — so its bytes are not
+eRPC's to trust. A truncated value, a partial object, or another writer on the
+same key all produce this.
+
+The fix costs a scan of every cache hit, so the trade-off belongs to the
+maintainer. `TestEvmJsonRpcCache_ACorruptStoredValueReachesTheClientVerbatim`
+pins the current behaviour and fails the moment the read path starts
+validating.
+
+---
+
+## 87. eRPC launders a non-conforming upstream body into a broken client response
+
+**Status:** open. **Severity: low.** Interop defect, no crash.
+
+RFC 8259 forbids an unescaped control character inside a JSON string. sonic
+accepts one, and `JsonRpcResponse.WriteTo` (`common/json_rpc.go:631`) forwards
+the result and error bytes verbatim, so eRPC hands the client a body its own
+parser rejects.
+
+An upstream error message with a literal newline is enough:
+
+```
+{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom
+next line"}}
+```
+
+`ParseFromStream` accepts it. `WriteTo` reproduces it byte for byte. Go's
+`encoding/json`, `JSON.parse` and Python's `json` all reject the result. eRPC
+reports success at every layer.
+
+`FuzzJsonRpcResponseParseFromStream` found it as `{"result":{"":"\x1e"}}`
+(`common/testdata/fuzz/FuzzJsonRpcResponseParseFromStream/46ff799e75a85057`).
+
+Verbatim pass-through of the result is a deliberate design fact (see the
+`NormalizedResponse.MarshalJSON` note at the end of this file), so the fix is
+either a validity check at parse time or escaping at write time — both cost a
+scan of every response. `TestJsonRpcResponse_AnUnescapedControlCharacterPassesThrough`
+pins the current behaviour.
+
+A related gap in the same function IS fixed in the fork: an upstream reply with
+no `id` member made `WriteTo` emit `{"jsonrpc":"2.0","id":,"result":…}`, which
+no client can parse. JSON-RPC 2.0 names `null` as the id of a response whose id
+cannot be determined, so that is what goes on the wire now. Pinned by
+`TestJsonRpcResponse_WriteTo_AMissingIdBecomesNull`.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is

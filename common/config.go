@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"reflect"
 	"time"
 
 	"strings"
@@ -124,6 +125,10 @@ func LoadConfig(fs afero.Fs, filename string, opts *DefaultOptions) (*Config, er
 		}
 	}
 
+	if err := rejectEmptyListItems(&cfg); err != nil {
+		return nil, err
+	}
+
 	if LegacyTranslateFn != nil {
 		warnings, err := LegacyTranslateFn(&cfg)
 		if err != nil {
@@ -145,6 +150,125 @@ func LoadConfig(fs afero.Fs, filename string, opts *DefaultOptions) (*Config, er
 	}
 
 	return &cfg, nil
+}
+
+// configPackagePath bounds the reflective walk below to the config structs
+// declared in this package. Anything else (sobek programs, sync primitives,
+// stdlib types) is left alone.
+var configPackagePath = reflect.TypeOf(Config{}).PkgPath()
+
+// maxConfigWalkDepth stops the walk on a config type that points back at
+// itself. Each config level costs about three steps (field, pointer, slice
+// element) and the real tree is roughly twenty levels, so this leaves a wide
+// margin — the cap exists to bound a cycle, not to bound the config.
+const maxConfigWalkDepth = 256
+
+// rejectEmptyListItems turns an empty item in any config list into a clear
+// error that names the item.
+//
+// YAML decodes an item with nothing after the dash ("upstreams:\n  -") into a
+// nil pointer, and JSON does the same for a literal `null`. Every SetDefaults
+// down the tree dereferences its receiver without a guard, so a single stray
+// dash used to kill the process at boot with a nil-pointer panic and no clue
+// about which list held it.
+//
+// The walk is generic on purpose: it covers every list of config objects that
+// exists today and every one added later, instead of a guard per list.
+func rejectEmptyListItems(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	return walkForEmptyListItems(reflect.ValueOf(cfg), "", 0)
+}
+
+func walkForEmptyListItems(v reflect.Value, path string, depth int) error {
+	if !v.IsValid() || depth > maxConfigWalkDepth {
+		return nil
+	}
+
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return nil
+		}
+		return walkForEmptyListItems(v.Elem(), path, depth+1)
+
+	case reflect.Struct:
+		t := v.Type()
+		if t.PkgPath() != configPackagePath {
+			return nil
+		}
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			if err := walkForEmptyListItems(v.Field(i), joinConfigPath(path, configFieldName(f)), depth+1); err != nil {
+				return err
+			}
+		}
+
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			item := v.Index(i)
+			itemPath := fmt.Sprintf("%s[%d]", path, i)
+			if isEmptyConfigItem(item) {
+				return emptyConfigItemError(itemPath)
+			}
+			if err := walkForEmptyListItems(item, itemPath, depth+1); err != nil {
+				return err
+			}
+		}
+
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			itemPath := fmt.Sprintf("%s[%v]", path, iter.Key())
+			if isEmptyConfigItem(iter.Value()) {
+				return emptyConfigItemError(itemPath)
+			}
+			if err := walkForEmptyListItems(iter.Value(), itemPath, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// isEmptyConfigItem reports whether an element of a config list or map carries
+// no object at all.
+//
+// Only a nil POINTER to a config object counts. A nil inside an
+// []interface{} (cache policy params, static response params) is a legitimate
+// JSON-RPC null and must survive.
+func isEmptyConfigItem(v reflect.Value) bool {
+	return v.Kind() == reflect.Pointer && v.IsNil() && v.Type().Elem().Kind() == reflect.Struct
+}
+
+func emptyConfigItemError(path string) error {
+	return fmt.Errorf("config: %s has no content, remove the entry or fill it in", path)
+}
+
+func configFieldName(f reflect.StructField) string {
+	tag := f.Tag.Get("yaml")
+	if tag == "" {
+		return f.Name
+	}
+	if idx := strings.Index(tag, ","); idx >= 0 {
+		tag = tag[:idx]
+	}
+	if tag == "" || tag == "-" {
+		return f.Name
+	}
+	return tag
+}
+
+func joinConfigPath(parent, field string) string {
+	if parent == "" {
+		return field
+	}
+	return parent + "." + field
 }
 
 type ServerConfig struct {
