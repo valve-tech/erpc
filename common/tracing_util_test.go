@@ -25,6 +25,7 @@ func TestStartSpan_DisabledReturnsUsableNoopSpan(t *testing.T) {
 	saveTracingGlobals(t)
 	IsTracingEnabled = false
 	IsTracingDetailed = false
+	SetTracingDetailed(false)
 
 	base := context.Background()
 
