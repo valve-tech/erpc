@@ -3251,7 +3251,13 @@ func loadConfigFromTypescript(filename string) (*Config, error) {
 		return nil, err
 	}
 
-	defaultExport := runtime.Exports().Get("default")
+	// A file with no exports at all leaves no `exports` global behind, so
+	// the operator who forgot `export default` lands on the same sentence
+	// as the one who exported nothing.
+	var defaultExport sobek.Value
+	if exports := runtime.Exports(); exports != nil {
+		defaultExport = exports.Get("default")
+	}
 	if defaultExport == nil || sobek.IsUndefined(defaultExport) || sobek.IsNull(defaultExport) {
 		return nil, fmt.Errorf("config object must be default exported from TypeScript code AND must be the last statement in the file")
 	}

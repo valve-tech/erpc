@@ -335,10 +335,12 @@ func newTestUpstreamsRegistry(t *testing.T, networkID, method string, upstreams 
 	setUnexportedField(t, registry, "networkUpstreams", map[string][]*upstreampkg.Upstream{
 		networkID: upstreams,
 	})
-	// Also populate the atomic snapshot so GetNetworkUpstreams' fast path works.
-	atomicMap := &sync.Map{}
-	atomicMap.Store(networkID, upstreams)
-	setUnexportedField(t, registry, "networkUpstreamsAtomic", *atomicMap)
+	// Also populate the atomic snapshot so GetNetworkUpstreams' fast path
+	// works. Store through a pointer to the field: passing a sync.Map by
+	// value copies its lock, which go vet rejects.
+	atomicField := reflect.ValueOf(registry).Elem().FieldByName("networkUpstreamsAtomic")
+	require.True(t, atomicField.IsValid(), "field networkUpstreamsAtomic must exist")
+	(*sync.Map)(unsafe.Pointer(atomicField.UnsafeAddr())).Store(networkID, upstreams)
 	return registry
 }
 

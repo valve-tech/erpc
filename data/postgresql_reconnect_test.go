@@ -213,57 +213,9 @@ func TestPostgreSQLConnector_Reconnect(t *testing.T) {
 	})
 }
 
-// TestPostgreSQLConnector_ListenerPoolIsExhaustedByWatchedKeys pins a leak the
-// break proxy made visible.
-//
-// getOrCreateListener (data/postgresql.go:872) acquires one connection from
-// the listener pool per watched key and never releases it. The listener is
-// cached in p.listeners for the life of the connector, and WatchCounterInt64's
-// cleanup removes only the watcher — never the listener, its goroutine, or its
-// connection. So watching maxConns distinct keys exhausts the listener pool
-// permanently, even after every watcher has gone.
-//
-// An operator sees shared-state watches stop working once the connector has
-// seen maxConns distinct counter keys, with no error at startup.
-//
-// This test asserts today's behaviour. A fix makes it fail.
-func TestPostgreSQLConnector_ListenerPoolIsExhaustedByWatchedKeys(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	dbAddr := startPostgresContainer(t, ctx)
-	proxy := newBreakProxy(t, dbAddr)
-	c := connectorBehindProxy(t, ctx, proxy, "listener_pool")
-	// connectorBehindProxy sets MaxConns to 3, so three keys fill the pool.
-	const maxConns = 3
-
-	for i := 0; i < maxConns; i++ {
-		_, cleanup, werr := c.WatchCounterInt64(ctx, fmt.Sprintf("exhaust%d", i))
-		require.NoError(t, werr, "watch %d must succeed while the listener pool has room", i)
-		cleanup() // stop watching immediately; the connection is still held
-	}
-
-	// No watcher remains, yet the pool has no connection left to give.
-	watchCtx, watchCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer watchCancel()
-
-	done := make(chan error, 1)
-	go func() {
-		_, _, werr := c.WatchCounterInt64(watchCtx, "exhaust-one-too-many")
-		done <- werr
-	}()
-
-	select {
-	case werr := <-done:
-		require.Error(t, werr,
-			"one watched key past maxConns must fail today: the listener pool is exhausted by "+
-				"connections no watcher is using. If this passes because the leak was fixed, "+
-				"report it and delete this test")
-		assert.Contains(t, werr.Error(), "failed to create listener")
-	case <-time.After(90 * time.Second):
-		t.Fatal("WatchCounterInt64 never returned after its context ended")
-	}
-}
+// The listener-pool exhaustion this file used to pin is fixed. The replacement
+// lives in postgresql_listener_leak_test.go, which asserts the connections come
+// back instead of asserting that they do not.
 
 // TestPostgreSQLConnector_WatchCleanupLeaksItsFallbackPoller pins upstream bug
 // log entry 26 on the PostgreSQL side.

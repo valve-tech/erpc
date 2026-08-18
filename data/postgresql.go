@@ -94,9 +94,21 @@ type PostgreSQLConnector struct {
 // recovery within a request budget.
 const failureMarkCooldown = 1 * time.Second
 
+// pgxListener is one LISTEN subscription, shared by every watcher of a key.
+// It holds one connection out of the listener pool, so it lives exactly as
+// long as it has watchers: the last watcher to leave cancels it, and its
+// goroutine gives the connection back.
 type pgxListener struct {
-	mu       sync.Mutex
-	conn     *pgx.Conn
+	mu sync.Mutex
+	// conn is the pooled connection the listener goroutine currently holds.
+	// The goroutine is the only owner: it acquires every replacement and
+	// releases whatever it holds when it stops.
+	conn *pgxpool.Conn
+	// cancel stops the listener goroutine.
+	cancel context.CancelFunc
+	// closed marks a listener whose teardown is claimed. A watcher that
+	// finds one builds a fresh listener instead of joining a dying one.
+	closed   bool
 	watchers []chan CounterInt64State
 }
 
@@ -650,18 +662,11 @@ func (l *postgresLock) Unlock(ctx context.Context) error {
 func (p *PostgreSQLConnector) WatchCounterInt64(ctx context.Context, key string) (<-chan CounterInt64State, func(), error) {
 	updates := make(chan CounterInt64State, 1)
 
-	// Create or get listener for this key
-	listener, err := p.getOrCreateListener(ctx, key)
+	// Create or get listener for this key, and join it
+	listener, err := p.subscribe(ctx, key, updates)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create listener: %w", err)
 	}
-
-	// Add watcher to listener
-	listener.mu.Lock()
-	listener.watchers = append(listener.watchers, updates)
-	listener.mu.Unlock()
-
-	p.logger.Debug().Str("key", key).Int("watchers", len(listener.watchers)).Msg("starting watcher for key")
 
 	// Start fallback polling
 	ticker := time.NewTicker(30 * time.Second)
@@ -691,19 +696,9 @@ func (p *PostgreSQLConnector) WatchCounterInt64(ctx context.Context, key string)
 
 	cleanup := func() {
 		ticker.Stop()
-
-		listener.mu.Lock()
-		defer listener.mu.Unlock()
-
-		// Remove this watcher
-		for i, ch := range listener.watchers {
-			if ch == updates {
-				listener.watchers = append(listener.watchers[:i], listener.watchers[i+1:]...)
-				break
-			}
-		}
-
-		close(updates)
+		// Removing the last watcher also stops the listener and returns its
+		// connection to the listener pool.
+		p.releaseWatcher(key, listener, updates)
 	}
 
 	return updates, cleanup, nil
@@ -869,59 +864,191 @@ func isPostgresConnectionError(err error) bool {
 	return false
 }
 
+// subscribe attaches ch to the listener for key, creating that listener the
+// first time anyone watches the key. It returns the listener the caller must
+// hand back to releaseWatcher.
+//
+// The retry loop covers one race: a cleanup can decide to tear a listener down
+// between the load and the append. A torn-down listener is marked closed, so
+// this caller drops it and builds a fresh one instead of subscribing to a
+// listener whose connection is already on its way back to the pool.
+func (p *PostgreSQLConnector) subscribe(ctx context.Context, key string, ch chan CounterInt64State) (*pgxListener, error) {
+	for {
+		listener, err := p.getOrCreateListener(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+
+		listener.mu.Lock()
+		if listener.closed {
+			listener.mu.Unlock()
+			p.listeners.CompareAndDelete(key, listener)
+			continue
+		}
+		listener.watchers = append(listener.watchers, ch)
+		watchers := len(listener.watchers)
+		listener.mu.Unlock()
+
+		p.logger.Debug().Str("key", key).Int("watchers", watchers).Msg("starting watcher for key")
+		return listener, nil
+	}
+}
+
+// releaseWatcher removes ch from the listener and, when it was the last
+// watcher, stops the listener and gives its pooled connection back.
+//
+// The listener pool holds maxConns connections in total. Keeping one per key
+// that anyone has EVER watched exhausts it: eRPC watches one counter per
+// tracked value per network, so a fleet with more networks than maxConns ran
+// out during normal startup and every later watch failed with a context
+// deadline.
+func (p *PostgreSQLConnector) releaseWatcher(key string, listener *pgxListener, ch chan CounterInt64State) {
+	listener.mu.Lock()
+	for i, w := range listener.watchers {
+		if w == ch {
+			listener.watchers = append(listener.watchers[:i], listener.watchers[i+1:]...)
+			break
+		}
+	}
+	last := len(listener.watchers) == 0 && !listener.closed
+	if last {
+		// Claim the teardown under the same lock that guards the watcher
+		// list, so a watcher arriving now either appends before this line
+		// (and keeps the listener alive) or sees closed and builds its own.
+		listener.closed = true
+	}
+	close(ch)
+	listener.mu.Unlock()
+
+	if !last {
+		return
+	}
+
+	p.listeners.CompareAndDelete(key, listener)
+	// The listener goroutine owns the connection for its whole life, so
+	// cancelling is all it takes: the goroutine releases the connection on
+	// its way out. Nothing here touches a connection another goroutine may
+	// be reading from.
+	listener.cancel()
+	p.logger.Debug().Str("key", key).Msg("stopped postgres listener; its connection returns to the pool")
+}
+
 func (p *PostgreSQLConnector) getOrCreateListener(ctx context.Context, key string) (*pgxListener, error) {
 	if l, ok := p.listeners.Load(key); ok {
 		return l.(*pgxListener), nil
 	}
 
-	listener := &pgxListener{}
 	channel := sanitizeChannelName(fmt.Sprintf("counter_%s", key))
 
+	// The caller's context bounds the initial connect, so a watch on an
+	// exhausted pool fails the caller rather than blocking forever. The
+	// listener itself runs on the connector's context: it is shared by every
+	// watcher of the key, so the first watcher going away must not take it
+	// down.
 	conn, err := p.connectListener(ctx, channel)
 	if err != nil {
 		return nil, err
 	}
 
-	go func() {
-		for {
-			if err := ctx.Err(); err != nil {
-				p.logger.Debug().Err(err).Str("key", key).Msg("stopping postgres listener due to context termination")
-				return
-			}
+	listenerCtx, cancel := context.WithCancel(p.appCtx)
+	listener := &pgxListener{conn: conn, cancel: cancel}
 
-			notification, err := conn.Conn().WaitForNotification(ctx)
-			if err != nil {
-				// Try to reconnect
-				p.logger.Warn().Err(err).Str("key", key).Msg("lost postgres connection, attempting reconnect")
-				if newConn, err := p.connectListener(ctx, channel); err == nil {
-					p.logger.Debug().Str("key", key).Msg("successfully reconnected to postgres channel")
-					conn = newConn
-					continue
-				}
-				return
-			}
+	if actual, loaded := p.listeners.LoadOrStore(key, listener); loaded {
+		// Another watcher built the listener for this key first. Give our
+		// connection straight back rather than holding a second one.
+		cancel()
+		conn.Release()
+		return actual.(*pgxListener), nil
+	}
 
-			p.logger.Trace().Str("key", key).Interface("payload", notification).Msg("received postgres notification")
-
-			// Parse and broadcast state
-			var st CounterInt64State
-			if err := common.SonicCfg.Unmarshal([]byte(notification.Payload), &st); err == nil && st.UpdatedAt > 0 {
-				listener.mu.Lock()
-				for _, ch := range listener.watchers {
-					select {
-					case ch <- st:
-					default:
-					}
-				}
-				listener.mu.Unlock()
-			}
-		}
-	}()
+	go p.runListener(listenerCtx, key, channel, listener)
 
 	p.logger.Debug().Str("key", key).Msg("successfully created postgres listener for key")
-	listener.conn = conn.Conn()
-	p.listeners.Store(key, listener)
 	return listener, nil
+}
+
+// runListener owns the listener's pooled connection: it acquires every
+// replacement and releases whatever it holds when it returns. Single ownership
+// is what makes the teardown safe — releaseWatcher only cancels the context.
+func (p *PostgreSQLConnector) runListener(ctx context.Context, key string, channel string, listener *pgxListener) {
+	conn := listener.currentConn()
+	defer func() {
+		if conn != nil {
+			p.releaseListenerConn(channel, conn)
+		}
+		listener.setConn(nil)
+		p.logger.Debug().Str("key", key).Msg("postgres listener stopped")
+	}()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			p.logger.Debug().Err(err).Str("key", key).Msg("stopping postgres listener due to context termination")
+			return
+		}
+
+		notification, err := conn.Conn().WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// Give the broken connection back before taking another one,
+			// otherwise every reconnect costs the pool one more connection.
+			p.logger.Warn().Err(err).Str("key", key).Msg("lost postgres connection, attempting reconnect")
+			p.releaseListenerConn(channel, conn)
+			conn = nil
+			listener.setConn(nil)
+
+			newConn, cerr := p.connectListener(ctx, channel)
+			if cerr != nil {
+				return
+			}
+			p.logger.Debug().Str("key", key).Msg("successfully reconnected to postgres channel")
+			conn = newConn
+			listener.setConn(newConn)
+			continue
+		}
+
+		p.logger.Trace().Str("key", key).Interface("payload", notification).Msg("received postgres notification")
+
+		// Parse and broadcast state
+		var st CounterInt64State
+		if err := common.SonicCfg.Unmarshal([]byte(notification.Payload), &st); err == nil && st.UpdatedAt > 0 {
+			listener.mu.Lock()
+			for _, ch := range listener.watchers {
+				select {
+				case ch <- st:
+				default:
+				}
+			}
+			listener.mu.Unlock()
+		}
+	}
+}
+
+// releaseListenerConn stops the channel subscription and hands the connection
+// back to the pool. The UNLISTEN is best effort: pgxpool discards a connection
+// it cannot reuse, so a failure here costs a connection rather than leaking a
+// subscription onto a healthy one.
+func (p *PostgreSQLConnector) releaseListenerConn(channel string, conn *pgxpool.Conn) {
+	unlistenCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, err := conn.Exec(unlistenCtx, fmt.Sprintf("UNLISTEN %s", channel))
+	cancel()
+	if err != nil {
+		p.logger.Debug().Err(err).Str("channel", channel).Msg("failed to unlisten postgres channel before releasing the connection")
+	}
+	conn.Release()
+}
+
+func (l *pgxListener) currentConn() *pgxpool.Conn {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.conn
+}
+
+func (l *pgxListener) setConn(conn *pgxpool.Conn) {
+	l.mu.Lock()
+	l.conn = conn
+	l.mu.Unlock()
 }
 
 func (p *PostgreSQLConnector) connectListener(ctx context.Context, channel string) (*pgxpool.Conn, error) {

@@ -927,7 +927,8 @@ fails loudly once the guard is added.
 
 ## 43. The missing-`evm` panic is six more vendors, not two
 
-**Status:** open. **Severity: medium.** Bootstrap crash instead of a config error.
+**Status:** fixed-in-fork. **Severity: medium.** Bootstrap crash instead of a
+config error.
 
 Entry 41 named Infura and Llama. A sweep of every `upstream.Evm` dereference in
 `thirdparty/` finds six more `GenerateConfigs` that read `upstream.Evm.ChainId`
@@ -945,9 +946,36 @@ process at bootstrap instead of reading which field is missing. eRPC's own
 vendor is the worst of the six: `erpc.go:116` sits on the preset-endpoint path,
 which is the normal way to configure it.
 
-The fix is the same one line the other eighteen already carry. Pinned by
-`TestSixVendors_GenerateConfigs_PanicOnAMissingEvmBlock`, which fails loudly
-once a guard lands.
+**The fix does not copy the same nil check into six more vendors.** Every
+`upstream.Evm` read in `thirdparty/` asks for the same field: `ChainId`. So
+the fix deletes the nil case instead of branching on it.
+
+- `UpstreamConfig.EvmChainId()` (`common/vendors.go`) reports the configured
+  chain id, and zero when there is no `evm` block. The six vendors read the
+  chain id through it. Four of them (envio, etherspot, pimlico, routemesh)
+  already return "requires upstream.evm.chainId to be defined" for a zero, so
+  they gained no branch at all. Two (erpc, thirdweb) fed the chain id straight
+  into a URL builder, which would have produced `.../0`; they now return the
+  same message.
+- `common.GenerateVendorConfigs` wraps the call and converts a panic into an
+  error naming the vendor. Both call sites use it —
+  `thirdparty/provider.go:59` and `upstream/upstream.go:275` — so the ninth
+  vendor, the one nobody has written yet, reports a config error instead of
+  killing the process at bootstrap. It reads `Vendor.Name()` inside the
+  guarded scope, so a vendor that panics there is covered too.
+
+Pinned by `TestSixVendors_GenerateConfigs_AMissingEvmBlockIsAConfigError`
+(`thirdparty/vendor_configs_test.go`),
+`TestGenerateVendorConfigs_AVendorPanicBecomesAConfigError` and
+`TestUpstreamConfig_EvmChainId_ReportsZeroWhenThereIsNoEvmBlock`
+(`common/vendors_test.go`), and
+`TestProvider_GenerateUpstreamConfigs_AVendorPanicBecomesAnError`
+(`thirdparty/provider_vendor_panic_test.go`), which drives the real provider
+bootstrap path. Mutation: reverting the six vendors fails all seven subtests
+with a nil dereference; removing the `recover` fails the boundary test;
+reverting `provider.go` fails the provider test.
+
+See entry 82 for what it takes to reach the panic from a config file.
 
 ---
 
@@ -1050,8 +1078,8 @@ result. That removes the shared variables and makes the timeout the winner
 when it fires.
 ## 47. A PostgreSQL listener connection is never released
 
-**Status:** open. **Severity: high.** Shared-state watches stop working once
-the process has watched `maxConns` distinct counter keys.
+**Status:** fixed-in-fork. **Severity: high.** Shared-state watches stop
+working once the process has watched `maxConns` distinct counter keys.
 
 `getOrCreateListener` (`data/postgresql.go:872`) takes one connection out of
 the listener pool per watched key — `connectListener` at `:880`, which calls
@@ -1079,11 +1107,37 @@ sees shared-state watches fail one by one, with nothing reported at boot.
 Measured against a live container with `maxConns` 3: three watches succeed,
 all three cleanups run, and the fourth watch times out.
 
-Pinned by `TestPostgreSQLConnector_ListenerPoolIsExhaustedByWatchedKeys`.
+**The fix ties the listener's life to its watchers.** A listener is shared by
+every watcher of one key, so it lives exactly as long as it has one:
 
-Related dead code in the same struct: `pgxListener.conn` (`:99`) is written at
-`:922` and never read. The reconnect branch does not update it either, so it
-would hand out a released connection if anything ever did read it.
+- `subscribe` joins a watcher to the listener under the same lock that guards
+  the watcher list, and builds a fresh listener when it finds one already
+  marked closed.
+- `releaseWatcher` removes the watcher and, when it was the last one, marks
+  the listener closed, deletes it from `p.listeners` and cancels it.
+- `runListener` owns the pooled connection for its whole life: it acquires
+  every replacement, and it runs `UNLISTEN` and `Release()` on the way out.
+  Single ownership is what makes the teardown safe — the teardown only
+  cancels a context, so it never releases a connection another goroutine is
+  reading from. The reconnect branch releases the broken connection before it
+  acquires the next one.
+- `getOrCreateListener` stores with `LoadOrStore`. Two watchers racing on the
+  same key used to build two listeners, and the second `Store` orphaned the
+  first — connection, goroutine and all.
+
+`pgxListener.conn` is no longer dead: it is now the `*pgxpool.Conn` the
+goroutine holds, and the reconnect branch keeps it current.
+
+Pinned by `TestPostgreSQLConnector_WatchCounterInt64_ReleasesTheListenerConnection`
+(`data/postgresql_listener_leak_test.go`), which counts
+`listenerPool.Stat().AcquiredConns()` against a real container: three watched
+keys take three connections, and all three come back when the callers leave.
+Mutation: with `data/postgresql.go` reverted the test fails because the count
+never returns to zero.
+
+`TestPostgreSQLConnector_ListenerPoolIsExhaustedByWatchedKeys` is deleted —
+it asserted the leak, and its own comment said to remove it once the leak was
+fixed.
 ## 48. A WebSocket client is sent an empty frame when a response cannot be written
 
 **Status:** open. **Severity: medium.** The client's call never resolves.
@@ -1454,6 +1508,113 @@ unobservable. They are not bugs, and a test cannot pin them.
   matters for the non-canonical spellings (`libcurl-agent/1.0`,
   `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
   path and these are optimisations, correctly.
+
+---
+
+## 80. A TypeScript config with no exports panics instead of explaining itself
+
+**Status:** fixed-in-fork. **Severity: medium.** Bootstrap crash instead of a
+config error. (Another branch logs the same defect as entry 59.)
+
+`loadConfigFromTypescript` (`common/config.go:3254`) called
+`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:55`)
+was `r.vm.GlobalObject().Get("exports").ToObject(r.vm)`. A compiled module that
+declares no exports leaves that global as JS `null`, and sobek's `ToObject`
+raises a `TypeError` that unwinds out of the Go call as a panic.
+
+The very next statement existed to catch exactly this mistake: it returns
+"config object must be default exported from TypeScript code AND must be the
+last statement in the file". It never ran for the no-export case, so an
+operator who forgot `export default` read a Go stack trace with
+`TypeError: Cannot convert undefined or null to object` instead of the sentence
+that names the fix.
+
+`export default undefined` and `export default null` DID reach the friendly
+error, because those leave a real `exports` object behind. The difference is
+invisible from the config file, which is what made the panic surprising.
+
+The fix: `Runtime.Exports` returns nil for an absent, null or undefined
+`exports`, and the caller reports the missing default export. Pinned by
+`TestLoadConfig_TypeScriptWithNoExportsExplainsItself`,
+`TestLoadConfig_TypeScriptWithAnEmptyDefaultExportExplainsItself` and the two
+`TestRuntime_Exports_*` tests (`common/config_ts_exports_test.go`). Mutation:
+reverting `common/runtime.go` fails `TestLoadConfig_TypeScriptWithNoExportsExplainsItself`
+and all three subtests of `TestRuntime_Exports_ReturnsNilWhenThereAreNoExports`,
+each with the original `TypeError` panic. The empty-default-export test keeps
+passing, which is the point of entry 80: those two spellings always reached the
+friendly error.
+
+---
+
+## 81. A shared PostgreSQL listener dies with its first watcher
+
+**Status:** fixed-in-fork. **Severity: high.** Silent: later watchers of the
+same key receive nothing and report nothing.
+
+Found while fixing entry 47, and measured against a live container.
+
+`getOrCreateListener` (`data/postgresql.go:872`) ran the listener goroutine on
+the context of whichever watcher created it. That listener is shared by every
+watcher of the key. So the first watcher cancelling its context stopped the
+goroutine for all of them, and nothing removed the dead listener from
+`p.listeners` — every later watcher of that key joined a listener that never
+delivers a notification again.
+
+A network torn down, an upstream removed, or a request-scoped watch ending is
+enough to trigger it, and the fallback poller's 30-second tick hides it: the
+value still moves, just late and only on the poll.
+
+The listener now runs on `p.appCtx` and stops only when its last watcher
+leaves. Pinned by
+`TestPostgreSQLConnector_WatchCounterInt64_AListenerSurvivesItsFirstWatcher`
+(`data/postgresql_listener_leak_test.go`): two watchers on one key, the first
+one leaves with its context, and the second must still see a published value.
+Mutation: with `data/postgresql.go` reverted the second watcher receives
+nothing for 20 seconds and the test fails.
+
+---
+
+## 82. The missing-`evm` panic needs more than an omitted `evm` block
+
+**Status:** recorded. A correction to entries 41 and 43, not a new defect.
+
+Entries 41 and 43 say an operator who omits the `evm` block crashes eRPC at
+bootstrap. The panic is real, but a plain YAML config does not reach it.
+`UpstreamConfig.SetDefaults` (`common/defaults.go:1893`) defaults an empty
+`type` to `evm` and then creates an empty `Evm` block for any evm-prefixed
+type. Every config path runs it: project upstreams, provider overrides
+(`ProviderConfig.SetDefaults`), and shorthand upstreams converted to providers.
+`Provider.buildBaseUpstreamConfig` fills the block in again for any `evm:`
+network id.
+
+Two inputs still reach a nil `Evm` at a vendor:
+
+- an override whose `type` is not evm-prefixed (`type: svm`), on a network id
+  that is not `evm:`-prefixed — `TestProvider_GenerateUpstreamConfigs_AVendorPanicBecomesAnError`
+  drives exactly this through the real provider path;
+- any caller that builds an `UpstreamConfig` without `SetDefaults` — every
+  vendor unit test in `thirdparty/`, and any embedder using eRPC as a library.
+
+So the severity is right for a library caller and overstated for a YAML
+operator. The fix in entry 43 covers both, and does not depend on which one
+an operator hits.
+
+---
+
+## 83. `go vet ./...` fails at HEAD on a test helper
+
+**Status:** fixed-in-fork (`erpc/query_executor_test.go:339`). The fork's own
+code.
+
+`newTestUpstreamsRegistry` built a `*sync.Map`, stored one entry in it, then
+passed `*atomicMap` to `setUnexportedField`. Dereferencing the pointer copies
+the map's internal lock, which `go vet`'s copylocks check rejects:
+`call of setUnexportedField copies lock value: sync.Map contains sync.noCopy`.
+It is the only vet finding in the repo, and it predates this work.
+
+The helper now takes the address of the target field and calls `Store` through
+it, so nothing copies the lock. `TestQueryBlocks_*` and `TestQueryLogs_*` still
+pass, and `go vet ./...` is clean.
 
 ---
 
