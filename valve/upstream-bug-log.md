@@ -1894,3 +1894,132 @@ of a `checkProbe` error no probe implementation produces).
   60 seconds, so a replacement always survives several ticks. Recorded because
   the one-per-tick cap looks like starvation until those two constants are read
   together. `TestMaintainLoop_AgeRecyclesAtMostOneConnPerTick` pins the cap.
+
+---
+
+## 59. A consensus round can return neither a response nor an error
+
+**Status:** pinned. **Severity: medium.** The caller gets `(nil, nil)`.
+
+`consensus/rules.go:740-742` — the "low participants + accept-most-common"
+rule returns the best error group's `FirstError`:
+
+```go
+if bestError := a.getBestError(); bestError != nil {
+    return &slotResult{Error: bestError.FirstError}
+}
+```
+
+`getBestError` (`consensus/analysis.go:315-332`) ranks **infrastructure-error**
+groups alongside consensus-valid ones. An infrastructure-error group does not
+always carry an error. `classifyAndHashResponse` (`analysis.go:499-504`) files a
+participant whose `inner` returned `(nil, nil)` — no payload, no failure — as
+`ResponseTypeInfrastructureError` with the hash `"error:generic"`, and the
+grouping loop at `analysis.go:119-133` only sets `FirstError` from a member with
+`r.Err != nil`. A group made only of such responses has `FirstError == nil`.
+
+When that group outranks every consensus-valid group, the rule returns
+`&slotResult{Error: nil}` with no `Result`. `enforceWinnerComposition` passes it
+through (`groupOf` finds no backing group), and `(*executor).Run`
+(`consensus/executor.go:167`) returns `out.Result, out.Error` — `(nil, nil)` — to
+the network layer.
+
+An operator sees a request that produced no response body and no error, with no
+consensus dispute or low-participants error to explain it. The same round with
+one fewer result-less participant answers normally, so it looks intermittent.
+
+Fix: have `getBestError` skip groups with no error, or make the rule fall
+through to its low-participants branch when `FirstError` is nil — the branch is
+already written at `rules.go:743-745` and is unreachable today.
+
+Pinned by `TestRule_LowParticipantsAcceptMostCommonCanServeNothingAtAll`.
+`TestRule_AllParticipantsAnsweredWithNothingReportsLowParticipants` covers the
+neighbouring rule (`rules.go:808-816`), which handles the same group shape
+correctly.
+
+---
+
+## 60. `BootstrapTask.Wait` busy-spins on a full core and ignores its context
+
+**Status:** pinned. **Severity: low.** Wasted CPU, and an uncancellable wait.
+
+`util/initializer.go:111-117`:
+
+```go
+ch := t.doneVal.Load()
+if ch == nil {
+    if state != TaskPending {
+        continue          // no context check, no sleep, no yield
+    }
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case <-time.After(10 * time.Millisecond):
+        continue
+    }
+}
+```
+
+`attemptRemainingTasks` swaps a task to `TaskRunning` at `:324` and publishes
+the attempt's done channel at `:329`. A `Wait` that reads the state between the
+two finds `state == TaskRunning` with `doneVal == nil` and takes the bare
+`continue`. That path never checks `ctx.Done()` and never yields, so the
+goroutine spins at 100% of one core until another goroutine publishes the
+channel or moves the task out of `TaskRunning`. A cancelled context does not
+end it; the sibling `TaskPending` branch two lines below does check.
+
+In production the window is nanoseconds, so the cost is a few wasted
+iterations. It is unbounded only in principle — nothing in the type enforces
+that the two writes stay adjacent, and `Wait` is called from the request path
+via `ExecuteTasks`.
+
+Fix: give the branch the same `select` the pending branch uses.
+
+Pinned by
+`TestBootstrapTask_WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExists`.
+
+---
+
+## 61. `PostgreSQLConnector.List` can never hand out a next-page token
+
+**Status:** pinned. **Severity: medium.** Silent truncation.
+
+`data/postgresql.go:1241-1297`. The query asks for `limit+1` rows so the code
+can tell whether another page exists. The scan loop then consumes that probe row
+itself:
+
+```go
+for rows.Next() {
+    if count >= limit {
+        break            // the (limit+1)-th row has already been consumed
+    }
+    ...
+    count++
+}
+...
+if count == limit {
+    hasMore := false
+    for rows.Next() {    // no rows are left — the probe row is gone
+        hasMore = true
+        break
+    }
+    if hasMore { ... nextToken = ... }
+}
+```
+
+`rows.Next()` advanced past the probe row before the `break`, so the second loop
+asks for row `limit+2`, which the `LIMIT` never fetched. `hasMore` is therefore
+always false and `nextToken` is always `""`. Statements `:1284-1286` and
+`:1289-1295` are unreachable.
+
+A caller paging a cache index reads the first `limit` entries and is told the
+listing is complete. Everything past the first page is invisible, with no error
+and no log line. The offset token itself works — `List` decodes and applies it
+correctly — so a caller that builds its own token can page; nothing in eRPC
+does, because nothing is ever handed one.
+
+Fix: record the probe row when the scan loop breaks (`hasMore = true` at the
+break) instead of re-reading the cursor afterwards.
+
+Pinned by
+`TestPostgreSQLConnector_DatabasePaths/List_truncates_at_the_limit_and_never_offers_a_next_page`.
