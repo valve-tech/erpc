@@ -324,6 +324,46 @@ func upstreamHostFromID(id string) string { return "http://" + id + ".localhost"
 // These tests do not call t.Parallel, so a plain map is safe here.
 var statePollerHeads = map[string][2]int64{}
 
+// seedEvmHeads writes an upstream's latest and finalized heads and returns only
+// once both are readable. It is the deterministic alternative to
+// `Suggest*Block` + `require.Eventually`.
+//
+// `SuggestFinalizedBlock` cannot be waited on reliably. It hands the write to a
+// goroutine, and it takes `finalizedUpdateInProgress` with TryLock — so a
+// suggestion issued while an earlier one is still in flight is DROPPED, not
+// queued. When the drop happens the value does not arrive late, it never
+// arrives, and no ceiling on `Eventually` can rescue it. That is what timed the
+// fallback-tier test out at 20.26s under `make test-fast`.
+//
+// The shared counters the poller reads are ordinary registry objects keyed by
+// upstream, and `GetCounterInt64` returns the instance the poller already holds.
+// Writing them through `TryUpdate` is synchronous, so the caller can assert the
+// value instead of waiting for it. The read-back below also pins the key
+// formula: if it ever drifts from the poller's, this fails at once and loudly
+// rather than seeding an orphan counter.
+//
+// Callers that also let a poll land must pin the mock heads to the SAME numbers
+// via `statePollerHeads`; otherwise the poll writes its own value over the seed.
+func seedEvmHeads(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry, up *upstream.Upstream, latest, finalized int64) {
+	t.Helper()
+
+	ssr := reg.SharedStateRegistry()
+	require.NotNil(t, ssr, "upstreams registry has no shared state registry")
+
+	counter := func(kind string) data.CounterInt64SharedVariable {
+		key := data.CounterValueSchemaVersion + "/" + kind + "/" + common.UniqueUpstreamKey(up)
+		return ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback)
+	}
+	counter("latestBlock").TryUpdate(ctx, latest)
+	counter("finalizedBlock").TryUpdate(ctx, finalized)
+
+	sp := up.EvmStatePoller()
+	require.Equal(t, latest, sp.LatestBlock(),
+		"seeded latest head is not visible on %s — shared-counter key formula drifted?", up.Id())
+	require.Equal(t, finalized, sp.FinalizedBlock(),
+		"seeded finalized head is not visible on %s — shared-counter key formula drifted?", up.Id())
+}
+
 func mockStatePollerForHost(host string) {
 	latest, finalized := int64(1000), int64(900) // 0x3e8 / 0x384
 	if pinned, ok := statePollerHeads[host]; ok {

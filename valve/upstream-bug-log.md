@@ -1200,6 +1200,37 @@ The deadline itself is load-bearing and correct — only the error check is dead
 
 ---
 
+## 53. `SuggestFinalizedBlock` drops a suggestion under contention; the latest twin does not
+
+**Status:** open. **Severity: low in production, high in tests.**
+
+`architecture/evm/evm_state_poller.go:825` — `SuggestFinalizedBlock` takes
+`finalizedUpdateInProgress` with `TryLock` and RETURNS when the lock is held.
+The suggestion is discarded, not queued. Nothing re-issues it, so the finalized
+head stays where it was until the next successful poll — which the debounce can
+push a full interval away.
+
+`SuggestLatestBlock` at `:533` does not behave this way. It applies a small
+advance inline and synchronously, and defers to a goroutine only for a MAJOR
+forward jump. Two counters written from the same request path therefore have
+different delivery guarantees, and only one of them is documented as
+best-effort.
+
+In production the loss self-heals: the next response carrying a finalized
+number suggests again. The cost is a stale finalization lag for one poll
+interval, on an upstream busy enough to have suggestions overlap — which is
+exactly the upstream whose lag matters.
+
+In tests it does not self-heal, because a test usually suggests once. Found via
+`TestNetwork_FallbackTierDoesNotDefineTheServedTip`, which timed out after
+20.26s under `make test-fast` waiting for a value that was never going to
+arrive. The fix there was to stop routing test seeds through `Suggest*` at all
+(see `seedEvmHeads` in `erpc/networks_selection_policy_test.go`); a wider
+`Eventually` ceiling cannot help, since the write was dropped rather than
+delayed.
+
+---
+
 # Redundant guards — not defects, recorded so they are not re-derived
 
 Each of these is shadowed by another check, so a single-line mutation of it is
