@@ -2169,3 +2169,197 @@ return a read-only type. Do not rely on callers staying polite.
 Found while fixing a `go vet` failure in `erpc/query_executor_test.go`, which
 copied a populated `sync.Map` over the registry's field. That fixture bug is
 fixed; this one is upstream's.
+
+# Polyglot live run — entries 90–94
+
+Found on 2026-08-17 while running one eRPC process against Ethereum mainnet,
+Solana mainnet-beta and Bitcoin mainnet at once. Full run:
+[polyglot-live-run.md](polyglot-live-run.md). Config:
+[polyglot-live-pool.yaml](polyglot-live-pool.yaml).
+
+## 90. `erpc/chain_families.go` says btc cannot serve, and btc serves
+
+**Status:** stale comment in the fork (`erpc/chain_families.go:22-27`).
+
+The file's SCOPE note reads:
+
+> WHAT IS STILL NOT REGISTRY-DRIVEN — a btc UPSTREAM does not bootstrap.
+> `Upstream.detectFeatures` (`upstream/upstream.go`) recognises only evm and
+> svm and rejects everything else, so a btc upstream never reaches the pool and
+> no btc request is ever forwarded.
+
+That is no longer true. `detectFeatures` now ends in an `else` branch that calls
+`detectChainFamilyFeatures` (`upstream/upstream.go:1400`), which is the
+registry-driven path. In the live run five btc upstreams bootstrapped and
+answered `getblockchaininfo`, `getblockhash` and `getblock` from real Bitcoin
+nodes.
+
+The comment matters because it tells the next reader not to bother. Anyone
+adding a fourth family reads it and concludes the seam is unfinished.
+
+The second claim in the same paragraph — `common.IsValidNetwork` still knows
+only evm and svm — is still correct. See entry 91.
+
+**Fix:** delete the first two sentences. Keep the `IsValidNetwork` sentence
+until entry 91 is fixed.
+
+## 91. `IsValidNetwork` enumerates two architectures, so a provider cannot name a third
+
+**Status:** open, inherited from upstream (`common/network.go:95`).
+
+`IsValidNetwork` matches the `evm:` prefix, then the `svm:` prefix, then
+returns false:
+
+```go
+func IsValidNetwork(network string) bool {
+	if strings.HasPrefix(network, "evm:") { ... }
+	if strings.HasPrefix(network, "svm:") { ... }
+	return false
+}
+```
+
+Its two callers gate `providers[].onlyNetworks` and
+`providers[].ignoreNetworks` (`common/validation.go:973`, `:980`). So a
+registered, probeable, routable family is refused at config load the moment an
+operator names it in a provider filter. Reproduced:
+
+```yaml
+providers:
+  - vendor: drpc
+    onlyNetworks:
+      - btc:mainnet
+```
+
+```
+failed to load configuration: project.*.providers.*.onlyNetworks.*
+'btc:mainnet' is invalid must be like evm:1
+```
+
+This is the ONLY thing in the whole polyglot exercise that needs Go rather than
+configuration. Everything else — `IsValidArchitecture`, `IsValidNetworkId`,
+`Network.prepareRequest`, the client factory, `detectFeatures` — is already a
+registry lookup.
+
+It is also an unforced commitment in the razor's sense. The registry already
+knows every served architecture, and `ChainFamily.ValidateNetworkId` already
+owns the per-family id shape. The function re-derives from a hand-written list
+what the registry can answer.
+
+**Fix:** split the network id on its first `:`, look the prefix up with
+`LookupChainFamily`, and ask the family to validate the body — the same two
+steps `util.IsValidNetworkId` already takes. The evm and svm branches then
+become the families' own methods, and no architecture name stays in this file.
+
+## 92. A prober mirror is indistinguishable from client traffic in the upstream counters
+
+**Status:** open, fork code (`internal/policy/prober.go:414`).
+
+One client `getblockhash` produced two upstream calls. The second went to
+`btc-onfinality`, which the selection policy had EXCLUDED for being in the
+`tier:fallback` tier. It was a prober mirror — `Prober` re-samples excluded
+upstreams so they can heal — not routing. But it lands in the counters looking
+exactly like routing:
+
+```
+erpc_upstream_request_total{agent_name="curl",attempt="2",composite="none",
+  upstream="btc-onfinality"} +1
+erpc_upstream_selection_total{reason="primary",upstream="btc-onfinality"} +1
+erpc_upstream_attempt_outcome_total{outcome="success",
+  upstream="btc-onfinality"} +1
+```
+
+Three problems in those three lines. The probe carries the CLIENT's
+`agent_name`, so it cannot be filtered out by agent. It carries
+`composite="none"`, so it cannot be filtered out by composite either. And
+`reason="primary"` says the excluded upstream was chosen first, which is the
+opposite of what happened.
+
+Only `erpc_upstream_request_duration_seconds` gets the honest label:
+`RecordUpstreamDuration(u, method, duration, isSuccess, "probe", ...)` passes
+`"probe"` as the composite type. The counters take a different path and never
+see it.
+
+The consequence is not cosmetic. An operator watching `selection_total` reads
+"my fallback tier is taking primary traffic" and removes the tier, which is
+exactly wrong — the tier was working.
+
+**Fix:** carry the same `"probe"` composite value into `RecordUpstreamRequest`
+and the selection counter, or give `erpc_upstream_selection_total` a
+`reason="probe"`. One label value makes the row filterable everywhere instead
+of in one histogram.
+
+## 93. In-request failover never increments `erpc_network_retry_attempt_total`
+
+**Status:** open, inherited (`telemetry/metrics.go:681`).
+
+I killed the upstream eRPC had chosen and drove 8 more requests. All 8 failed
+over to the second upstream inside the same client request:
+
+```
+erpc_upstream_request_errors_total{error="ErrEndpointTransportFailure",
+  upstream="evm-shim-b"} 8
+erpc_network_successful_request_total{attempt="2",upstream="evm-shim-a"} 8
+```
+
+`erpc_network_retry_attempt_total` has **no samples at all** after that run.
+Prometheus only publishes a counter once it is incremented, so an absent series
+means it never fired. `erpc_upstream_attempt_outcome_total` agrees: the
+successful second attempt carries `is_retry="false"`.
+
+The counter's own `reason` vocabulary says it should have fired. Its declared
+reasons are `empty_result / pending_tx / retryable_error / block_unavailable /
+missing_data`. A dead socket is a retryable error, eRPC classified it as
+`ErrEndpointTransportFailure` with `severity="critical"`, and it did advance to
+the next upstream. Nothing was counted.
+
+So the response-driven retry paths feed this counter and the transport-driven
+rotation does not, while the name promises both. An alert written as "page me
+when retries spike" stays silent through a total upstream outage. The signals
+that DID move are `erpc_upstream_request_errors_total` and the `attempt` label
+on `erpc_network_successful_request_total`.
+
+**Fix:** increment it with `reason="retryable_error"` when the loop advances
+after a transport failure. Failing that, say in the Help text that transport
+failover is excluded — today nothing warns a reader that a rotation is not a
+retry.
+
+## 94. `upstream="n/a"` is three different events, and only one is a cache hit
+
+**Status:** open, inherited. Semantics already pinned in
+`telemetry/metrics_semantics_test.go:53`.
+
+`upstream="n/a"` is widely read as "served from cache". In this run no cache
+existed — the config has no `database:` block — and three separate methods
+still recorded it:
+
+```
+erpc_network_successful_request_total{attempt="0",category="eth_chainId",
+  network="evm:1",upstream="n/a"} 16
+erpc_network_successful_request_total{attempt="0",category="getGenesisHash",
+  network="svm:mainnet-beta",upstream="n/a"} 1
+erpc_network_successful_request_total{attempt="0",category="getSlot",
+  network="svm:mainnet-beta",upstream="n/a"} 1
+```
+
+Two have a confirmed cause: architecture pre-forward hooks answer them inside
+the process and never call an upstream —
+`projectPreForward_eth_chainId` (`architecture/evm/hooks.go:38`) and
+`projectPreForward_getGenesisHash` (`architecture/svm/hooks.go:143`).
+
+The third, `getSlot` with `commitment: finalized`, has no pre-forward
+short-circuit in `architecture/svm/handler.go`. The likely cause is
+`networkPostForward_getSlot` (`architecture/svm/hooks.go:684`), which enforces
+the network's highest known slot and can replace the response. **I did not
+confirm that**, and I record it as an open question rather than a conclusion.
+
+The existing test already states the rule correctly: `"n/a"` means "the
+upstream was not resolved for this event". The gap is that a hook answer, a
+cache hit and an unbootstrapped upstream all collapse into that one value, so
+no consumer can tell them apart. A cache hit-rate computed from this label
+overcounts by however many hook short-circuits the traffic contains — for
+`eth_chainId`, that is 100%.
+
+**Fix:** distinguish the local-answer case. A `served_by="hook"` /
+`"cache"` / `"upstream"` label, or a separate counter for hook
+short-circuits, would make the three readable apart. Until then, no dashboard
+should derive cache hit-rate from `upstream="n/a"`.
