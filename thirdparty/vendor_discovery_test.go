@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -773,4 +774,134 @@ func TestChainstackFetchNodes_HonoursTheCallersDeadline(t *testing.T) {
 	assert.Nil(t, nodes)
 	assert.Less(t, time.Since(start), fetcherTestWait,
 		"the caller's deadline must win over the client's own 30s timeout")
+}
+
+// -----------------------------------------------------------------------------
+// chainstack: the vendor over the cache
+// -----------------------------------------------------------------------------
+
+// chainstackFixture lists three nodes and answers the eth_chainId probe that
+// fetchChainIDs sends to each, so a warm snapshot carries real chain IDs. The
+// probe replies with the chain ID named in the request path. One node is still
+// provisioning, because that is the row GenerateConfigs must drop.
+func chainstackFixture(t *testing.T) (*ChainstackVendor, common.VendorSettings, *atomic.Int32) {
+	t.Helper()
+	var listHits atomic.Int32
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			// Chainstack appends the node's auth key to the endpoint, so the
+			// probe arrives at /probe/<chainId>/<authKey>.
+			segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			id, _ := strconv.ParseInt(segments[1], 10, 64)
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":"0x%x"}`, id)
+			return
+		}
+		listHits.Add(1)
+		_, _ = fmt.Fprintf(w, `{"next":null,"results":[
+			{"id":"node-a","status":"running","details":{"https_endpoint":"%s/probe/1","auth_key":"key-a"}},
+			{"id":"node-b","status":"running","details":{"https_endpoint":"%s/probe/1","auth_key":"key-b"}},
+			{"id":"node-c","status":"provisioning","details":{"https_endpoint":"%s/probe/1","auth_key":"key-c"}}
+		]}`, srv.URL, srv.URL, srv.URL)
+	}))
+	t.Cleanup(srv.Close)
+	pointChainstackAt(t, srv.URL)
+
+	v := CreateChainstackVendor().(*ChainstackVendor)
+	// Registered after pointChainstackAt, so it runs before the URL is restored.
+	t.Cleanup(func() { waitForRefreshes(t, v.cache) })
+	return v, common.VendorSettings{"apiKey": "secret-key", "recheckInterval": time.Hour}, &listHits
+}
+
+func warmChainstack(t *testing.T, v *ChainstackVendor, settings common.VendorSettings) {
+	t.Helper()
+	logger := zerolog.Nop()
+	require.Eventually(t, func() bool {
+		ok, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:1")
+		return err == nil && ok
+	}, fetcherTestWait, 10*time.Millisecond, "the async refresh never populated the chainstack cache")
+}
+
+// A chain missing from a warm snapshot is a settled no. Returning the cold-start
+// error instead would make the bootstrap loop retry an answer it already has.
+func TestChainstackVendor_SupportsNetwork_AWarmSnapshotSettlesTheAnswer(t *testing.T) {
+	v, settings, hits := chainstackFixture(t)
+	logger := zerolog.Nop()
+	warmChainstack(t, v, settings)
+
+	unknown, err := v.SupportsNetwork(context.Background(), &logger, settings, "evm:424242")
+	require.NoError(t, err)
+	assert.False(t, unknown)
+
+	assert.Equal(t, int32(1), hits.Load(), "a warm, fresh snapshot must not re-list the nodes")
+}
+
+// Chainstack gives one account many nodes on the same chain, and each is a
+// separate upstream. Collapsing them to one would throw away the redundancy the
+// operator paid for; sharing one ID would make them collide in the registry.
+//
+// A node that is not running never joins the network, and two guards say so
+// independently: fetchChainIDs skips it, so it keeps chain ID 0, and
+// GenerateConfigs checks the status again. Mutating either one alone leaves
+// this test green — the other still holds the line. Mutating both turns it red,
+// which is the behaviour actually being pinned.
+func TestChainstackVendor_GenerateConfigs_MakesOneUpstreamPerRunningNodeOnTheChain(t *testing.T) {
+	v, settings, _ := chainstackFixture(t)
+	logger := zerolog.Nop()
+	warmChainstack(t, v, settings)
+
+	configs, err := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{Id: "cs", Evm: &common.EvmUpstreamConfig{ChainId: 1}}, settings)
+
+	require.NoError(t, err)
+	require.Len(t, configs, 2, "node-c is still provisioning, so only two of the three qualify")
+
+	assert.ElementsMatch(t, []string{"cs-node-a", "cs-node-b"},
+		[]string{configs[0].Id, configs[1].Id},
+		"each node's id must be suffixed onto the operator's, or the two collide")
+	// The auth key is a path segment, not a header. Dropping it reaches the
+	// host and is refused there.
+	assert.ElementsMatch(t, []string{"key-a", "key-b"},
+		[]string{path.Base(configs[0].Endpoint), path.Base(configs[1].Endpoint)})
+	assert.Equal(t, common.UpstreamTypeEvm, configs[0].Type)
+	assert.NotNil(t, configs[0].JsonRpc)
+
+	// With no id of their own the nodes still need distinct ids.
+	anon, err := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{Evm: &common.EvmUpstreamConfig{ChainId: 1}}, settings)
+	require.NoError(t, err)
+	require.Len(t, anon, 2)
+	assert.ElementsMatch(t, []string{"chainstack-1-node-a", "chainstack-1-node-b"},
+		[]string{anon[0].Id, anon[1].Id})
+
+	// A chain the account has no node for is an empty list, not an error: the
+	// operator simply has nothing on it.
+	none, err := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{Evm: &common.EvmUpstreamConfig{ChainId: 424242}}, settings)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+func TestChainstackVendor_GenerateConfigs_ChecksItsInputsBeforeListingAnyNodes(t *testing.T) {
+	v, settings, hits := chainstackFixture(t)
+	logger := zerolog.Nop()
+
+	_, errNoKey := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{Evm: &common.EvmUpstreamConfig{ChainId: 1}}, common.VendorSettings{})
+	require.Error(t, errNoKey)
+	assert.Contains(t, errNoKey.Error(), "apiKey")
+
+	_, errNoEvm := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{}, settings)
+	require.Error(t, errNoEvm)
+	assert.Contains(t, errNoEvm.Error(), "evm")
+
+	_, errNoChain := v.GenerateConfigs(context.Background(), &logger,
+		&common.UpstreamConfig{Evm: &common.EvmUpstreamConfig{}}, settings)
+	require.Error(t, errNoChain)
+	assert.Contains(t, errNoChain.Error(), "chainId")
+
+	assert.Equal(t, int32(0), hits.Load(),
+		"none of these three answers needs the node list, so none may fetch it")
 }

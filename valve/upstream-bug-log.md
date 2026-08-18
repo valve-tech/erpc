@@ -1328,6 +1328,116 @@ error check.
 
 `TestProxyPool_GetClientOnAnEmptyPoolErrorsAndNamesThePool` pins the
 `GetClient` contract this depends on.
+
+---
+
+## 59. Three vendors probe the wrong endpoint when one vendor serves two providers
+
+**Status:** pinned. **Severity: medium.** A wrong supported/unsupported verdict
+at bootstrap, from config alone.
+
+Six vendors answer `SupportsNetwork` by sending `eth_chainId` to the endpoint
+and comparing the answer. Each caches the probe client in a `sync.Map`. Three
+key that map on the URL and the chain; three key it on the chain alone:
+
+| vendor | cache key | site |
+| --- | --- | --- |
+| erpc | url + chain | `thirdparty/erpc.go:251` |
+| goldsky | url + chain | `thirdparty/goldsky.go:257` |
+| routemesh | url + chain | `thirdparty/routemesh.go:153` |
+| **envio** | **chain only** | `thirdparty/envio.go:265`, `:277` |
+| **pimlico** | **chain only** | `thirdparty/pimlico.go:239`, `:251` |
+| **thirdweb** | **chain only** | `thirdparty/thirdweb.go:136`, `:148` |
+
+`ProvidersRegistry` hands every provider the SAME vendor instance
+(`thirdparty/providers_registry.go:22` calls `vendorReg.LookupByName`), so two
+providers of one vendor share one cache. And all three of the chain-keyed
+vendors build their URL from per-provider settings: envio from `rootDomain`,
+pimlico from `apiKey`, thirdweb from `clientId`.
+
+So an operator who configures two providers of the same vendor gets this: the
+first provider probed for chain N caches its client, and every later provider
+asking about chain N is handed that client and probes the FIRST provider's URL.
+The second provider's own endpoint is never contacted.
+
+What the operator sees:
+
+- Two envio providers, one public and one self-hosted. The self-hosted one is
+  reported supported or unsupported according to what the public endpoint says,
+  and its own host is never reached.
+- Two pimlico providers on different keys. If the first key is rate-limited,
+  the second is reported unsupported even though it is fine.
+
+`GenerateConfigs` builds each provider's URL correctly, so the upstream that
+lands is right. The damage is the support verdict, and a network wrongly judged
+unsupported never gets an upstream at all.
+
+The entry is also never evicted, so a rotated credential does not take effect
+until the process restarts.
+
+The fix is the one line the other three already carry: key on
+`parsedURL.String()` plus the chain.
+
+Pinned by
+`TestProbeVendors_getOrCreateClient_TheCacheKeyDecidesWhetherASecondUrlIsHonoured`,
+which asserts today's split and fails once the three converge.
+
+---
+
+## 60. Seven vendor normalisers do work the caller overwrites two lines later
+
+**Status:** open. **Severity: low.** Dead work that reads as a feature.
+
+`thirdparty/ankr.go:125`, `blastapi.go:160`, `chainstack.go:423`,
+`erpc.go:145`, `goldsky.go:165`, `onfinality.go:102` and `tenderly.go:140`
+share one `GetVendorSpecificErrorIfAny` body: copy `jrr.Error.Data` into
+`details["data"]`, then return `nil`.
+
+Their only caller is `architecture/evm/error_normalizer.go:29`. Returning `nil`
+means control falls through to `:42-60`, which writes `details["data"]` from the
+same `err.Data` on every branch of its type switch — the string branch after
+stripping a `"Reverted "` prefix, the default branch verbatim. So the vendor's
+write is always overwritten with the same value or a better one.
+
+The effect is that seven vendors appear to contribute error detail and
+contribute none. A maintainer adding an eighth vendor copies the body and gets
+nothing for it. Either delete the seven bodies or move the useful part — the
+prefix strip — into them.
+
+Recorded, not pinned: pinning "this line has no effect" would fail the moment
+the line is deleted, which is the outcome we want.
+
+Not a bug, recorded so it is not "fixed" by mistake: the same seven bodies read
+`bodyMap.Error` with no nil check. The caller guards `jr != nil && jr.Error !=
+nil` at `error_normalizer.go:26` before it calls, so the dereference cannot
+fire from the only path that reaches it.
+
+---
+
+## 61. Two smaller `thirdparty` divergences
+
+**Status:** pinned. **Severity: low.**
+
+- **`thirdparty/dwellir.go:111-115`** — `SupportsNetwork` catches the chain-ID
+  parse error and returns `(false, nil)`. Eleven sibling vendors — ankr,
+  blastapi, blockpi, envio, etherspot, infura, llama, onfinality, pimlico,
+  routemesh and thirdweb — return it. An operator who typos a network ID reads
+  "dwellir does not serve this network" instead of the parse error naming the
+  bad ID. Pinned by
+  `TestDwellirVendor_SupportsNetwork_AMalformedChainIdIsASilentNoNotAnError`.
+- **`thirdparty/dwellir.go:177`** — `OwnsUpstream` claims `dwellir://` but not
+  `evm+dwellir://`. Every one of the other twenty-one built-in vendors claims
+  both, and `common/defaults.go:1541` accepts `evm+dwellir://` as a shorthand.
+  Nothing observes the gap today, because `convertUpstreamToProvider`
+  (`common/defaults.go:1430`) turns every non-http endpoint into a provider and
+  clears `Endpoint` before `LookupByUpstream` (`upstream/upstream.go:254`) ever
+  runs — which makes the scheme branch of all twenty-two `OwnsUpstream` methods
+  unreachable in the current wiring. Pinned by
+  `TestEveryVendor_OwnsUpstream_ClaimsItsOwnSchemeAndNobodyElses`, which records
+  dwellir as the exception.
+
+---
+
 ## 56. A task started after shutdown wedges its whole Initializer
 
 **Status:** pinned. **Severity: high.** A hung shutdown and a hung request path.

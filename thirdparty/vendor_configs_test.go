@@ -225,7 +225,7 @@ func TestStaticTableVendors_SupportsNetworkAgreesWithGenerateConfigs(t *testing.
 	settings := common.VendorSettings{"apiKey": "k"}
 	registry := NewVendorsRegistry()
 
-	for _, name := range []string{"ankr", "blastapi", "blockpi", "infura", "llama"} {
+	for _, name := range []string{"ankr", "blastapi", "blockpi", "infura", "llama", "onfinality"} {
 		t.Run(name, func(t *testing.T) {
 			v := registry.LookupByName(name)
 			require.NotNil(t, v)
