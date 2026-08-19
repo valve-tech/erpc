@@ -5468,3 +5468,35 @@ because entry 131's fix means `Network.Bootstrap` registers a copy and no shared
 pointer can reach the engine. Recorded so the next reader does not inherit the
 premise unexamined.
 >>>>>>> worktree-agent-aefdbca58fa03b317
+
+---
+
+## 169. `make test-fast` compiles to one shared path, so two checkouts overwrite each other
+
+**Status: FIXED in the fork.** Upstream still carries it.
+**Severity: high for anyone who trusts a test result.**
+
+`Makefile` compiled the erpc test binary to `/tmp/erpc.test` — a single
+hardcoded path shared by every checkout on the machine — and then ran six
+shards from it:
+
+    go test -c -o /tmp/erpc.test ./erpc
+    /tmp/erpc.test -test.run "$SHARD_CONSENSUS" &
+    /tmp/erpc.test -test.run "$SHARD_NETWORK"   &
+    ...
+
+Two worktrees running the target at once overwrite each other. The second
+`go test -c` replaces the binary while the first target's shards are still
+executing from it, so a run can report on code from a different worktree.
+
+The failure is silent and it points the wrong way: a GREEN result proves
+nothing about the tree you are standing in. That is the same shape as the
+600-second truncation this log already records — a measurement that reads
+like a pass.
+
+It is not hypothetical. An agent hit it during this work: its `make
+test-fast` collided with another agent's run of the same target, and it had
+to run the `erpc` package directly to get a result it could trust.
+
+Fix: `ERPC_TEST_BIN := $(CURDIR)/.erpc.test`. Unique per worktree, stable
+across repeat runs in the same worktree, and added to `.gitignore`.
