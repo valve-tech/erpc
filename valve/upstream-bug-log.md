@@ -2940,3 +2940,52 @@ pointer out, rather than retro-fitting a field afterwards.
 
 Neither is done here, because both are wider than a race fix and each needs
 its own pin.
+
+## 100. A shadow test asserts an absolute value on a process-global counter
+
+**Status:** open. Found while adding `TestProjectForward_*` in
+`erpc/projects_shadow_forward_test.go`.
+
+`erpc/shadow_test.go:215` reads:
+
+    require.Zero(t, shadowMismatch(t, shadows[0], network, "eth_blockNumber"),
+        "an agreeing candidate must not also be counted as a mismatch")
+
+`shadowMismatch` sums a Prometheus counter vector. That vector lives for the
+life of the test binary, and its labels are the project id, the vendor, the
+network label, the upstream id and the method — all of which
+`startShadowErpc` hard-codes to the same values for every test in the file.
+
+So the assertion is not "this test counted no mismatch". It is "no test in
+this binary has ever counted an eth_blockNumber mismatch on project `prod`,
+upstream `candidate`". A new test that mirrors one disagreement on that
+method fails a test it never touched, and the failure names the old test.
+
+The other assertions in the same file already read a `before` value and
+compare a delta. This one does not, so it is the only one that couples.
+
+Fix: read the counter before the call and assert the delta, the way every
+other assertion in the file does. The new tests work around it by mirroring
+`eth_getBlockByNumber` instead, which leaves the coupling in place for the
+next author to trip over.
+
+## 101. `resolveBlockTag` takes an `upper` argument it never reads
+
+**Status:** open. Found while covering the tag branches in
+`erpc/query_executor.go`.
+
+    func (qe *EvmQueryExecutor) resolveBlockTag(ctx context.Context, block string, upper bool) (uint64, error)
+
+The body switches on `block` and never mentions `upper`. `resolveQueryBounds`
+passes `false` for the range start and `true` for the range end, so the call
+sites read as though the two ends resolve differently. They do not.
+
+Either the parameter once carried a rule that got deleted, or it was added
+for one that never arrived. Both leave the same trap: a reader who needs the
+upper bound to resolve differently — `latest` on the `to` side of an open
+range, say — will believe the hook is already there.
+
+Go does not report an unused parameter, so nothing catches this.
+
+Fix: delete the parameter. If an upper bound really needs its own rule later,
+add it then, with a test.
