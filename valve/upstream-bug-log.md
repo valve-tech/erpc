@@ -3000,6 +3000,12 @@ it, which shows the problem was already understood. The weakening is to return
 the error to the caller and let `cmd/erpc` decide to exit — the one place that
 owns the process.
 
+Update: the `test/` package now takes that indirection. Its test binary
+replaces `util.OsExit` with a recorder that stops only the calling goroutine,
+so a start failure is reported instead of ending the run. That is a workaround
+in one package, not the fix; this entry stays open. See 140 for the config gap
+that made the exit fire, and 143 for the logger that hid the reason.
+
 Related: 43 and 63 are the same shape. A library turns an operator's mistake
 into a fatal event instead of a value the caller can act on.
 
