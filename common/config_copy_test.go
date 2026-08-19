@@ -18,21 +18,6 @@ import (
 // fields, so a new field added to any of these structs is checked the day it
 // lands rather than the day someone remembers to extend a fixture.
 
-// copyAliasAllowlist names the paths UpstreamConfig.Copy leaves aliased with
-// the original. Every entry is a known gap recorded as bug 115 in
-// valve/upstream-bug-log.md — the allowlist keeps this test honest about what
-// it does NOT protect, and shrinks as the gaps close. It is NOT an assertion
-// that sharing is correct. Slice indexes are normalised to "[]".
-var copyAliasAllowlist = map[string]bool{
-	"UpstreamConfig.Tags":                               true,
-	"UpstreamConfig.Svm":                                true,
-	"UpstreamConfig.CreditUnits":                        true,
-	"UpstreamConfig.Shadow":                             true,
-	"UpstreamConfig.Routing":                            true,
-	"UpstreamConfig.Failsafe[].Retry.EmptyResultAccept": true,
-	"UpstreamConfig.Failsafe[].Retry.EmptyResultIgnore": true,
-}
-
 func TestUpstreamConfigCopy_ReproducesEveryValue(t *testing.T) {
 	seed := 0
 	original := &UpstreamConfig{}
@@ -44,6 +29,10 @@ func TestUpstreamConfigCopy_ReproducesEveryValue(t *testing.T) {
 	require.Equal(t, original, copied, "the copy must carry every value of the original")
 }
 
+// TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal admits no exceptions.
+// It used to carry an allowlist of seven known-aliased paths (bug 115); those
+// fields are deep-copied now, so any path this walk reports is a real gap —
+// including one in a field added tomorrow.
 func TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal(t *testing.T) {
 	seed := 0
 	original := &UpstreamConfig{}
@@ -52,15 +41,9 @@ func TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal(t *testing.T) {
 	copied := original.Copy()
 
 	shared := findSharedRefs(reflect.ValueOf(original).Elem(), reflect.ValueOf(copied).Elem(), "UpstreamConfig", nil)
-	var unexpected []string
-	for _, path := range shared {
-		if !isAllowlistedAlias(path) {
-			unexpected = append(unexpected, path)
-		}
-	}
-	require.Empty(t, unexpected,
+	require.Empty(t, shared,
 		"UpstreamConfig.Copy left these fields aliased with the original:\n  %s",
-		strings.Join(unexpected, "\n  "))
+		strings.Join(shared, "\n  "))
 }
 
 func TestUpstreamConfigCopy_NilReceiverReturnsNil(t *testing.T) {
@@ -95,6 +78,94 @@ func TestJsonRpcUpstreamConfigCopy_HeadersAreIndependent(t *testing.T) {
 	require.Equal(t, map[string]string{"X-Api-Key": "original"}, original.Headers,
 		"writing a header on the copy must not reach the original config")
 	require.Equal(t, "Bearer added-by-vendor", copied.Headers["Authorization"])
+}
+
+// TestUpstreamConfigCopy_FormerlyAliasedFieldsAreIndependent says in plain
+// writes what the reflection walk says by inspection. Each of these seven
+// fields was aliased between an upstream config and its copy (bug 115), so a
+// mutation through the copy is the direct proof that the alias is gone.
+//
+// upstream/registry.go copies a config exactly so that concurrent bootstrap
+// attempts cannot race. A shared map turns that race into a Go fatal
+// "concurrent map writes", which no recover catches.
+//
+// One subtest per field, so a field that becomes aliased again names itself
+// instead of hiding behind whichever assertion happens to run first.
+func TestUpstreamConfigCopy_FormerlyAliasedFieldsAreIndependent(t *testing.T) {
+	rate := 0.25
+	original := &UpstreamConfig{
+		Tags:        []string{"tier:main"},
+		CreditUnits: map[string]int64{"eth_call": 10},
+		Svm:         &SvmUpstreamConfig{Chain: "solana", Cluster: "mainnet-beta"},
+		Shadow: &ShadowUpstreamConfig{
+			Enabled:      true,
+			SampleRate:   &rate,
+			IgnoreFields: map[string][]string{"eth_getLogs": {"blockHash"}},
+		},
+		Routing: &UpstreamRoutingConfig{
+			Probe: ProbeModeOn,
+			ScoreMultipliers: []*ScoreMultiplierConfig{
+				{Network: "evm:1", Finality: []DataFinalityState{DataFinalityStateFinalized}},
+			},
+		},
+		Failsafe: []*FailsafeConfig{{
+			Retry: &RetryPolicyConfig{
+				EmptyResultAccept: []string{"eth_getLogs"},
+				EmptyResultIgnore: []string{"eth_getBalance"},
+			},
+		}},
+	}
+
+	copied := original.Copy()
+
+	t.Run("Tags", func(t *testing.T) {
+		// Write into the existing element first: `append` on a full slice
+		// reallocates and would hide the sharing.
+		copied.Tags[0] = "tier:mutated"
+		copied.Tags = append(copied.Tags, "tier:fallback")
+		require.Equal(t, []string{"tier:main"}, original.Tags)
+	})
+
+	t.Run("CreditUnits", func(t *testing.T) {
+		copied.CreditUnits["eth_call"] = 999
+		copied.CreditUnits["eth_getLogs"] = 5
+		require.Equal(t, map[string]int64{"eth_call": 10}, original.CreditUnits)
+	})
+
+	t.Run("Svm", func(t *testing.T) {
+		copied.Svm.Cluster = "devnet"
+		require.Equal(t, "mainnet-beta", original.Svm.Cluster)
+	})
+
+	t.Run("Shadow", func(t *testing.T) {
+		copied.Shadow.Enabled = false
+		*copied.Shadow.SampleRate = 0.9
+		copied.Shadow.IgnoreFields["eth_getLogs"][0] = "mutated"
+		copied.Shadow.IgnoreFields["eth_call"] = []string{"added"}
+		require.True(t, original.Shadow.Enabled)
+		require.Equal(t, 0.25, *original.Shadow.SampleRate)
+		require.Equal(t, []string{"blockHash"}, original.Shadow.IgnoreFields["eth_getLogs"])
+		require.NotContains(t, original.Shadow.IgnoreFields, "eth_call")
+	})
+
+	t.Run("Routing", func(t *testing.T) {
+		copied.Routing.Probe = ProbeModeOff
+		copied.Routing.ScoreMultipliers[0].Network = "evm:137"
+		copied.Routing.ScoreMultipliers[0].Finality[0] = DataFinalityStateUnfinalized
+		require.Equal(t, ProbeModeOn, original.Routing.Probe)
+		require.Equal(t, "evm:1", original.Routing.ScoreMultipliers[0].Network)
+		require.Equal(t, DataFinalityStateFinalized, original.Routing.ScoreMultipliers[0].Finality[0])
+	})
+
+	t.Run("Retry.EmptyResultAccept", func(t *testing.T) {
+		copied.Failsafe[0].Retry.EmptyResultAccept[0] = "mutated"
+		require.Equal(t, []string{"eth_getLogs"}, original.Failsafe[0].Retry.EmptyResultAccept)
+	})
+
+	t.Run("Retry.EmptyResultIgnore", func(t *testing.T) {
+		copied.Failsafe[0].Retry.EmptyResultIgnore[0] = "mutated"
+		require.Equal(t, []string{"eth_getBalance"}, original.Failsafe[0].Retry.EmptyResultIgnore)
+	})
 }
 
 // TestConsensusPolicyConfigCopy_NestedMapsAreIndependent pins the two
@@ -136,38 +207,6 @@ func TestConsensusPolicyConfigCopy_SkipsNilRequiredParticipant(t *testing.T) {
 	require.Nil(t, copied.RequiredParticipants[0])
 	require.Equal(t, "tier:main", copied.RequiredParticipants[1].Tag)
 	require.NotSame(t, original.RequiredParticipants[1], copied.RequiredParticipants[1])
-}
-
-func isAllowlistedAlias(path string) bool {
-	path = normalizeIndexes(path)
-	for prefix := range copyAliasAllowlist {
-		if path == prefix || strings.HasPrefix(path, prefix+".") || strings.HasPrefix(path, prefix+"[") {
-			return true
-		}
-	}
-	return false
-}
-
-// normalizeIndexes rewrites "Failsafe[1].Retry" as "Failsafe[].Retry" so the
-// allowlist names a field once instead of once per element.
-func normalizeIndexes(path string) string {
-	var b strings.Builder
-	skip := false
-	for _, r := range path {
-		switch {
-		case r == '[':
-			skip = true
-			b.WriteRune(r)
-		case r == ']':
-			skip = false
-			b.WriteRune(r)
-		case skip:
-			// drop the index
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // fillForCopy gives every field of v a distinctive non-zero value. Pointers get

@@ -239,6 +239,15 @@ func TestInitializer_MultipleTasksMixedResultsNoRetry(t *testing.T) {
 	defer init.Stop(nil)
 	require.Error(t, err)
 	assert.Equal(t, TaskFailed, TaskState(failingTask.state.Load()))
+
+	// waitForTasks returns as soon as ONE task reports an error, so
+	// ExecuteTasks can return while a sibling is still running. StatePartial
+	// requires every task to be terminal, so wait for each one before reading
+	// the aggregate state — otherwise this assertion races the last task and
+	// sees "initializing".
+	for _, task := range tasks {
+		_ = task.Wait(appCtx)
+	}
 	assert.Equal(t, StatePartial, init.State())
 }
 
@@ -460,27 +469,22 @@ func TestInitializer_MultipleRapidFailures(t *testing.T) {
 
 	init.ExecuteTasks(appCtx, task)
 
-	// Use a context with short timeout so we don't spin forever
-	ctx, cancel := context.WithTimeout(appCtx, time.Millisecond*300)
-	defer cancel()
-
-	// WaitForTasks is expected to fail
+	// Let the auto-retry loop get several rapid attempts in.
 	time.Sleep(time.Millisecond * 200)
-	err := init.WaitForTasks(ctx)
-	require.Error(t, err, "task should eventually fail or context should time out")
 
-	// Check we tried multiple times (rapidly)
-	assert.True(t, attempts.Load() > 1, "should attempt multiple times in quick succession")
-
-	// Check final State is either partial or failed
-	state := init.State()
-	assert.True(
-		t,
-		state == StateFailed,
-		"final state should reflect the repeated failures, got %v", state,
-	)
-
+	// Stop the loop BEFORE asserting anything about the outcome. While it runs
+	// it flips the task between running and failed on its own schedule, and
+	// every observer races that: WaitForTasks can wake on the previous
+	// attempt's done channel, read the NEXT attempt's "running" state and
+	// report no error, and State() reports "retrying" instead of "failed".
+	// Both assertions failed at -race -count=4 before this call moved up.
+	// Stop cancels the loop and waits for it, so afterwards nothing else can
+	// change the task.
 	init.Stop(nil)
+
+	assert.Greater(t, attempts.Load(), int64(1), "should attempt multiple times in quick succession")
+	require.Error(t, init.Errors(), "every attempt failed, so the initializer must report an error")
+	assert.Equal(t, StateFailed, init.State(), "final state should reflect the repeated failures")
 }
 
 func TestInitializer_ForcedCancellationMidTask(t *testing.T) {

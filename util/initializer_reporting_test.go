@@ -170,24 +170,29 @@ func TestInitializer_TaskReadyForRetry(t *testing.T) {
 	assert.False(t, init.taskReadyForRetry(fresh), "a just-attempted task must wait out its backoff")
 }
 
-// TestInitializer_AppContextAlreadyCancelledWedgesTheInitializer pins a live
-// defect, it does not endorse it.
+// TestInitializer_ATaskScheduledAfterShutdownDoesNotWedgeTheInitializer covers
+// bug 56.
 //
-// When a task starts after the app context is already cancelled, the launched
-// goroutine takes the early-return branch at initializer.go:337 and never calls
-// wg.Done(). attemptRemainingTasks then blocks on wg.Wait() at
-// initializer.go:397 forever, while still holding i.tasksMu through its
-// deferred unlock. Every later ExecuteTasks, attemptRemainingTasks and Stop on
-// that initializer blocks on the same mutex, so one late task wedges the whole
-// initializer — including shutdown.
+// A task can be scheduled after the app context is already cancelled: every
+// registry calls ExecuteTasks on the request path, so any request that races
+// process shutdown reaches this. The task itself must fail with the context
+// error, and — this is the part that was broken — every caller must still get
+// its call back.
 //
-// Every registry calls ExecuteTasks on the request path, so any request that
-// races process shutdown reaches this. The task state itself is still recorded
-// correctly; only the caller never returns.
+// attemptRemainingTasks used to count every task it walked into one WaitGroup
+// and wait for the launched goroutines to start. The goroutine returned early
+// on this path without calling Done, so the wait never ended, and it holds
+// i.tasksMu through a deferred unlock. That stranded every later ExecuteTasks,
+// attemptRemainingTasks and Stop on the same Initializer. One Initializer
+// serves every network and upstream, so one late task stranded the whole
+// fleet, shutdown included.
 //
-// This test deliberately leaks the two parked goroutines. When the bug is
-// fixed, it fails loudly and tells you to rewrite it.
-func TestInitializer_AppContextAlreadyCancelledWedgesTheInitializer(t *testing.T) {
+// Each assertion below races the call against a deadline, so a regression
+// FAILS this test instead of hanging the package for its full timeout — which
+// is how the sibling deadlock (bug 122) stayed hidden.
+func TestInitializer_ATaskScheduledAfterShutdownDoesNotWedgeTheInitializer(t *testing.T) {
+	const deadline = 5 * time.Second
+
 	appCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -207,26 +212,40 @@ func TestInitializer_AppContextAlreadyCancelledWedgesTheInitializer(t *testing.T
 
 	select {
 	case err := <-executed:
-		t.Fatalf("ExecuteTasks returned (%v) — initializer.go:337 now calls wg.Done() "+
-			"on the cancelled-context path. The defect is fixed; rewrite this test to "+
-			"assert the task fails with context.Canceled and the call returns.", err)
-	case <-time.After(500 * time.Millisecond):
-		// Still parked, as the defect predicts.
+		require.ErrorIs(t, err, context.Canceled,
+			"the caller must be told why the task could not run")
+	case <-time.After(deadline):
+		t.Fatal("ExecuteTasks never returned: the launch WaitGroup lost a Done " +
+			"on the cancelled-app-context path, so attemptRemainingTasks waits " +
+			"forever while holding i.tasksMu")
 	}
 
 	assert.False(t, ran.Load(), "the task function must not run once the app context is dead")
-	assert.Equal(t, TaskFailed, TaskState(task.state.Load()),
-		"the task itself is recorded correctly; only the caller is stranded")
+	assert.Equal(t, TaskFailed, TaskState(task.state.Load()))
 	require.NotNil(t, task.Error())
 	assert.ErrorIs(t, task.Error().Err, context.Canceled)
 
-	// Blast radius: the held mutex strands shutdown too.
+	// Blast radius, part one: a later caller must not inherit the wedge.
+	later := NewBootstrapTask("scheduled-later", func(ctx context.Context) error { return nil })
+	second := make(chan error, 1)
+	go func() { second <- init.ExecuteTasks(context.Background(), later) }()
+
+	select {
+	case err := <-second:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(deadline):
+		t.Fatal("a second ExecuteTasks never returned: the first one still holds i.tasksMu")
+	}
+
+	// Blast radius, part two: shutdown takes the same mutex.
 	stopped := make(chan struct{})
 	go func() { _ = init.Stop(nil); close(stopped) }()
+
 	select {
 	case <-stopped:
-		t.Fatal("Stop returned — the mutex is no longer stranded; rewrite this test")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(deadline):
+		t.Fatal("Stop never returned: the initializer's mutex is stranded, so the " +
+			"process cannot shut down without being killed")
 	}
 }
 
@@ -396,7 +415,6 @@ func TestInitializer_StateRetryingAfterRepeatedAttempts(t *testing.T) {
 	})
 
 	block := make(chan struct{})
-	defer close(block)
 
 	task := NewBootstrapTask("slow", func(ctx context.Context) error {
 		<-block
@@ -410,4 +428,11 @@ func TestInitializer_StateRetryingAfterRepeatedAttempts(t *testing.T) {
 	init.attemptRemainingTasks(false)
 
 	assert.Equal(t, StateRetrying, init.State())
+
+	// Release the task and wait for it before returning. The task goroutine
+	// logs through the zerolog writer this test owns, so a test that returns
+	// while the goroutine still runs makes zerolog write into a finished
+	// *testing.T — a data race the detector reports at -race -count=2.
+	close(block)
+	require.NoError(t, init.WaitForTasks(context.Background()))
 }

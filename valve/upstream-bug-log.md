@@ -1647,46 +1647,68 @@ fire from the only path that reaches it.
 
 ## 56. A task started after shutdown wedges its whole Initializer
 
-**Status:** open. **Severity: high.** A hung shutdown and a hung request path.
+**Status: FIXED in the fork** (`util/initializer.go`). Upstream still carries
+it. **Severity was: high.** A hung shutdown and a hung request path.
 
-`util/initializer.go:298` runs every schedulable task under one
-`sync.WaitGroup`, and waits for all of them to *start* at `:397`. Each launched
-goroutine calls `wg.Done()` at `:346`, after it has built the task context.
+`attemptRemainingTasks` ran every schedulable task under one `sync.WaitGroup`
+and waited for all of them to *start*. It called `wg.Add(1)` for every task the
+walk looked at and `wg.Done()` in each branch that skipped one, plus one more
+inside the launched goroutine. That goroutine returned early when the app
+context was already cancelled — **without calling `wg.Done()`**. `wg.Wait()`
+then blocked forever.
 
-The goroutine returns early at `:337-342` when the app context is already
-cancelled — **without calling `wg.Done()`**. `attemptRemainingTasks` then blocks
-on `wg.Wait()` forever.
+The blast radius was the whole Initializer, not one task.
+`attemptRemainingTasks` takes `i.tasksMu` and releases it through a `defer`, so
+the mutex was never released either. Every later `ExecuteTasks`,
+`attemptRemainingTasks` and `Stop` on that Initializer blocked on the same
+mutex.
 
-The blast radius is the whole Initializer, not one task.
-`attemptRemainingTasks` takes `i.tasksMu` at `:299` and releases it through a
-`defer`, so the mutex is never released either. Every later `ExecuteTasks`
-(`:202`), `attemptRemainingTasks` and `Stop` (`:495`) on that Initializer blocks
-on the same mutex.
+One Initializer serves many resources (one bootstrap task per network and per
+upstream), and `NetworksRegistry.GetNetwork` calls `ExecuteTasks` on the
+request path. So any request that raced process shutdown — or any task
+scheduled after the app context was cancelled — stranded every later caller AND
+the shutdown sequence itself. The task's own state was recorded correctly
+(`TaskFailed`, with the context error); only the callers hung.
 
-One Initializer is shared across many resources (one bootstrap task per
-network/upstream), and `NetworksRegistry.GetNetwork` calls `ExecuteTasks` on the
-request path. So any request that races process shutdown — or any task
-scheduled after the app context is cancelled — strands every subsequent caller
-AND the shutdown sequence itself.
+**The fix makes two changes, and neither adds a branch.**
 
-The task's own state is recorded correctly (`TaskFailed`, with the context
-error); only the callers hang.
+1. The cancelled-app-context case no longer launches a goroutine. The walk
+   records the failure itself — store the error, log it, publish `TaskFailed`,
+   close the done channel — and moves on. A task that never starts cannot fail
+   to report that it started.
+2. `wg` now counts launched goroutines only: one `Add` next to the `go`, one
+   `Done` on that goroutine's only path, immediately after it builds the task
+   context. The four bookkeeping `Done` calls in the skip branches are gone, so
+   there is no count left to get wrong. Nothing between the `Add` and the
+   `Done` can fail or return early.
 
-Fix: call `wg.Done()` on that path too, or `defer wg.Done()` once at the top of
-the goroutine and drop the explicit call at `:346`.
+The barrier itself stays. `attemptRemainingTasks` still waits for every
+launched goroutine to start before it returns, because callers read `State()`
+and `ctxCancel` straight after `ExecuteTasks`. Deleting the barrier made
+`TestInitializer_MultipleTasksMixedResultsNoRetry` and
+`TestInitializer_ErrorsJoinsEveryTaskFailure` fail.
 
-Pinned by `TestInitializer_AppContextAlreadyCancelledWedgesTheInitializer`,
-which asserts both the stranded `ExecuteTasks` and the stranded `Stop`.
+The ordering that entry 122 fixed is untouched: `Stop` still cancels the
+auto-retry loop and waits for it BEFORE it takes `tasksMu`.
 
-Adjacent, same function, **severity: low** — `util/initializer.go:376`. When a
-task returns `context.Canceled`, the handler tries
+The walk also collected a `tasksToRun` slice that nothing ever read. Deleted.
+
+Pinned by
+`TestInitializer_ATaskScheduledAfterShutdownDoesNotWedgeTheInitializer`, which
+asserts that `ExecuteTasks`, a second `ExecuteTasks` and `Stop` all return.
+Every assertion races its call against a five-second deadline, so a regression
+FAILS the test instead of hanging the package — which is how entry 122 stayed
+hidden for so long. Against the previous code the first assertion fails in five
+seconds. `go test -race ./util/ -count=4` is green.
+
+Adjacent, same function, **severity: low, still open** — when a task returns
+`context.Canceled`, the handler tries
 `bt.lastErr.CompareAndSwap(nil, wrappedError{err: err})`. The CAS can never
-succeed: `:326` stored `wrappedError{err: nil}` into that `atomic.Value` before
-the attempt, so the current value is a `wrappedError`, never `nil`. The
-cancellation reason is dropped, and `Wait` (`:135`) substitutes
-`"task failed without specific error"`. The task is still counted as failed;
-only the reason is lost. Pinned by
-`TestInitializer_CancelledTaskIsReportedWithoutItsReason`.
+succeed: the walk stored `wrappedError{err: nil}` into that `atomic.Value`
+before the attempt, so the current value is a `wrappedError`, never `nil`. The
+cancellation reason is dropped, and `Wait` substitutes `"task failed without
+specific error"`. The task is still counted as failed; only the reason is lost.
+Pinned by `TestInitializer_CancelledTaskIsReportedWithoutItsReason`.
 
 ---
 
@@ -3509,9 +3531,25 @@ seconds. Now an `atomic.Int64`.
 ## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
 
 **Status:** open. **Severity: medium.** Found by `go test ./util/ -race
--count=2`. Reconfirmed today: the leak still races, but it now needs more
-passes — two of six runs showed it, and `go test ./util/ -race -count=4 -run
-TestInitializer` reproduced the same stack at `util/initializer.go:379`.
+-count=2`.
+
+**Update (entry 56's fix).** The fix for entry 56 does NOT fix this one, and
+the entry stays open. It does two things to the reproduction, and neither
+touches the defect:
+
+- Each task goroutine now publishes its terminal state LAST, after the log line
+  the state summarises (entry 158). A caller that waits for a terminal state
+  therefore has a happens-before edge on that log write, so the specific stack
+  quoted below no longer races for such a caller.
+- The two `util` tests that reproduced it were themselves at fault and are
+  fixed (entries 155 and 156). `go test -race ./util/ -count=4` is green.
+
+Both halves named below survive. `Stop` still reports a timeout as a log line
+and returns `destroyFn`'s error, so a caller still cannot tell a clean stop
+from an abandoned one. And a task goroutine whose `Fn` is still running when
+`Stop` gives up still holds the caller's logger, so it can still write to a
+component the operator has torn down. A green race run means the tests no
+longer trip it, not that `Stop` now stops.
 
 `util/initializer.go:506-512`:
 
@@ -3800,22 +3838,24 @@ add it then, with a test.
 
 ## 115. `UpstreamConfig.Copy` is a partial deep copy
 
-**Status:** open. `Copy()` is still a partial deep copy: the seven fields
-listed below stay aliased with the original. The header-map half is FIXED in
-the fork, and upstream still carries it — pinned by
-`TestJsonRpcUpstreamConfigCopy_HeadersAreIndependent`. The aliased remainder is
-pinned by `TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal` and its
-allowlist.
+**Status: FIXED in the fork** (`common/config.go`). Upstream still carries it.
+`Copy()` now shares no memory with the original. Pinned by
+`TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal`, which has no allowlist
+any more, and by
+`TestUpstreamConfigCopy_FormerlyAliasedFieldsAreIndependent`, one subtest per
+field.
 
 `upstream/registry.go:509` copies an upstream config before it bootstraps the
 upstream, and its comment says why: "Deep copy to avoid race conditions when
 detectFeatures modifies the config". Line 547 copies again per attempt, because
 "NewUpstream mutates it (vendor detection)". Both rely on `Copy()` producing an
 object that shares nothing with the operator's config or with the sibling
-copies.
+copies. Four vendors clone a template config the same way —
+`thirdparty/chainstack.go:165`, `conduit.go:148`, `quicknode.go:350`,
+`superchain.go:223` — one clone per discovered endpoint.
 
-`Copy()` does not produce that object. It starts with `*copied = *c`, then
-deep-copies seven fields and leaves the rest aliased.
+`Copy()` did not produce that object. It started with `*copied = *c`, then
+deep-copied some fields and left the rest aliased.
 
 The worst case was `JsonRpcUpstreamConfig.Copy`:
 
@@ -3828,31 +3868,65 @@ if c.Headers != nil {
 ```
 
 `*copied = *c` gives `copied.Headers` the same map header as `c.Headers`, so
-`maps.Copy` copies the map into itself and does nothing. Every copy of an
-upstream shares one header map. Headers carry credentials — `thirdparty/
+`maps.Copy` copied the map into itself and did nothing. Every copy of an
+upstream shared one header map. Headers carry credentials — `thirdparty/
 blockdaemon.go:116` writes `Authorization: Bearer <key>`, `thirdparty/
 satelink.go:132` writes `X-API-Key` — and two bootstrap attempts writing that
 map concurrently is a Go fatal concurrent map write, not a recoverable error.
-The sibling `GrpcUpstreamConfig.Copy` allocates first and gets it right, which
-is what shows the intent.
+`thirdparty/chainstack.go:178` writes an auth header into exactly that map, once
+per node it discovers. The sibling `GrpcUpstreamConfig.Copy` allocates first
+and gets it right, which is what shows the intent.
 
-**Fixed here:** `common/config.go` now allocates the destination map before
-copying into it.
+`common/config.go` allocates the destination map before copying into it. Pinned
+by `TestJsonRpcUpstreamConfigCopy_HeadersAreIndependent`.
 
-Still aliased after the fix, and recorded rather than changed because each one
-needs a decision about what the field means:
+**The seven fields that stayed aliased are copied now.** Each was decided on
+its own, and the answer was the same each time: copy it. `Copy()` runs at
+config load and at bootstrap, never per request, so the cost is a few small
+allocations per upstream. Against that, every one of these fields is read on a
+live path while a sibling bootstrap attempt could be writing it.
 
-- `UpstreamConfig.Tags` — a slice, so `append` on a copy can write into the
-  original's backing array.
-- `UpstreamConfig.CreditUnits` — a map.
-- `UpstreamConfig.Svm`, `.Shadow`, `.Routing` — pointers to structs with their
-  own maps and slices inside.
-- `RetryPolicyConfig.EmptyResultAccept` and `.EmptyResultIgnore` — slices.
+- **`UpstreamConfig.Tags`** — a slice. `append` on a copy with spare capacity
+  writes into the original's backing array. `common/config.go:1329` appends to
+  `Tags` (the legacy `group:`/`cohort:` rewrite) and `common/defaults.go:1778`
+  reassigns it; both run before any `Copy`, so nothing crossed the boundary
+  today. The selection policy reads tags on the request path.
+- **`UpstreamConfig.CreditUnits`** — a map. No writer indexes it today. It is
+  the exact shape that turns a race into an unrecoverable fatal, and the
+  rate-limit path reads it.
+- **`UpstreamConfig.Svm`** — a pointer to three scalars. `ApplyDefaults`
+  (`common/defaults.go:1832-1843`) writes `Chain`, `Cluster` and
+  `CheckGenesisHash` in place. It runs before `Copy` today, so the write does
+  not cross a copy boundary — but this is a live in-place writer of exactly
+  this struct, which puts the alias one call-order change away from one
+  upstream editing another's identity. Now has a `Copy()`.
+- **`UpstreamConfig.Shadow`** — a pointer to a struct holding
+  `IgnoreFields map[string][]string`, so a struct-level copy alone still shares
+  the map AND each slice inside it. `erpc/shadow.go:169` reads `IgnoreFields`
+  per shadow comparison, concurrently with bootstrap. Now has a `Copy()` that
+  clones the map and every slice.
+- **`UpstreamConfig.Routing`** — a pointer to a struct holding
+  `ScoreMultipliers []*ScoreMultiplierConfig`. `internal/policy/prober.go:254`
+  reads `Routing.Probe` per probe tick. `ApplyDefaults` already clones this
+  struct and its entry list, which shows the code treats a shared `Routing`
+  block as a hazard; it stops at the entries by declaring them immutable. That
+  is an unforced commitment, so `Copy()` deletes it and copies the entries too,
+  including each `Finality` slice. The `*float64` weights stay shared: every
+  writer in this tree replaces such a pointer instead of writing through it,
+  which is how the rest of the `Copy` family treats `*bool` and `*float64`.
+- **`RetryPolicyConfig.EmptyResultAccept` and `.EmptyResultIgnore`** — slices,
+  and they escape the config. `common/empty_result.go:18` hands
+  `EmptyResultAccept` straight to the request path, and
+  `common/defaults.go:2745` assigns `EmptyResultIgnore` to `EmptyResultAccept`,
+  so one backing array could reach two fields of every copy of every config.
 
-No caller mutates any of those in place today, so this half is a latent hazard
-rather than a live fault. `TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal`
-walks the whole config tree by reflection and fails on any NEW aliased field;
-the seven above sit in an allowlist that names this entry.
+**The allowlist is gone, not shortened.**
+`TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal` walks the whole config
+tree by reflection and now fails on ANY aliased path, including one in a field
+added tomorrow. `TestUpstreamConfigCopy_FormerlyAliasedFieldsAreIndependent`
+adds the same claim as plain writes, one subtest per field, so a field that
+becomes aliased again names itself. Against the previous `Copy()` the
+reflection test lists all seven paths and all seven subtests fail.
 
 ## 116. `ErrUpstreamsExhausted.DeepestMessage` can never reach its single-cause branch
 
@@ -4930,3 +5004,165 @@ the work that found this.
 
 The fix is the one entries 10 and 23 point at: wait for the condition instead
 of betting on a deadline.
+
+## 155. `TestInitializer_MultipleRapidFailures` asserts against a live auto-retry loop
+
+**Status: FIXED in the fork** (`util/initializer_test.go`). Fork test only —
+upstream carries the same test and the same fault. **Severity: low** as a
+defect, **high** as an obstacle: it is the reason nobody could read a `util`
+race run.
+
+Entry 122 reported that `util` passes `-race` at `-count=4`. It does not, and
+it did not before this work either. On a clean tree at `8fe74b2`,
+`go test -race ./util/ -count=4` fails in this test, once or twice per run.
+
+The test starts a task that always fails, lets the auto-retry loop run for
+200ms, and then asserts on the result **while the loop is still running**. Two
+assertions race it:
+
+    err := init.WaitForTasks(ctx)
+    require.Error(t, err, "task should eventually fail or context should time out")
+    ...
+    state := init.State()
+    assert.True(t, state == StateFailed, ...)
+
+`State()` reports `StateRetrying` whenever the loop has just re-claimed the
+task, because `attempts > 1` and `running > 0`. `WaitForTasks` returns `nil`
+for the reason in entry 157. Both were observed.
+
+**Fix:** call `init.Stop(nil)` BEFORE asserting. `Stop` cancels the loop and
+waits for it, so afterwards nothing can change the task. The assertions then
+read a settled initializer: more than one attempt, a non-nil `Errors()`, and
+`StateFailed`. Against the previous version the test fails two runs in twelve
+at `-race -count=12`; the new version passes twelve for twelve, and
+`go test -race ./util/ -count=4` is green.
+
+## 156. A test returns while its task goroutine is still writing to its logger
+
+**Status: FIXED in the fork** (`util/initializer_reporting_test.go`). Fork test
+only. **Severity: low.** A data race in the test binary, not in the product.
+
+`TestInitializer_StateRetryingAfterRepeatedAttempts` blocks its task on a
+channel and releases it with `defer close(block)`. The deferred close is the
+last thing the test does, so the task goroutine wakes up after the test
+function has returned and logs "initialization task succeeded" into the
+`zerolog.NewTestWriter(t)` the test owns. `testing.tRunner` has already marked
+the test done, so that write is a data race:
+
+    WARNING: DATA RACE
+    Read at ... by goroutine 8204:
+      testing.(*common).destination()
+      zerolog.TestWriter.Write()
+      util.(*Initializer).attemptRemainingTasks.func1.1()
+    Previous write at ... by goroutine 8203:
+      testing.tRunner.func1()
+
+`go test -race ./util/ -run TestInitializer_StateRetryingAfterRepeatedAttempts
+-count=20` reproduces it on a clean tree at `8fe74b2`.
+
+This is entry 109's shape, but the cause here is the test, not `Stop`. The
+product change in entry 158 is what makes a barrier possible; the test change
+is what uses it.
+
+**Fix:** close the channel explicitly and then `WaitForTasks` before returning.
+Reverting either half brings the race back at `-count=20`.
+
+## 157. `BootstrapTask.Wait` reports success for a task that never succeeded
+
+**Status:** open. **Severity: medium.** A caller on the request path can be
+told a bootstrap finished cleanly when every attempt failed.
+
+`util/initializer.go`, in `Wait`:
+
+    case <-ch.(chan struct{}):
+        // The attempt ended. Check if we failed.
+        if TaskState(t.state.Load()) == TaskFailed {
+            ...
+            return wr.err
+        }
+        return nil // Succeeded or otherwise finished
+
+`ch` is the done channel of the attempt that was current when `Wait` loaded it.
+Between that channel closing and the `state.Load()` on the next line, the
+auto-retry loop can claim a new attempt and set the state to `TaskRunning`. The
+comparison then fails, and `Wait` returns `nil` — "succeeded or otherwise
+finished" — for a task that has failed every attempt so far and is failing
+again right now.
+
+`waitForTasks` compounds it. After `Wait` returns `nil` it checks
+`state == TaskFailed` before recording an error, and the state is `TaskRunning`
+by construction, so nothing is recorded. `ExecuteTasks` returns `nil` and the
+caller treats the resource as ready.
+
+Reproduced by the previous version of `TestInitializer_MultipleRapidFailures`
+(entry 155) under `go test -race ./util/ -count=4`: every attempt logged
+"initialization task failed", and `WaitForTasks` still returned no error.
+
+The narrow fix is to loop instead of returning `nil`: only a terminal state may
+end the wait. That changes one more thing, which is why it is recorded rather
+than done here — the `case <-ch` branch is also where `Wait` substitutes
+`"task failed without specific error"` for an empty error (entry 56's adjacent
+finding), and the top-of-loop branch does not. Moving the exit needs that
+substitution moved with it, and
+`TestInitializer_CancelledTaskIsReportedWithoutItsReason` pins today's wording.
+
+## 158. A task's terminal state was published before the log line it summarises
+
+**Status: FIXED in the fork** (`util/initializer.go`). **Severity: low.**
+
+Every branch of the task goroutine stored the terminal state and only then
+logged:
+
+    bt.state.Store(int32(TaskSucceeded))
+    lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
+    i.logger.Info().Str("task", bt.Name).Dur("durationMs", ...).Msg("...")
+
+`Wait`, `State` and `Stop` all treat a terminal state as "this attempt is
+done". It was not. A caller could observe `TaskSucceeded`, return, and tear
+down the component whose logger the goroutine was still holding — the same
+class of fault entry 109 describes, reached without any timeout.
+
+**Fix:** publish the state last, in all three branches. The error and the log
+line now happen before the `state.Store`, so a watcher that sees a terminal
+state has, through that atomic, seen every side effect of the attempt. This is
+a reordering, not a new mechanism, and it costs nothing.
+
+It does not close entry 109. `Stop` can still give up while `bt.Fn` itself is
+still running, and that `Fn` writes to the same logger.
+
+**It has one cost, and it is worth naming.** Publishing the state later widens
+any window in which an observer polls `State()` while a task is finishing —
+the log write now sits inside that window, and a zerolog test writer holds a
+mutex. `TestInitializer_MultipleTasksMixedResultsNoRetry` was latently racy on
+exactly that window and never tripped: 0 failures in 200 runs before the
+reorder, 33 in 200 after it. The test asserts `StatePartial` straight after
+`ExecuteTasks` returns, but `waitForTasks` returns as soon as ONE task reports
+an error, so a sibling task can still be running — and `StatePartial` requires
+every task to be terminal. The test now waits for each task before it reads the
+aggregate state. Reverting that wait brings back 31 failures in 200 runs.
+
+The reorder is still the right trade. `State()` is a snapshot and no caller can
+treat it as settled, whereas "a terminal state means the attempt is done" is a
+guarantee three callers already assumed. Six consecutive
+`go test -race ./util/ -count=4` runs are green.
+
+## 159. The bug log itself carries unresolved merge conflicts
+
+**Status:** open. Fork document only (`valve/upstream-bug-log.md`).
+**Severity: low**, but it makes the log unreadable from entry 118 onward.
+
+At `8fe74b2` the file contains literal conflict markers:
+
+    3827:<<<<<<< HEAD
+    3836:>>>>>>> worktree-agent-a40ba5dcb41c740c9
+    3993:<<<<<<< HEAD
+    3994:<<<<<<< HEAD
+    4338:>>>>>>> worktree-agent-a40ba5dcb41c740c9
+    4550:>>>>>>> worktree-agent-a694d8f4044ea228a
+
+The second region is nested and spans roughly 550 lines, so entries 125 to 144
+sit inside a three-way conflict. The two sides differ in substance, not
+formatting: entry 118's two versions disagree about whether the defect is open
+or fixed. Resolving it needs a person who knows which sessions produced which
+half, so it is recorded rather than guessed at.
+>>>>>>> worktree-agent-abf93cd02a682e9f0

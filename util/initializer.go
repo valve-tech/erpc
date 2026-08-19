@@ -299,97 +299,121 @@ func (i *Initializer) attemptRemainingTasks(respectBackoff bool) {
 	i.tasksMu.Lock()
 	defer i.tasksMu.Unlock()
 
-	var tasksToRun []*BootstrapTask
-
+	// wg counts LAUNCHED goroutines only: one Add next to each `go`, one Done
+	// on that goroutine's only path. It used to count every task the walk
+	// looked at, with a Done in each skip branch and one more inside the
+	// goroutine — and the goroutine had an early return that skipped its Done.
+	// The wait below then never ended, with i.tasksMu still held through the
+	// deferred unlock, so every later caller on this Initializer was stranded
+	// too. Keep the Add and the Done adjacent to the launch, and there is no
+	// bookkeeping left to get wrong.
 	wg := sync.WaitGroup{}
 	i.tasks.Range(func(key, value interface{}) bool {
-		wg.Add(1)
 		t := value.(*BootstrapTask)
 		state := TaskState(t.state.Load())
-		if state == TaskPending || state == TaskFailed || state == TaskTimedOut {
-			// Gate re-attempts of already-failed/timed-out tasks behind their
-			// retry backoff. ExecuteTasks (hence this function) runs on every
-			// request for a not-yet-ready network, so without this gate a
-			// permanently-failing task (e.g. a lazy-loaded network that resolves
-			// to zero upstreams) is re-executed on every single request — burning
-			// CPU and flooding logs. Pending tasks have never run, so they always
-			// start immediately. The auto-retry loop passes respectBackoff=false
-			// because it already paces its own cadence.
-			if respectBackoff && (state == TaskFailed || state == TaskTimedOut) && !i.taskReadyForRetry(t) {
-				wg.Done()
-				return true
-			}
-			// Attempt to swap from [Pending|Failed|Timeout] -> Running
-			// #nosec G115 - We know TaskState is small enough that int->int32 won't overflow
-			if t.state.CompareAndSwap(int32(state), int32(TaskRunning)) {
-				t.beginAttempt()
-				t.lastErr.Store(wrappedError{err: nil})
-
-				// Create a fresh done channel to signal this attempt's completion
-				doneCh := t.createNewDoneChannel()
-				tasksToRun = append(tasksToRun, t)
-
-				go func(bt *BootstrapTask, doneCh chan struct{}) {
-					// Close the channel when the function finishes
-					// The CompareAndSwap will ensure we always and only close the channel once for each attempt
-					defer close(doneCh)
-
-					if i.appCtx.Err() != nil {
-						bt.lastErr.Store(wrappedError{err: i.appCtx.Err()})
-						bt.state.Store(int32(TaskFailed))
-						i.logger.Warn().Str("task", bt.Name).Err(i.appCtx.Err()).Msg("initialization task context error")
-						return
-					}
-
-					tctx, cancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout)
-					bt.ctxCancel.Store(cancel)
-					wg.Done()
-					err := bt.Fn(tctx)
-					if err == nil {
-						// If the function returns nil but context says we're canceled, treat it as an error
-						err = tctx.Err()
-					}
-
-					if err != nil {
-						// Detect fatal control errors without importing the common package to avoid cycles
-						var fatal interface{ IsTaskFatal() bool }
-						if errors.As(err, &fatal) {
-							// Fatal errors should stop retries
-							// Unwrap underlying error if available
-							underlying := err
-							if uw, ok := err.(interface{ Unwrap() error }); ok && uw.Unwrap() != nil {
-								underlying = uw.Unwrap()
-							}
-							bt.lastErr.Store(wrappedError{err: underlying})
-							bt.state.Store(int32(TaskFatal))
-							// Log the underlying fatal error
-							i.logger.Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
-							return
-						}
-						// If context is cancelled there will be a reason already set for it on lastErr
-						if !errors.Is(err, context.Canceled) {
-							if cause := context.Cause(tctx); cause != nil {
-								err = cause
-							}
-							bt.lastErr.Store(wrappedError{err: err})
-						} else {
-							bt.lastErr.CompareAndSwap(nil, wrappedError{err: err})
-						}
-						bt.state.Store(int32(TaskFailed))
-						i.logger.Warn().Str("task", bt.Name).Err(err).Msg("initialization task failed")
-					} else {
-						bt.lastErr.Store(wrappedError{err: nil})
-						bt.state.Store(int32(TaskSucceeded))
-						lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
-						i.logger.Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
-					}
-				}(t, doneCh)
-			} else {
-				wg.Done()
-			}
-		} else {
-			wg.Done()
+		if state != TaskPending && state != TaskFailed && state != TaskTimedOut {
+			return true
 		}
+
+		// Gate re-attempts of already-failed/timed-out tasks behind their
+		// retry backoff. ExecuteTasks (hence this function) runs on every
+		// request for a not-yet-ready network, so without this gate a
+		// permanently-failing task (e.g. a lazy-loaded network that resolves
+		// to zero upstreams) is re-executed on every single request — burning
+		// CPU and flooding logs. Pending tasks have never run, so they always
+		// start immediately. The auto-retry loop passes respectBackoff=false
+		// because it already paces its own cadence.
+		if respectBackoff && (state == TaskFailed || state == TaskTimedOut) && !i.taskReadyForRetry(t) {
+			return true
+		}
+
+		// Claim the attempt: [Pending|Failed|Timeout] -> Running.
+		// #nosec G115 - We know TaskState is small enough that int->int32 won't overflow
+		if !t.state.CompareAndSwap(int32(state), int32(TaskRunning)) {
+			return true
+		}
+		t.beginAttempt()
+		t.lastErr.Store(wrappedError{err: nil})
+
+		// A fresh done channel signals this attempt's completion. The
+		// CompareAndSwap above is what guarantees exactly one closer.
+		doneCh := t.createNewDoneChannel()
+
+		if err := i.appCtx.Err(); err != nil {
+			// The app is shutting down. Fail the attempt right here instead of
+			// launching a goroutine that can only report the same thing: a
+			// task that never starts cannot fail to report that it started.
+			//
+			// This branch used to live inside the goroutine, and it returned
+			// without calling Done. The wait below then never ended, and it
+			// holds i.tasksMu through the deferred unlock. One Initializer
+			// serves every network and upstream, and GetNetwork calls
+			// ExecuteTasks on the request path, so a single task scheduled
+			// after shutdown stranded every later caller and shutdown itself.
+			t.lastErr.Store(wrappedError{err: err})
+			t.state.Store(int32(TaskFailed))
+			close(doneCh)
+			i.logger.Warn().Str("task", t.Name).Err(err).Msg("initialization task context error")
+			return true
+		}
+
+		wg.Add(1)
+		go func(bt *BootstrapTask, doneCh chan struct{}) {
+			defer close(doneCh)
+
+			tctx, cancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout)
+			bt.ctxCancel.Store(cancel)
+			// The task has started. Nothing above this line can fail or return
+			// early, so this Done always runs.
+			wg.Done()
+
+			// Each branch below publishes the terminal state LAST, after the
+			// error and the log line it summarises. A watcher that sees a
+			// terminal state has therefore seen every side effect of the
+			// attempt, which is what Wait, State and Stop already assume. With
+			// the state published first, a caller could observe "succeeded",
+			// tear the component down, and only then have the task goroutine
+			// write to the logger it borrowed.
+			err := bt.Fn(tctx)
+			if err == nil {
+				// If the function returns nil but context says we're canceled, treat it as an error
+				err = tctx.Err()
+			}
+
+			if err != nil {
+				// Detect fatal control errors without importing the common package to avoid cycles
+				var fatal interface{ IsTaskFatal() bool }
+				if errors.As(err, &fatal) {
+					// Fatal errors should stop retries
+					// Unwrap underlying error if available
+					underlying := err
+					if uw, ok := err.(interface{ Unwrap() error }); ok && uw.Unwrap() != nil {
+						underlying = uw.Unwrap()
+					}
+					bt.lastErr.Store(wrappedError{err: underlying})
+					// Log the underlying fatal error
+					i.logger.Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
+					bt.state.Store(int32(TaskFatal))
+					return
+				}
+				// If context is cancelled there will be a reason already set for it on lastErr
+				if !errors.Is(err, context.Canceled) {
+					if cause := context.Cause(tctx); cause != nil {
+						err = cause
+					}
+					bt.lastErr.Store(wrappedError{err: err})
+				} else {
+					bt.lastErr.CompareAndSwap(nil, wrappedError{err: err})
+				}
+				i.logger.Warn().Str("task", bt.Name).Err(err).Msg("initialization task failed")
+				bt.state.Store(int32(TaskFailed))
+			} else {
+				bt.lastErr.Store(wrappedError{err: nil})
+				lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
+				i.logger.Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
+				bt.state.Store(int32(TaskSucceeded))
+			}
+		}(t, doneCh)
 		return true
 	})
 

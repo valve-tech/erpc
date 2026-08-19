@@ -1168,6 +1168,29 @@ type UpstreamRoutingConfig struct {
 	Probe ProbeMode `yaml:"probe,omitempty" json:"probe,omitempty" tstype:"ProbeMode | \"on\" | \"off\""`
 }
 
+// Copy deep-copies the routing hints, including every score-multiplier entry.
+// ApplyDefaults already clones this struct and its entry list, which shows the
+// code treats a shared Routing block as a hazard; it stops at the entries by
+// declaring them immutable. Copying them too costs one small allocation per
+// entry at bootstrap and removes the assumption.
+func (c *UpstreamRoutingConfig) Copy() *UpstreamRoutingConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &UpstreamRoutingConfig{}
+	*copied = *c
+
+	if c.ScoreMultipliers != nil {
+		copied.ScoreMultipliers = make([]*ScoreMultiplierConfig, len(c.ScoreMultipliers))
+		for i, sm := range c.ScoreMultipliers {
+			copied.ScoreMultipliers[i] = sm.Copy()
+		}
+	}
+
+	return copied
+}
+
 // ProbeMode is the per-upstream `routing.probe` enum.
 type ProbeMode string
 
@@ -1204,6 +1227,26 @@ type ScoreMultiplierConfig struct {
 	// influences scoring (the score is computed from rolling-window rates,
 	// not absolute request counts).
 	TotalRequests *float64 `yaml:"totalRequests,omitempty" json:"totalRequests,omitempty"`
+}
+
+// Copy deep-copies one score-multiplier entry. The weights stay shared
+// pointers: every writer in this codebase replaces such a pointer instead of
+// writing through it, which is how the rest of the Copy family treats *bool
+// and *float64 fields.
+func (c *ScoreMultiplierConfig) Copy() *ScoreMultiplierConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &ScoreMultiplierConfig{}
+	*copied = *c
+
+	if c.Finality != nil {
+		copied.Finality = make([]DataFinalityState, len(c.Finality))
+		copy(copied.Finality, c.Finality)
+	}
+
+	return copied
 }
 
 // UnmarshalYAML accepts the current canonical schema, plus three legacy
@@ -1362,6 +1405,31 @@ func (c *UpstreamConfig) Copy() *UpstreamConfig {
 	if c.RateLimitAutoTune != nil {
 		copied.RateLimitAutoTune = c.RateLimitAutoTune.Copy()
 	}
+	if c.Svm != nil {
+		copied.Svm = c.Svm.Copy()
+	}
+	if c.Shadow != nil {
+		copied.Shadow = c.Shadow.Copy()
+	}
+	if c.Routing != nil {
+		copied.Routing = c.Routing.Copy()
+	}
+
+	// Tags is a slice, so `append` on a copy that still has spare capacity
+	// writes into the ORIGINAL's backing array. The selection policy reads
+	// tags on the request path.
+	if c.Tags != nil {
+		copied.Tags = make([]string, len(c.Tags))
+		copy(copied.Tags, c.Tags)
+	}
+
+	// CreditUnits is a map. Two bootstrap attempts writing one shared map is a
+	// Go fatal "concurrent map writes" — the runtime kills the process and no
+	// recover catches it.
+	if c.CreditUnits != nil {
+		copied.CreditUnits = make(map[string]int64, len(c.CreditUnits))
+		maps.Copy(copied.CreditUnits, c.CreditUnits)
+	}
 
 	if c.IgnoreMethods != nil {
 		copied.IgnoreMethods = make([]string, len(c.IgnoreMethods))
@@ -1380,6 +1448,38 @@ type ShadowUpstreamConfig struct {
 	Enabled      bool                `yaml:"enabled" json:"enabled"`
 	SampleRate   *float64            `yaml:"sampleRate,omitempty" json:"sampleRate,omitempty"`
 	IgnoreFields map[string][]string `yaml:"ignoreFields,omitempty" json:"ignoreFields"`
+}
+
+// Copy deep-copies the shadow settings. IgnoreFields is a map of slices, so a
+// struct-level copy alone still leaves both configs writing into one map and
+// into one set of backing arrays. erpc/shadow.go reads IgnoreFields per
+// comparison, concurrently with upstream bootstrap.
+func (c *ShadowUpstreamConfig) Copy() *ShadowUpstreamConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &ShadowUpstreamConfig{}
+	*copied = *c
+
+	if c.SampleRate != nil {
+		v := *c.SampleRate
+		copied.SampleRate = &v
+	}
+	if c.IgnoreFields != nil {
+		copied.IgnoreFields = make(map[string][]string, len(c.IgnoreFields))
+		for method, fields := range c.IgnoreFields {
+			if fields == nil {
+				copied.IgnoreFields[method] = nil
+				continue
+			}
+			cp := make([]string, len(fields))
+			copy(cp, fields)
+			copied.IgnoreFields[method] = cp
+		}
+	}
+
+	return copied
 }
 
 // Deprecated: UpstreamIntegrityConfig is a non-functional legacy stub (never
@@ -1803,6 +1903,20 @@ func (c *RetryPolicyConfig) Copy() *RetryPolicyConfig {
 	}
 	copied := &RetryPolicyConfig{}
 	*copied = *c
+
+	// Both method lists escape the config. ResolveEmptyResultAccept hands
+	// EmptyResultAccept straight to the request path, and SetDefaults assigns
+	// EmptyResultIgnore to EmptyResultAccept, so without these copies one
+	// backing array reaches two fields of every copy of every config.
+	if c.EmptyResultAccept != nil {
+		copied.EmptyResultAccept = make([]string, len(c.EmptyResultAccept))
+		copy(copied.EmptyResultAccept, c.EmptyResultAccept)
+	}
+	if c.EmptyResultIgnore != nil {
+		copied.EmptyResultIgnore = make([]string, len(c.EmptyResultIgnore))
+		copy(copied.EmptyResultIgnore, c.EmptyResultIgnore)
+	}
+
 	return copied
 }
 
@@ -2698,6 +2812,21 @@ type SvmUpstreamConfig struct {
 	// no table comparison) runs only when this flag is set; otherwise it is skipped so
 	// private/local clusters with no published genesis hash still work.
 	CheckGenesisHash bool `yaml:"checkGenesisHash,omitempty" json:"checkGenesisHash"`
+}
+
+// Copy deep-copies the SVM settings. Every field is a scalar today, so the
+// struct assignment is the whole copy — but ApplyDefaults writes Chain,
+// Cluster and CheckGenesisHash in place, so a shared pointer here is one
+// call-order change away from one upstream editing another's identity.
+func (c *SvmUpstreamConfig) Copy() *SvmUpstreamConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &SvmUpstreamConfig{}
+	*copied = *c
+
+	return copied
 }
 
 type EvmNetworkConfig struct {
