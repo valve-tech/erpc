@@ -331,6 +331,15 @@ high.** Silent wrong answer. Pinned by
 `common/json_rpc.go:1075-1105` builds a path tree from the ignore list. When one
 path is a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]`
 — the builder finds `pathTree["logs"]` already set to `true`, fails the map type
+
+**Status:** fixed-in-fork, commit `3181667` (2026-08-15). **Severity: high.**
+Silent wrong answer. The entry below describes the mechanism exactly — a
+mutation test on 2026-08-19 restored the old builder and reproduced both
+symptoms.
+
+`common/json_rpc.go` builds a path tree from the ignore list. When one path is
+a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]` — the
+builder finds `pathTree["logs"]` already set to `true`, fails the map type
 assertion, and keeps writing the remaining segments onto the **root**.
 
 The root then carries a `"*"` entry, and `removeFieldsRecursive` applies it to
@@ -342,8 +351,28 @@ a different answer.
 
 The shipped defaults do not hit it. Any operator-written list can.
 
+<<<<<<< HEAD
 The consensus-level statement of the same rule is pinned by
 `TestCanonicalHashWithIgnoredFields_APathAndItsPrefixHashTheSameEitherWay`.
+=======
+**The fix.** The builder now treats the broader path as the winner. A leaf
+write ends the path, and a path whose ancestor is already removed whole stops
+where the ancestor sits instead of walking on. Removing `logs` already removes
+everything under it, so `logs.*.blockTimestamp` adds nothing, in either order.
+
+**The tests.** `TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension`
+runs both orders and checks that a sibling no path names survives.
+`TestCanonicalHashWithIgnoredFields_APathAndItsPrefixHashTheSameEitherWay` says
+the same thing at the consensus level: one answer whatever the order, and a
+field outside the list still separates two bodies. The old pinning test,
+`TestRemoveFieldsByPaths_APrefixPathPoisonsTheRootTree`, is gone — the same
+commit replaced it.
+
+**Mutation result (2026-08-19).** With the old builder restored, both tests
+fail: the subsumption test loses `receipt.blockTimestamp`, which no ignore path
+names, and the consensus test gets two different hashes from the same two paths
+in opposite orders. With the fix restored, both pass.
+>>>>>>> worktree-agent-a40ba5dcb41c740c9
 
 ---
 
@@ -3167,7 +3196,7 @@ into a fatal event instead of a value the caller can act on.
 
 ## 105. A negative or fractional JSON block number becomes a real block number
 
-**Status:** open. Found while covering `util/`.
+**Status:** fixed-in-fork (2026-08-19). Found while covering `util/`.
 
 `util/json_rpc.go:99` converts a JSON number to a block number with a bare
 cast:
@@ -3210,6 +3239,41 @@ observed data as valid input, so they belong in the error return that the
             return "", nil, fmt.Errorf("invalid block number: %v", v)
         }
         blockNumber = fmt.Sprintf("0x%x", uint64(v))
+
+**The fix.** `checkBlockNumberFloat` in `util/json_rpc.go` now names the five
+ways a number fails — NaN, infinite, negative, at or above 2^64, and not whole
+— and `ParseBlockParameter` returns that error instead of casting. The `int64`
+branch rejects a negative value the same way; it had the identical bare cast,
+which turned `-1` into the largest possible block rather than genesis. The
+`uint64` branch needs no check.
+
+The bound is `v >= 2^64`, not `v > math.MaxUint64` as the sketch above says.
+`math.MaxUint64` rounds UP to 2^64 in float64, so the sketch lets 2^64 itself
+through and the cast still overflows. `2^64` is exact in float64, so the
+comparison against it is the precise one.
+
+**The callers.** Every caller already handles an error from this function,
+because the `default` branch has always returned one for an unsupported type.
+`architecture/evm/block_ref.go` propagates it through `parseCompositeBlockParam`
+into `ExtractBlockReferenceFromRequest`; `architecture/evm/json_rpc.go` and
+`architecture/evm/safe_block_routing.go` fall through to their no-reference
+path; `clients/grpc_bds_client.go` wraps it at both call sites. No caller
+needed a change.
+
+**The tests.** `TestParseBlockParameter_RejectsANumberThatNamesNoBlock`
+(`util/json_rpc_test.go`) covers -1, -1e18, NaN, both infinities, 1e30, exactly
+2^64, 1.5 and a negative `int64`.
+`TestParseBlockParameter_AcceptsEveryNumberAUint64Represents` keeps the
+rejection from swallowing 0, 1, 21000000, 2^63 and `MaxUint64`.
+
+**Mutation result (2026-08-19).** With the two checks removed, all nine
+rejection cases fail. With the checks restored, the whole `util` package
+passes.
+
+**One limit remains, and it is not eRPC's to fix.** A JSON number above 2^53
+loses precision in the parser before `ParseBlockParameter` ever sees it, so the
+accepted range from 2^53 to 2^64 is nominal. A client that needs a block number
+that large must send it as a hex string. See entry 138.
 
 ## 106. `ParseBlockHashHexToBytes` guards against its own guarantee
 
@@ -3753,21 +3817,35 @@ round-trip stateProven".
 
 ## 118. Two different requests can share one cache key
 
+<<<<<<< HEAD
 **Status:** open. **Confirmed independently by direct probe**, not by reading
 the code, and re-confirmed in this audit: an out-of-tree recomputation of the
 double SHA-256 that `CacheHash` performs reproduces the recorded digest for
 both parameter lists. Both requests below produce a byte-identical key:
+=======
+**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client can
+receive another request's data. **Confirmed independently by direct probe**,
+not by reading the code. Both requests below produced a byte-identical key:
+>>>>>>> worktree-agent-a40ba5dcb41c740c9
 
     A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
     B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
 
 The worked case below uses `eth_getStorageAt`, where the colliding twin is
-nonsense a node rejects. `eth_getLogs` is the case to worry about: its topics
-are ARRAYS of hex strings, so `["0xa","0xb"]` and `["0xab"]` are both requests
-a node answers, and both are cacheable. Whichever lands first serves the
-other.
+nonsense a node rejects. The entry first named `eth_getLogs` topics
+`["0xa","0xb"]` against `["0xab"]` as the reachable case. Those two do NOT
+collide: the old hasher wrote `0xa` then `0xb`, which spells `0xa0xb`, not
+`0xab`. The reachable `eth_getLogs` case is topic NESTING, and it is worse,
+because both sides are well-formed filters a node answers:
 
-`JsonRpcRequest.CacheHash` (`common/json_rpc.go:1405`) hashes the parameters by
+    topics: [[A, B], C]   — topic0 is A or B, and topic1 is C
+    topics: [A, [B, C]]   — topic0 is A,      and topic1 is B or C
+
+Both wrote A, B, C in that order and nothing else, so they shared one key.
+The two filters ask different questions of the chain, and whichever landed
+first served the other its logs.
+
+`JsonRpcRequest.CacheHash` (`common/json_rpc.go`) hashes the parameters by
 feeding each one to `hashValue` in turn:
 
 ```go
@@ -3793,13 +3871,56 @@ node sees it — and a write under the second key serves the first. The same
 collision class exists between an array and a flattened string, and between an
 object's keys and its values.
 
-The fix is a delimiter that cannot occur in a value (a length prefix, or a byte
-outside the hex/JSON alphabet) between every written piece. It changes every
-cache key, so it wants its own change and a cache-generation bump.
+**It is not only the cache.** `Network.multiplexKey` (`erpc/networks.go`) hands
+`CacheHash` straight back for every EVM network, and multiplexing defaults to
+ON. Two colliding in-flight requests therefore shared one multiplexer, and the
+follower received the leader's response verbatim. That path needs no cache
+configured at all, so every EVM deployment carried the wrong-answer risk.
 
-Pinned by `TestCacheHash_ConcatenatesAdjacentParamsWithoutASeparator`, whose
-assertion is the defect: when the separator lands, that test fails and should
-be rewritten as a `NotEqual`.
+**The fix.** `hashValue` now writes a self-delimiting encoding. A scalar writes
+a type tag, its payload length in decimal, a `:` and the payload. A container
+writes a type tag, its member count and a `:` before its members. An object
+frames its keys the same way, so the boundary between a key and its value
+cannot move either.
+
+The choice of a length prefix over a separator byte is the whole point.
+Parameters carry arbitrary strings, so any byte picked as a separator is a byte
+a string may itself contain — that moves the collision rather than removing it.
+A length prefix has no such hole, whatever bytes the payload holds. The `:`
+after the digits is unambiguous for the same reason a netstring is: a digit is
+never a `:`, so a reader always knows where the count ends. The encoding is
+decodable, and a decodable encoding cannot map two values onto one byte string.
+
+**The tests.** `TestCacheHash_SeparatesParamListsThatConcatenateToTheSameBytes`
+(`common/json_rpc_hashing_test.go`) holds six pairs that collided before:
+adjacent params, the `eth_getLogs` topic nesting above, an array against the
+string its members spell, an object key against its value, two arrays against
+one, and a number against its own digits.
+`TestHashValue_EncodesEveryStructureDistinctly` states the rule the six pairs
+sample — it encodes 26 values, including `nil` against the string `"null"` and
+a string that spells a whole frame, and fails if any two produce the same
+bytes. The old pinning test is gone; this pair replaces it.
+
+**Mutation result (2026-08-19).** With the frame header stubbed out to write
+nothing, all six pairs and the distinctness test fail. With the framing
+restored, both tests pass and so do `common`, `util` and `architecture`.
+
+**Cache invalidation — state this to operators before the upgrade.** The
+framing changes every cache key eRPC computes. There is no version marker in
+the key format to bump: the key is `{method}:{sha256(params)}`, and the method
+prefix is the only structure it carries. I did not add one, because a version
+tag would not change what happens — a format change already produces keys
+disjoint from the old ones, and the hash itself is the generation break. So on
+upgrade **every existing entry in every cache connector becomes unreachable at
+once.** Expect a full miss storm: the first request for each key goes upstream,
+and upstream load returns to cold-start levels until the cache refills. Old
+entries are never read again and expire on their own TTL, so a shared store
+holds two generations for one TTL. Plan capacity for both. A wrong answer is
+worse than a cold cache, but an operator must not meet the miss storm by
+surprise.
+
+The same collision class exists in the CONSENSUS response hash, and that one is
+NOT fixed. See entry 135.
 
 ## 120. The query shim advertises an uppercase hex prefix it always rejects
 
@@ -3862,6 +3983,7 @@ the two. Report the failure — the engine already has a logger on the eval path
 — or fall back to the same 30 seconds absence gets. Silent zero is the one
 answer that cannot be right.
 
+<<<<<<< HEAD
 ## 125. An unreadable `LOG_LEVEL` silences the process instead of defaulting to debug
 
 **Status:** open. Pinned by
@@ -4100,3 +4222,109 @@ earlier than the site entry 67 names, and for every policy rather than only an
 The caller guard at `erpc/networks.go:2395` keeps it latent, which is the same
 reason entry 67 stays latent. The trigger is raising the log level to trace —
 what an operator does to debug the cache. Found while auditing 67.
+=======
+---
+
+## 135. An upstream can forge structure in the consensus response hash
+
+**Status:** open. **Severity: high.** Silent wrong answer, and an upstream
+controls the input. **Confirmed by direct probe**, not by reading the code.
+
+This is bug 118's defect class, in the other hash. `canonicalizeTo`
+(`common/json_rpc.go`) writes the canonical form of a response, and consensus
+compares upstreams by the SHA-256 of that byte stream. It writes the JSON
+punctuation — `{`, `}`, `[`, `]`, `,`, `:` — around its members, so the
+structure looks delimited. It does not: a string value is written RAW, with no
+quotes and no escaping. A string that contains the punctuation therefore forges
+structure that was never in the response.
+
+Two probes, both collided on 2026-08-19:
+
+    A = {"a":"1,\"b\":2"}     B = {"a":"1","b":"2"}
+    C = {"a":["x","y"]}       D = {"a":["x,y"]}
+
+A and B canonicalize to the same bytes, and so do C and D. Consensus reports
+agreement between them.
+
+The values in a response come from the upstream, so this is reachable by a
+misbehaving or hostile node rather than by a client. An upstream that wants to
+pass consensus while returning different data can pad one string field to make
+its canonical form match the honest answer. Consensus exists to catch exactly
+that upstream.
+
+The cache hasher (bug 118) now frames every piece it writes. This hasher wants
+the same treatment: either quote and escape strings the way JSON does, or frame
+them by length. Marshalling through `encoding/json` — the choice
+`architecture/svm/json_rpc_cache.go` already made for the SVM cache key, and
+for this reason — would also do it.
+
+NOT fixed. It sits outside the three bugs this change was scoped to, and it
+deserves its own change with its own test.
+
+---
+
+## 136. `ParseBlockParameter` lets `blockTag` overwrite `blockNumber` in silence
+
+**Status:** open. **Severity: low.** Found while fixing entry 105.
+
+The object form of the block parameter reads three members in order:
+`blockHash` returns immediately, then `blockNumber` is assigned, then
+`blockTag` is assigned over the top of it. An object naming both gets the tag,
+and nothing says so:
+
+    {"blockNumber": "0x10", "blockTag": "latest"}  ->  "latest", no error
+
+`0x10` and `latest` are different blocks. The request is contradictory, so
+either member is a guess; refusing it is the answer that guesses nothing.
+
+The same branch reads `blockNumber` only when it is a string. A numeric
+`blockNumber` inside the object is dropped, and the caller then gets the wrong
+error:
+
+    {"blockNumber": 16}  ->  "block parameter object must contain
+                              blockHash, blockNumber, or blockTag"
+
+The object DOES contain `blockNumber`. The message sends an operator looking
+for a missing member instead of a rejected type. Feeding a numeric member back
+through the same range check entry 105 added would handle it exactly.
+
+---
+
+## 137. The EVM cache key prefixes the method without hashing it
+
+**Status:** open, and NOT a live defect. Checked while fixing entry 118, and
+recorded so the argument does not have to be rebuilt.
+
+`CacheHash` returns `{method}:{sha256(params)}`. The method sits in the key as
+a plain prefix and never enters the hash, so in principle a method name
+containing `:` could spell another method's key. It cannot today: the hash is
+always 64 hex characters, and hex holds no `:`, so `"a:b" + ":" + h'` can never
+equal `"a" + ":" + h`. The prefix boundary is decidable from the right.
+
+The guarantee rests on the hash staying fixed-width and hex. The SVM key
+(`architecture/svm/json_rpc_cache.go`) does not rely on that — it writes the
+method into the hash as well as the prefix, and says why in a comment. If the
+EVM key format ever changes width or alphabet, this entry becomes a real
+defect. Hashing the method costs one write.
+
+---
+
+## 138. A JSON block number above 2^53 is already wrong when eRPC receives it
+
+**Status:** open, and not eRPC's to fix alone. **Severity: low today.**
+Recorded while fixing entry 105.
+
+Entry 105 now rejects every JSON number a `uint64` cannot hold. The accepted
+range still overstates what eRPC can honour. A JSON number arrives as a
+`float64`, which represents every integer exactly only up to 2^53. Between 2^53
+and 2^64 the parser rounds before `ParseBlockParameter` sees the value, so
+block 9007199254740993 arrives as 9007199254740992 and the range check passes
+it as a whole number.
+
+No chain is near 2^53 blocks, so nothing observed forces a narrower bound, and
+narrowing it on speculation would reject values that are exact and legitimate.
+The honest statement is the one to keep: a client that needs a block number
+above 2^53 must send it as a hex string, which JSON-RPC has always allowed and
+which loses nothing. The same limit applies to any JSON number eRPC reads,
+not just this one.
+>>>>>>> worktree-agent-a40ba5dcb41c740c9

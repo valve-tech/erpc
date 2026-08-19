@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1485,24 +1486,82 @@ func (r *JsonRpcRequest) PeekByPath(path ...interface{}) (interface{}, error) {
 	return current, nil
 }
 
+// Frame tags for the cache-key encoding. Each one names the kind of value that
+// follows, so a container can never be read as the leaf its members spell.
+const (
+	hashTagBool   = 'b'
+	hashTagInt    = 'i'
+	hashTagFloat  = 'f'
+	hashTagString = 's'
+	hashTagNull   = 'z'
+	hashTagArray  = 'a'
+	hashTagObject = 'o'
+)
+
+// writeHashFrame writes one frame header: a type tag, a decimal count and a
+// ':'. For a leaf the count is the payload length in bytes; for a container it
+// is the number of members that follow.
+//
+// The ':' terminates the digits, and a digit is never a ':', so a reader always
+// knows where the count ends. That is what makes the whole stream decodable,
+// and a decodable stream cannot be ambiguous.
+func writeHashFrame(h io.Writer, tag byte, count int) error {
+	// Built by hand rather than with fmt: CacheHash runs on every request, and
+	// a header is three cheap appends into a stack buffer.
+	var buf [24]byte
+	b := append(buf[:0], tag)
+	b = strconv.AppendInt(b, int64(count), 10)
+	b = append(b, ':')
+	_, err := h.Write(b)
+	return err
+}
+
+// writeHashLeaf writes a framed scalar.
+func writeHashLeaf(h io.Writer, tag byte, payload string) error {
+	if err := writeHashFrame(h, tag, len(payload)); err != nil {
+		return err
+	}
+	if payload == "" {
+		return nil
+	}
+	_, err := io.WriteString(h, payload)
+	return err
+}
+
+// hashValue writes a self-delimiting encoding of v into h. The cache key is the
+// hash of that byte stream, so two values that write the same bytes become one
+// cache entry, and whichever request lands first serves the other its data.
+//
+// The encoding frames every piece: a leaf writes its type tag, its byte length
+// and its payload; a container writes its type tag and its member count before
+// its members. A reader can walk the result without ever guessing where one
+// piece stops, so distinct values cannot produce the same bytes.
+//
+// A separator byte would not do the job. Params carry arbitrary strings, so any
+// byte chosen as the separator is a byte a string may itself contain — that
+// moves the collision instead of removing it. A length prefix has no such hole,
+// whatever bytes the payload holds.
+//
+// Changing this encoding changes every cache key eRPC computes. See bug 118.
 func hashValue(h io.Writer, v interface{}) error {
 	switch t := v.(type) {
 	case bool:
-		_, err := io.WriteString(h, fmt.Sprintf("%t", t))
-		return err
+		return writeHashLeaf(h, hashTagBool, strconv.FormatBool(t))
 	case int:
-		_, err := io.WriteString(h, fmt.Sprintf("%d", t))
-		return err
+		return writeHashLeaf(h, hashTagInt, strconv.Itoa(t))
 	case float64:
-		_, err := io.WriteString(h, fmt.Sprintf("%f", t))
-		return err
+		return writeHashLeaf(h, hashTagFloat, fmt.Sprintf("%f", t))
 	case string:
-		_, err := io.WriteString(h, strings.ToLower(t))
-		return err
+		// Lowercasing is deliberate: clients disagree on hex case, and eRPC
+		// must not split one entry in two. See CacheHash's callers for the SVM
+		// networks that must NOT use this hasher for that reason.
+		return writeHashLeaf(h, hashTagString, strings.ToLower(t))
 	case []interface{}:
+		if err := writeHashFrame(h, hashTagArray, len(t)); err != nil {
+			return err
+		}
 		for _, i := range t {
-			err := hashValue(h, i)
-			if err != nil {
+			if err := hashValue(h, i); err != nil {
 				return err
 			}
 		}
@@ -1512,20 +1571,25 @@ func hashValue(h io.Writer, v interface{}) error {
 		for k := range t {
 			keys = append(keys, k)
 		}
+		// Sorting makes the key independent of Go's map iteration order.
 		sort.Strings(keys)
+		if err := writeHashFrame(h, hashTagObject, len(t)); err != nil {
+			return err
+		}
 		for _, k := range keys {
-			if _, err := h.Write([]byte(k)); err != nil {
+			// The key is framed as a leaf too, so the boundary between a key
+			// and its value cannot move. Keys keep their case: a JSON member
+			// name is not a hex value.
+			if err := writeHashLeaf(h, hashTagString, k); err != nil {
 				return err
 			}
-			err := hashValue(h, t[k])
-			if err != nil {
+			if err := hashValue(h, t[k]); err != nil {
 				return err
 			}
 		}
 		return nil
 	case nil:
-		_, err := h.Write([]byte("null"))
-		return err
+		return writeHashLeaf(h, hashTagNull, "")
 	default:
 		return fmt.Errorf("unsupported type for value during hash: %+v", v)
 	}
