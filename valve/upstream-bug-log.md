@@ -332,7 +332,7 @@ high.** Silent wrong answer. Pinned by
 path is a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]`
 — the builder finds `pathTree["logs"]` already set to `true`, fails the map type
 
-**Status:** fixed-in-fork, commit `3181667` (2026-08-15). **Severity: high.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: high.**
 Silent wrong answer. The entry below describes the mechanism exactly — a
 mutation test on 2026-08-19 restored the old builder and reproduced both
 symptoms.
@@ -3203,7 +3203,7 @@ into a fatal event instead of a value the caller can act on.
 
 ## 105. A negative or fractional JSON block number becomes a real block number
 
-**Status:** fixed-in-fork (2026-08-19). Found while covering `util/`.
+**Status: FIXED in the fork.** Upstream still carries it. Found while covering `util/`.
 
 `util/json_rpc.go:99` converts a JSON number to a block number with a bare
 cast:
@@ -3824,16 +3824,10 @@ round-trip stateProven".
 
 ## 118. Two different requests can share one cache key
 
-<<<<<<< HEAD
-**Status:** open. **Confirmed independently by direct probe**, not by reading
-the code, and re-confirmed in this audit: an out-of-tree recomputation of the
-double SHA-256 that `CacheHash` performs reproduces the recorded digest for
-both parameter lists. Both requests below produce a byte-identical key:
-=======
-**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client can
-receive another request's data. **Confirmed independently by direct probe**,
-not by reading the code. Both requests below produced a byte-identical key:
->>>>>>> worktree-agent-a40ba5dcb41c740c9
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.**
+A client can receive another request's data. Confirmed independently by direct
+probe, not by reading the code, and re-confirmed in the status audit. Before the
+fix both requests below produced a byte-identical key:
 
     A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
     B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
@@ -3990,8 +3984,6 @@ the two. Report the failure — the engine already has a logger on the eval path
 — or fall back to the same 30 seconds absence gets. Silent zero is the one
 answer that cannot be right.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 ## 125. An unreadable `LOG_LEVEL` silences the process instead of defaulting to debug
 
 **Status:** open. Pinned by
@@ -4230,7 +4222,6 @@ earlier than the site entry 67 names, and for every policy rather than only an
 The caller guard at `erpc/networks.go:2395` keeps it latent, which is the same
 reason entry 67 stays latent. The trigger is raising the log level to trace —
 what an operator does to debug the cache. Found while auditing 67.
-=======
 ---
 
 ## 135. An upstream can forge structure in the consensus response hash
@@ -4335,11 +4326,9 @@ The honest statement is the one to keep: a client that needs a block number
 above 2^53 must send it as a hex string, which JSON-RPC has always allowed and
 which loses nothing. The same limit applies to any JSON number eRPC reads,
 not just this one.
->>>>>>> worktree-agent-a40ba5dcb41c740c9
-=======
 ## 140. The stress harness builds a server config eRPC refuses, and the refusal kills the test binary
 
-**Status:** fixed here. **Severity: high for the test suite.** It hid the whole
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: high for the test suite.** It hid the whole
 `test/` package.
 
 `test/fake_erpc.go` — `prepareERPCConfig` built a `common.ServerConfig` with
@@ -4376,7 +4365,7 @@ two are 99 and 98.
 
 ## 141. The stress harness raced on `err` and threw away eRPC's start result
 
-**Status:** fixed here. **Severity: medium.** A dead eRPC looked exactly like a
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.** A dead eRPC looked exactly like a
 live one.
 
 `test/fake_erpc.go` — `executeStressTest` started eRPC like this:
@@ -4404,7 +4393,7 @@ pass. A boot failure is reported in about 0.1 s and names the cause.
 
 ## 142. The WebSocket mock upstreams write to one connection from two goroutines
 
-**Status:** fixed here. **Severity: medium for the test suite.** Three
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium for the test suite.** Three
 reproducible data races, and the WS tests could not be trusted under `-race`.
 
 `erpc/ws_server_test.go` — `mockWsUpstream` handed each handler the raw
@@ -4547,4 +4536,3 @@ removes the race and makes the timeout verdict stand:
 
 That changes what eRPC does when an eval overruns, so it needs a test that
 pins the new behaviour before it lands.
->>>>>>> worktree-agent-a694d8f4044ea228a
