@@ -3099,7 +3099,7 @@ its own pin.
 
 ## 98. The documented exit codes are not the codes the shell sees
 
-**Status:** FIXED. `util/exit.go` now uses 11 and 12, and every exit-code
+**Status: FIXED. `util/exit.go` now uses 11 and 12, and every exit-code
 reference in `docs/` moved with them. Pinned by
 `cmd/erpc/cli_test.go:TestExitCodes_FitInOneByte`, which fails for any code
 that does not survive `& 0xFF`, collides with the config-error code 1, or
