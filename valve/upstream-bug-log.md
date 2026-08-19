@@ -770,7 +770,7 @@ Fix: call `SetReadDeadline(now + pingInterval*2)` once before the read loop.
 
 ## 32. The gRPC surface silently ignores three declared wire fields
 
-**Status:** fixed-in-fork. **Severity: high for the first.** Silent wrong
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: high for the first.** Silent wrong
 answers.
 
 - **`GetLogs` ignored `blockHash`** (`erpc/grpc_server.go`).
@@ -3213,7 +3213,7 @@ is a wrong one.
 which occupies the port and asserts the process exit.
 **Severity: medium for an embedder, high for a test run.**
 
-**Status:** fixed-in-fork. **Severity: medium for an embedder, high for a test
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium for an embedder, high for a test
 run.**
 
 `erpc/init.go` called `util.OsExit(...)` at three sites from inside the `erpc`
@@ -3924,7 +3924,7 @@ A client can receive another request's data. Confirmed independently by direct
 probe, not by reading the code, and re-confirmed in the status audit. Before the
 fix both requests below produced a byte-identical key:
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client can
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.** A client can
 receive another request's data. **Confirmed independently by direct probe**,
 not by reading the code. Both requests below produced a byte-identical key:
 
@@ -4327,7 +4327,7 @@ what an operator does to debug the cache. Found while auditing 67.
 
 ## 135. An upstream can forge structure in the consensus response hash
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A hostile
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.** A hostile
 upstream defeats the check consensus exists to make. **Confirmed by direct
 probe**, not by reading the code.
 
@@ -4755,7 +4755,7 @@ pins the new behaviour before it lands.
 
 ## 145. `canonicalizeTo` wrote bytes it then reported as unwritten
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: low.** It changed one hash,
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low.** It changed one hash,
 at one depth. Found while fixing entry 135.
 
 The array branch wrote `[` before it knew whether any element would survive the
@@ -4778,7 +4778,7 @@ already asserted the flag and still does.
 
 ## 146. The bug log carried three unresolved merge-conflict markers
 
-**Status:** fixed here (2026-08-19). This file is the fork's own, so there is
+**Status: FIXED in the fork.** Upstream still carries it. This file is the fork's own, so there is
 nothing to send upstream. **Severity: low**, and confined to this file. Found
 while opening entry 135.
 
@@ -4800,7 +4800,7 @@ confidence. They are worth naming because the same accident in a `.go` or
 
 ## 147. A dead branch in `removeLeadingZeroes` produced an unbalanced string
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: low.** Unreachable. Found
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low.** Unreachable. Found
 while fixing entry 135.
 
 `removeLeadingZeroes` had a second branch for a quantity that arrives already
@@ -4822,7 +4822,7 @@ and `TestHexQuantityDigits` pins it with the quoted case asserting `false`.
 
 ## 165. `GetBlockReceipts` picks one of two mutually exclusive fields, and a test pinned it
 
-**Status:** fixed-in-fork. Found while fixing 32. **Severity: medium.** A
+**Status: FIXED in the fork.** Upstream still carries it. Found while fixing 32. **Severity: medium.** A
 silent wrong block, same shape as the `blockHash` half of 32.
 
 `evm.GetBlockReceiptsRequest` declares `blockNumber` and `blockHash`, and the
@@ -4877,7 +4877,7 @@ A client cannot tell "chain 0" from "not set" through the generated
 
 ## 167. The stress harness writes one `err` from two goroutines and reads neither
 
-**Status:** fixed-in-fork. Found while fixing 99. **Severity: medium.** A data
+**Status: FIXED in the fork.** Upstream still carries it. Found while fixing 99. **Severity: medium.** A data
 race, plus a swallowed reason.
 
 `test/fake_erpc.go`, in `executeStressTest`:
