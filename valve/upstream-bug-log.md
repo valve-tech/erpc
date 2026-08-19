@@ -1112,6 +1112,9 @@ An account with many endpoints holds one connection per 100-endpoint page for
 the length of the walk.
 ## 46. The policy eval timeout races its own result, then throws it away
 
+**Corroborated independently — see 144**, which adds the proof that the discard
+is guaranteed rather than likely.
+
 **Status:** open. **Severity: high.** Verified under `-race`. An operator
 loses the "my policy is too slow" signal completely, and the existing
 `internal/policy/stdlib` suite flakes because of it.
@@ -4456,7 +4459,16 @@ quiet but write through `t.Log`, so Go prints the buffered output for failing
 tests only. Short of that, name the switch in the harness — the `test/` package
 now does, in the message it prints when eRPC exits during boot.
 
-## 144. The policy eval timeout races on `evalErr`, and then always loses
+## 144. The policy eval timeout races on `evalErr`, and then always loses (DUPLICATE of 46)
+
+**This is entry 46, found again independently.** A different agent reached it
+from the WebSocket race sweep rather than from the policy suite, and neither
+knew of the other. Two routes to one defect is evidence, so the entry stays.
+It also carries the mechanism 46 does not state: the timeout error is not
+merely raced, it is GUARANTEED to be discarded. The goroutine assigns
+`evalErr` before its deferred `close(done)` runs, so the `<-done` that follows
+the timeout write always waits for an assignment that overwrites it.
+`ErrEvalTimeout` is written at one line and read at none.
 
 **Status:** open, production code, NOT fixed here — a concurrency change to
 the selection path needs its own pin and its own tests. **Severity: medium.**
