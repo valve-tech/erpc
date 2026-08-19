@@ -2940,3 +2940,65 @@ pointer out, rather than retro-fitting a field afterwards.
 
 Neither is done here, because both are wider than a race fix and each needs
 its own pin.
+
+---
+
+## 98. The documented exit codes are not the codes the shell sees
+
+**Status:** open. **Severity: medium.** Every documented exit code is wrong.
+
+`util/exit.go`:
+
+    ExitCodeERPCStartFailed  = 1001
+    ExitCodeHttpServerFailed = 1002
+
+A Unix exit status is eight bits. The kernel reports `code & 0xFF`, so:
+
+- 1001 becomes **233**
+- 1002 becomes **234**
+
+`docs/pages/config/example.mdx:1127` documents `1001` by name, and four more
+lines in that file tell the operator to expect `exit 1001` for a missing
+config file, a validation error, or an invalid `--endpoint` URL. No shell,
+systemd unit, Kubernetes probe or CI gate ever sees 1001.
+
+Both values are confirmed by running eRPC, not by reading the code:
+
+    $ printf 'projects:\n-\n' > boom.yaml && erpc boom.yaml ; echo $?
+    233
+    $ go test ./test/          # the HTTP server fails to bind
+    exit status 234
+
+The two codes do not collide today, which is why this has gone unnoticed:
+233 and 234 are still distinct. That is luck. Any future code whose low byte
+matches an existing one collides silently, and codes 1-255 are already
+reachable from the same table.
+
+Fix: use values that fit in a byte. Exit codes are a one-byte channel, so a
+number that does not fit is not a smaller commitment than one that does — it
+is a wrong one.
+
+## 99. A library package terminates the operator's process
+
+**Status:** open. **Severity: medium for an embedder, high for a test run.**
+
+`erpc/init.go:142`, `:155` and `:178` call `util.OsExit(...)` from inside the
+`erpc` package. That package is a library: `cmd/erpc` is the binary, and
+`erpc.Init` is what an embedder calls.
+
+So a Go program that embeds eRPC and fails to bind its HTTP port does not get
+an error it can handle. Its whole process ends, inside a goroutine the caller
+never started.
+
+This is not theoretical. `go test ./test/` dies with exit 234 and prints NO
+assertion, no panic and no reason — the HTTP server cannot bind, the goroutine
+calls `OsExit`, and the test binary is gone before it can report anything. The
+package is excluded from `make test-fast`, so nobody sees it.
+
+The `OsExit` indirection (`var OsExit = os.Exit`) exists so a test can replace
+it, which shows the problem was already understood. The weakening is to return
+the error to the caller and let `cmd/erpc` decide to exit — the one place that
+owns the process.
+
+Related: 43 and 63 are the same shape. A library turns an operator's mistake
+into a fatal event instead of a value the caller can act on.
