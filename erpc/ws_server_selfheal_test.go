@@ -29,7 +29,9 @@ type selfHealMockUpstream struct {
 }
 
 type selfHealConn struct {
-	conn    *websocket.Conn
+	// conn carries mockWsConn's own write lock; writeMu below is still needed
+	// because writeJSON sets a deadline and writes as one unit.
+	conn    *mockWsConn
 	writeMu sync.Mutex
 }
 
@@ -55,7 +57,7 @@ func (sc *selfHealConn) sendHead(subID string, num int64) {
 	})
 }
 
-func (m *selfHealMockUpstream) handle(conn *websocket.Conn) {
+func (m *selfHealMockUpstream) handle(conn *mockWsConn) {
 	sc := &selfHealConn{conn: conn}
 	m.mu.Lock()
 	m.conns = append(m.conns, sc)
