@@ -927,9 +927,81 @@ func (r *JsonRpcResponse) CanonicalHashWithIgnoredFields(ignoreFields []string, 
 	return hash, nil
 }
 
-// canonicalizeTo writes the canonical JSON representation of v into w, applying
-// the same emptyish filtering semantics as canonicalize(). It returns true if
-// any bytes were written.
+// Frame tags for the consensus canonical form. Each tag names the kind of the
+// value that follows, so a string can never be read as the container, the key
+// or the quantity its bytes spell.
+const (
+	canonTagString  = 's' // a string, written verbatim
+	canonTagHex     = 'x' // a 0x quantity, written without its padding zeroes
+	canonTagLiteral = 'j' // a number or a boolean, as the JSON encoder writes it
+	canonTagKey     = 'k' // an object member name
+	canonTagObject  = 'o' // an object, followed by its surviving member count
+	canonOpenArray  = 'a' // an array opens here
+	canonCloseArray = 'e' // and closes here
+)
+
+// hexQuantityDigits reports whether b is a 0x-prefixed quantity, and returns
+// its digits with the padding zeroes removed. Some vendors pad a quantity and
+// some do not, so "0x0005208" and "0x5208" must reach the hash as one value.
+// The prefix stays out of the payload and the caller tags the value as hex, so
+// the plain string "5208" still encodes differently from the quantity "0x5208".
+func hexQuantityDigits(b []byte) ([]byte, bool) {
+	if len(b) > 2 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
+		return bytes.TrimLeft(b[2:], "0"), true
+	}
+	return nil, false
+}
+
+// writeCanonicalScalar frames one scalar under tag, or under the hex tag when
+// the bytes are a 0x quantity. It reports whether it wrote anything: a
+// quantity of nothing but zeroes carries no value, and the caller drops the
+// member that held it.
+func writeCanonicalScalar(w io.Writer, tag byte, b []byte) (bool, error) {
+	if digits, ok := hexQuantityDigits(b); ok {
+		if len(digits) == 0 {
+			return false, nil
+		}
+		if err := writeHashLeafBytes(w, canonTagHex, digits); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if len(b) == 0 {
+		return false, nil
+	}
+	if err := writeHashLeafBytes(w, tag, b); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// canonicalizeTo writes a canonical, self-delimiting encoding of v into w. The
+// consensus response hash is the SHA-256 of that byte stream, so two responses
+// that write the same bytes are reported as agreeing.
+//
+// Every piece carries a frame. A scalar writes a type tag, its byte length in
+// decimal, a ':' and then its payload — the encoding the cache key uses, see
+// writeHashFrame. An object writes its tag and its surviving member count the
+// same way, and frames each member name as a scalar of its own. An array opens
+// with one tag and closes with another.
+//
+// The framing is here for the reason it is there. A response body comes from
+// an UPSTREAM, so any byte chosen as a separator is a byte an upstream can
+// place inside a string, which moves the collision instead of removing it. A
+// framed stream is decodable, and a decodable stream cannot map two different
+// values onto one byte string.
+//
+// The earlier form wrote JSON punctuation around its members but wrote string
+// values raw, with no quotes and no escaping. One string could therefore spell
+// the rest of the document: {"blockHash":"aa,\"status\":1"} wrote the same
+// bytes as {"blockHash":"0xaa","status":"0x1"}, and a number wrote the same
+// bytes as the quantity that spells it, so 291 agreed with "0x291". A hostile
+// upstream padded one string field until its answer hashed equal to the honest
+// one, which defeats the check consensus exists to make. See bug 135.
+//
+// An emptyish member is dropped before framing. That is what makes an upstream
+// which omits a zero field agree with one that sends it, and it is deliberate.
+// canonicalizeTo returns true if it wrote any bytes.
 func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 	if isEmptyishValue(v) {
 		return false, nil
@@ -969,20 +1041,14 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 				}
 			}
 		}()
-		if _, err := w.Write([]byte{'{'}); err != nil {
+		// The member count comes first, then each member as a framed key
+		// followed by its framed value. The boundary between a key and its
+		// value cannot move, and neither can the boundary between members.
+		if err := writeHashFrame(w, canonTagObject, len(keys)); err != nil {
 			return false, err
 		}
-		for i, k := range keys {
-			if i > 0 {
-				if _, err := w.Write([]byte{','}); err != nil {
-					return false, err
-				}
-			}
-			kj, _ := SonicCfg.Marshal(k)
-			if _, err := w.Write(kj); err != nil {
-				return false, err
-			}
-			if _, err := w.Write([]byte{':'}); err != nil {
+		for _, k := range keys {
+			if err := writeHashLeaf(w, canonTagKey, k); err != nil {
 				return false, err
 			}
 			if _, err := w.Write(children[k].Bytes()); err != nil {
@@ -992,16 +1058,25 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 			util.ReturnBuf(children[k])
 			children[k] = nil
 		}
-		_, err := w.Write([]byte{'}'})
-		return true, err
+		return true, nil
 
 	case []interface{}:
-		// Filter empties and stream elements
-		if _, err := w.Write([]byte{'['}); err != nil {
-			return false, err
-		}
-		first := true
-		any := false
+		// An array streams rather than carrying a member count. It cannot know
+		// how many elements survive the emptyish filter without holding every
+		// one of them at once, and a top-level array — a block trace, a log
+		// page — is the largest value eRPC hashes. So it opens with a tag,
+		// writes each element as it renders it, and closes with a tag of its
+		// own.
+		//
+		// That stays decodable. Every element carries its own frame, so a
+		// reader consumes an element by length and never scans its payload.
+		// The closing tag is therefore only ever read where a tag is
+		// expected, and no payload byte is ever mistaken for it.
+		//
+		// Nothing is written before the first surviving element, so an array
+		// of nothing but emptyish members writes nothing at all — the same
+		// rule an object follows, at every depth.
+		opened := false
 		for _, item := range val {
 			if isEmptyishValue(item) {
 				continue
@@ -1016,43 +1091,32 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 				util.ReturnBuf(buf)
 				continue
 			}
-			if !first {
-				if _, err := w.Write([]byte{','}); err != nil {
+			if !opened {
+				if _, err := w.Write([]byte{canonOpenArray}); err != nil {
 					util.ReturnBuf(buf)
 					return false, err
 				}
+				opened = true
 			}
-			first = false
-			any = true
-			if _, err := w.Write(buf.Bytes()); err != nil {
-				util.ReturnBuf(buf)
+			_, err = w.Write(buf.Bytes())
+			util.ReturnBuf(buf)
+			if err != nil {
 				return false, err
 			}
-			util.ReturnBuf(buf)
 		}
-		if _, err := w.Write([]byte{']'}); err != nil {
-			return false, err
-		}
-		if !any {
+		if !opened {
 			return false, nil
+		}
+		if _, err := w.Write([]byte{canonCloseArray}); err != nil {
+			return false, err
 		}
 		return true, nil
 
 	case string:
-		b := removeLeadingZeroes(util.S2Bytes(val))
-		if len(b) == 0 {
-			return false, nil
-		}
-		_, err := w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagString, util.S2Bytes(val))
 
 	case []byte:
-		b := removeLeadingZeroes(val)
-		if len(b) == 0 {
-			return false, nil
-		}
-		_, err := w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagString, val)
 
 	default:
 		b, err := SonicCfg.Marshal(val)
@@ -1062,9 +1126,7 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 		if util.IsBytesEmptyish(b) {
 			return false, nil
 		}
-		b = removeLeadingZeroes(b)
-		_, err = w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagLiteral, b)
 	}
 }
 
@@ -1152,18 +1214,6 @@ func removeFieldsRecursive(obj interface{}, pathTree map[string]interface{}) int
 		// Primitive types or other types are returned as-is
 		return v
 	}
-}
-
-func removeLeadingZeroes(b []byte) []byte {
-	if len(b) > 2 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
-		b = bytes.TrimLeft(b[2:], "0")
-	} else if len(b) > 3 && b[0] == '"' && b[1] == '0' && b[2] == 'x' && b[3] == '0' {
-		b = bytes.TrimLeft(b[3:], "0")
-		if len(b) == 1 {
-			return nil
-		}
-	}
-	return b
 }
 
 // isEmptyishValue checks if a value should be considered empty for canonicalization
@@ -1525,6 +1575,18 @@ func writeHashLeaf(h io.Writer, tag byte, payload string) error {
 		return nil
 	}
 	_, err := io.WriteString(h, payload)
+	return err
+}
+
+// writeHashLeafBytes writes a framed scalar whose payload is already bytes.
+func writeHashLeafBytes(h io.Writer, tag byte, payload []byte) error {
+	if err := writeHashFrame(h, tag, len(payload)); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	_, err := h.Write(payload)
 	return err
 }
 

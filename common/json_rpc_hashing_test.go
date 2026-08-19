@@ -308,3 +308,171 @@ func TestHashValue_EncodesEveryStructureDistinctly(t *testing.T) {
 		seen[encoded] = v
 	}
 }
+
+// TestCanonicalHash_SeparatesResponsesAnUpstreamCanForge covers bug 135.
+// canonicalizeTo used to write JSON punctuation around its members and write
+// string values raw, with no quotes and no escaping. A string could therefore
+// spell structure that was never in the response, and a quantity could spell a
+// number. Every pair below produced ONE hash under the old form, so consensus
+// reported the two upstreams as agreeing.
+//
+// An upstream owns the bytes of its own response, which is what makes this
+// reachable: a node that wants to pass consensus while answering differently
+// pads one string field until its canonical form matches the honest answer.
+func TestCanonicalHash_SeparatesResponsesAnUpstreamCanForge(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		left  string
+		right string
+	}{
+		{
+			// The first probe recorded in the entry. One member carries the
+			// punctuation that separates two members.
+			name:  "one member spells two",
+			left:  `{"a":"1,\"b\":2"}`,
+			right: `{"a":"1","b":"2"}`,
+		},
+		{
+			// The second probe. The comma inside the string forges an array
+			// element boundary.
+			name:  "one array element spells two",
+			left:  `{"a":["x","y"]}`,
+			right: `{"a":["x,y"]}`,
+		},
+		{
+			// The worst pair, because BOTH sides are well-formed answers to
+			// the same call and neither needs a punctuation character. The
+			// left says 291 and the right says 0x291, which is 657. Chains
+			// whose results carry JSON numbers make this an everyday shape.
+			name:  "a number against the quantity that spells it",
+			left:  `{"result":291}`,
+			right: `{"result":"0x291"}`,
+		},
+		{
+			// The old form dropped the 0x prefix, so a quantity and a plain
+			// string reached the hash as the same bytes.
+			name:  "a quantity against the plain string of its digits",
+			left:  `{"a":"0xab"}`,
+			right: `{"a":"ab"}`,
+		},
+		{
+			// A whole receipt forged from one field. The left is an honest
+			// two-field receipt; the right carries a single junk string.
+			name:  "a one-field body spells a two-field receipt",
+			left:  `{"blockHash":"0xaa","status":"0x1"}`,
+			right: `{"blockHash":"aa,\"status\":1"}`,
+		},
+		{
+			// A string against the log entry it spells, inside an array.
+			name:  "a log entry against the string that spells it",
+			left:  `{"logs":[{"a":"0x1"}]}`,
+			right: `{"logs":["{\"a\":1}"]}`,
+		},
+		{
+			// A string against the nested object it spells.
+			name:  "a nested object against the string that spells it",
+			left:  `{"a":{"b":"0x1"}}`,
+			right: `{"a":"{\"b\":1}"}`,
+		},
+		{
+			// A boolean against the string that spells it.
+			name:  "a boolean against its own spelling",
+			left:  `{"removed":true}`,
+			right: `{"removed":"true"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.NotEqual(t, hashOf(t, tc.left), hashOf(t, tc.right),
+				"two different responses must not hash the same")
+		})
+	}
+}
+
+// TestCanonicalHashWithIgnoredFields_FramesTheBodyItHashes states that the
+// ignore-list path gets the same framing. It removes fields and then hashes
+// what is left, so an unframed encoding would leave that path forgeable even
+// after the plain one was fixed.
+func TestCanonicalHashWithIgnoredFields_FramesTheBodyItHashes(t *testing.T) {
+	t.Parallel()
+
+	hash := func(raw string) string {
+		t.Helper()
+		jr := &JsonRpcResponse{result: []byte(raw)}
+		h, err := jr.CanonicalHashWithIgnoredFields([]string{"blockTimestamp"})
+		require.NoError(t, err)
+		require.NotEmpty(t, h)
+		return h
+	}
+
+	honest := hash(`{"blockTimestamp":"0x64","blockHash":"0xaa","status":"0x1"}`)
+	forged := hash(`{"blockTimestamp":"0x99","blockHash":"aa,\"status\":1"}`)
+	require.NotEqual(t, honest, forged,
+		"removing a field must not remove the framing around the rest")
+
+	// The control: the ignored field must still be ignored, otherwise the
+	// inequality above proves nothing about the ignore list.
+	same := hash(`{"blockTimestamp":"0x99","blockHash":"0xaa","status":"0x1"}`)
+	require.Equal(t, honest, same)
+}
+
+// TestCanonicalizeTo_EncodesEveryStructureDistinctly states the rule the pairs
+// above sample: the byte stream canonicalizeTo writes must identify the value
+// it came from. Two distinct values that write the same bytes are two
+// upstreams that consensus calls one.
+//
+// The deliberate identifications are NOT in this list, because they are the
+// point of the canonical form: a padded quantity agrees with a bare one, and
+// an emptyish member agrees with an absent one.
+func TestCanonicalizeTo_EncodesEveryStructureDistinctly(t *testing.T) {
+	t.Parallel()
+
+	values := []interface{}{
+		"a",
+		"ab",
+		"a,b",
+		"0xab",
+		"0xa",
+		"1",
+		float64(1),
+		float64(291),
+		"0x291",
+		true,
+		"true",
+		[]interface{}{"a"},
+		[]interface{}{"ab"},
+		[]interface{}{"a", "b"},
+		[]interface{}{[]interface{}{"a"}, "b"},
+		[]interface{}{[]interface{}{"a", "b"}},
+		map[string]interface{}{"a": "b"},
+		map[string]interface{}{"ab": "c"},
+		map[string]interface{}{"a": "b:c"},
+		map[string]interface{}{"a": "b", "c": "d"},
+		map[string]interface{}{"a": []interface{}{"b"}},
+		map[string]interface{}{"a": map[string]interface{}{"b": "c"}},
+		// A string that spells a whole frame must not be read as one.
+		"o1:k1:as1:b",
+		[]interface{}{"o1:k1:as1:b"},
+		map[string]interface{}{"a": "s1:b"},
+	}
+
+	seen := make(map[string]interface{}, len(values))
+	for _, v := range values {
+		w := &failAfterNWrites{remaining: 1 << 20}
+		wrote, err := canonicalizeTo(w, v)
+		require.NoError(t, err)
+		require.True(t, wrote, "%#v must write something", v)
+		encoded := w.bytes.String()
+
+		if prev, clash := seen[encoded]; clash {
+			require.Failf(t, "two values encode to the same bytes",
+				"%#v and %#v both encode to %q", prev, v, encoded)
+		}
+		seen[encoded] = v
+	}
+}

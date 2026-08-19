@@ -336,31 +336,35 @@ func TestRemoveFieldsByPaths_WildcardOnANonArrayIsNotDestructive(t *testing.T) {
 	require.Equal(t, "0xdeadbeef", got["logs"])
 }
 
-// TestRemoveLeadingZeroes_TrimsOnlyHexQuantities covers the normalizer directly,
-// including the inputs it must leave untouched. Over-trimming would corrupt an
-// address or a decimal into a different value.
-func TestRemoveLeadingZeroes(t *testing.T) {
+// TestHexQuantityDigits covers the normalizer directly, including the inputs it
+// must refuse. It answers two questions at once: is this a 0x quantity, and
+// what are its digits without the padding? The caller tags a quantity
+// differently from a plain string, so a value that is NOT a quantity must come
+// back with ok false rather than with trimmed bytes.
+func TestHexQuantityDigits(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name string
-		in   string
-		want string
+		name   string
+		in     string
+		want   string
+		wantOk bool
 	}{
-		{"unprefixed hex quantity", "0x0005208", "5208"},
-		{"already bare", "0x5208", "5208"},
-		{"all zeroes collapse to nothing", "0x0000", ""},
-		{"upper-case prefix", "0X0010", "10"},
-		{"quoted hex keeps the trailing quote", `"0x0a"`, `a"`},
-		{"quoted all-zero hex becomes nil", `"0x00"`, ""},
-		{"decimal string is untouched", "0012", "0012"},
-		{"short input is untouched", "0x", "0x"},
-		{"plain word is untouched", "latest", "latest"},
+		{"padded quantity", "0x0005208", "5208", true},
+		{"already bare", "0x5208", "5208", true},
+		{"all zeroes leave no digits", "0x0000", "", true},
+		{"upper-case prefix", "0X0010", "10", true},
+		{"decimal string is not a quantity", "0012", "", false},
+		{"short input is not a quantity", "0x", "", false},
+		{"plain word is not a quantity", "latest", "", false},
+		{"a quoted quantity is not a quantity", `"0x0a"`, "", false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, string(removeLeadingZeroes([]byte(tc.in))))
+			got, ok := hexQuantityDigits([]byte(tc.in))
+			require.Equal(t, tc.wantOk, ok)
+			require.Equal(t, tc.want, string(got))
 		})
 	}
 }
@@ -397,6 +401,26 @@ func TestIsEmptyishValue(t *testing.T) {
 	for _, v := range notEmpty {
 		require.False(t, isEmptyishValue(v), "%#v must not be emptyish", v)
 	}
+}
+
+// TestCanonicalHash_AnArrayOfNothingHashesLikeNothingAtEveryDepth pins the
+// rule bug 145 broke. The array branch used to write its brackets before it
+// knew whether any element would survive the emptyish filter, so an array of
+// all-emptyish members left "[]" in the writer and then reported that it had
+// written nothing. Every nested caller threw those bytes away; the top level
+// hashed them. One rule at depth 1, another at depth 0, out of one branch.
+func TestCanonicalHash_AnArrayOfNothingHashesLikeNothingAtEveryDepth(t *testing.T) {
+	t.Parallel()
+
+	empty := hashOf(t, `[]`)
+	require.Equal(t, empty, hashOf(t, `[null]`))
+	require.Equal(t, empty, hashOf(t, `[{"ts":"0x0"}]`))
+	require.Equal(t, empty, hashOf(t, `{}`),
+		"an empty array and an empty object both mean no data")
+
+	// One surviving element must still separate it from nothing, otherwise
+	// the rule above erases data rather than normalizing it.
+	require.NotEqual(t, empty, hashOf(t, `[{"ts":"0x1"}]`))
 }
 
 // TestCanonicalizeTo_WritesNothingForAnEmptyishDocument checks the "wrote"
