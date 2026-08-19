@@ -6,51 +6,63 @@ a candidate to report or to send back as a patch.
 The fork tracks upstream and merges from it regularly, so fixing these locally
 costs merge surface forever. Sending them upstream costs one pull request.
 
-**Status key.** `open` — found, not fixed anywhere. `fixed-in-fork` — the fork
-carries a fix that upstream still needs. `pinned` — a test asserts today's
-behaviour and names the defect, so a fix breaks the test rather than passing
-unnoticed.
+**Status key.** Every entry carries exactly one of four statuses.
 
-Every entry below was verified in source, not inferred.
+- **`**Status: FIXED in the fork.**`** — the fork carries a fix that upstream
+  still needs. The status names the test that pins the fix, or states that no
+  test pins it.
+- **`**Status:** open.`** — the defect is still in the code. A test may assert
+  today's broken behaviour so that a fix breaks the test rather than passing
+  unnoticed; the status names that test.
+- **`**Status:** not a bug — <reason>.`** — recorded so nobody "fixes" it.
+- **`**Status:** unverifiable — <reason>.`** — the claim cannot be decided from
+  this tree.
+
+Every entry below was checked against the code on 2026-08-19, not inferred. The
+audit corrected the `file:line` citations that had drifted.
 
 ---
 
 ## 1. API keys cannot be revoked or used on a memory or Redis store
 
-**Status:** open. **Severity: highest.** Security-adjacent.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+highest.** Security-adjacent. Pinned by
+`TestAdmin_AddedKeyAuthenticatesAndRevokedKeyStopsWorking`.
 
-`erpc/admin.go:334` and `:420` look up a record with
+`erpc/admin.go:370` and `:466` look up a record with
 `connector.Get(ctx, data.ConnectorMainIndex, apiKey, "*", nil)`. The range key
 is the literal string `"*"`, not a wildcard the connector expands.
 
 The memory connector (`data/memory.go:169`) and the Redis connector
-(`data/redis.go:426`) both search for the literal key `"<apiKey>:*"` and miss.
+(`data/redis.go:434`) both search for the literal key `"<apiKey>:*"` and miss.
 The consumer auth strategy reads with the same wildcard
-(`auth/strategy_database.go:179`).
+(`auth/strategy_database.go:181`).
 
 So on an in-memory or Redis auth store, `erpc_addApiKey` writes a record that
 update, delete **and authentication** all fail to find. An operator can issue a
 key and then neither use it nor revoke it.
 
 **The defect is connector-dependent, which is why it survived.** PostgreSQL
-expands the wildcard — `data/postgresql.go:1057-1058` rewrites `*` into a SQL
+expands the wildcard — `data/postgresql.go:1196-1197` rewrites `*` into a SQL
 `LIKE '%'` — so the whole feature works there. Memory and Redis build the
 literal key and miss. Anyone testing on Postgres sees nothing wrong.
 
-The record is written at `erpc/admin.go:175` as `Set(ctx, apiKey, userId, …)`,
+The record is written at `erpc/admin.go:200` as `Set(ctx, apiKey, userId, …)`,
 so the range key is the user id, and the reader does not know it.
 
-Pinned by `TestAdmin_UpdateAndDeleteNeedAStoreThatResolvesTheRangeWildcard` and
-`TestDatabaseStrategy_AuthenticateAgainstMemoryConnector_WildcardRangeKey`, with
+Pinned by `TestAdmin_UpdateAndDeleteReachTheRecordOnAStoreWithoutWildcards` and
+`TestDatabaseStrategy_AuthenticateReadsTheRecordAtItsCanonicalAddress`, with
 `TestDatabaseStrategy_AuthenticateSucceedsWhenRangeKeyMatches` as the control.
 
 ---
 
 ## 2. `CopyResponseForRequest` deadlocks on an unparsed response
 
-**Status:** fixed-in-fork. **Severity: high.** A hung request never returns.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** A hung request never returns. Pinned by
+`TestCopyResponseForRequest_UnparsedOriginalCompletes`.
 
-`common/response.go:623` took `resp.RLockWithTrace(ctx)`, a read lock on the
+`common/response.go:635` took `resp.RLockWithTrace(ctx)`, a read lock on the
 response's `sync.RWMutex`. If the response was not parsed yet, it then called
 `resp.JsonRpcResponse(ctx)`, which takes `r.Lock()` on the same non-reentrant
 mutex at `common/response.go:331`.
@@ -75,26 +87,27 @@ seconds: a regression fails fast instead of wedging the run.
 
 ## 3. No error type satisfies `common.ResponseMetadata`
 
-**Status:** fixed-in-fork. **Severity: medium.** Operators lose diagnostics
-exactly when they need them.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Operators lose diagnostics exactly when they need them. Pinned by
+`TestLookupResponseMetadata_FindsTheUpstreamErrorTypes`.
 
 `common/response.go:64` declares `IsObjectNull(ctx ...context.Context) bool`.
 
-`ErrUpstreamRequest.IsObjectNull()` (`common/errors.go:810`) and
-`ErrUpstreamsExhausted.IsObjectNull()` (`:1041`) took **no argument**. Neither
+`ErrUpstreamRequest.IsObjectNull()` (`common/errors.go:842`) and
+`ErrUpstreamsExhausted.IsObjectNull()` (`:1075`) took **no argument**. Neither
 type satisfied the interface, although both implemented every other method.
 
 `common.LookupResponseMetadata` therefore returned nil for every error, so
-`writeResponseMetadataHeaders` (`erpc/http_server.go:1290`) wrote no
+`writeResponseMetadataHeaders` (`erpc/http_server.go:1294`) wrote no
 `X-ERPC-Cache` and no `X-ERPC-Upstream` header on an error response. Checked:
 `X-ERPC-Attempts` and the retry/hedge counters come from `ExecState`
-(`:1258`), not from this interface, so they were never affected.
+(`:1262`), not from this interface, so they were never affected.
 
 **The fix** makes both methods variadic and adds the two static assertions the
 package lacked, so the signature cannot drift again without a compile error.
 
 One consequence, deliberate: in a batch response the failed items now count
-toward `withMeta` (`erpc/http_server.go:1565`) with `FromCache()` false, so a
+toward `withMeta` (`erpc/http_server.go:1571`) with `FromCache()` false, so a
 batch mixing a cache hit with an upstream failure reports `X-ERPC-Cache:
 PARTIAL:1` instead of `HIT`. That is the honest answer — the failed item was
 not served from cache.
@@ -103,10 +116,11 @@ not served from cache.
 
 ## 4. `WithRetryableTowardNetwork` throws the concrete type away
 
-**Status:** fixed-in-fork. **Severity: medium.** The client reads the wrapper
-instead of the real error.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** The client reads the wrapper instead of the real error. Pinned by
+`TestWithRetryableTowardNetwork_ReturnsTheReceiver`.
 
-`common/errors.go:210` returned the embedded `*BaseError`, not the receiver's
+`common/errors.go:220` returned the embedded `*BaseError`, not the receiver's
 concrete type. Twenty-five call sites chain it: twenty-one in production code,
 four in tests.
 
@@ -115,7 +129,7 @@ layer as a bare `*BaseError`. That value implements neither `ErrorStatusCode()`
 nor its own identity, so `errors.As` for `*ErrEndpointClientSideException` did
 not find it.
 
-The live consumer is `buildErrorResponseBody` (`erpc/http_server.go:1744`): it
+The live consumer is `buildErrorResponseBody` (`erpc/http_server.go:1747`): it
 calls `errors.As(err, &exe)` to lift an `*ErrEndpointExecutionException` out of
 a failed bundle so the client reads the revert rather than the wrapper. The
 four EVM paths that mark a revert retryable
@@ -124,7 +138,7 @@ four EVM paths that mark a revert retryable
 
 Correction to the original report: `ErrorStatusCode()` has **no** production
 consumer in this tree — `determineResponseStatusCode`
-(`erpc/http_server.go:1624`) keys off `HasErrorCode`, and the `Code` field
+(`erpc/http_server.go:1629`) keys off `HasErrorCode`, and the `Code` field
 survives inside the `*BaseError`. So the status did not flip to 500; the body
 selection was the damage. Only tests read `ErrorStatusCode()`.
 
@@ -144,7 +158,7 @@ Classification always worked, because it reads the code rather than the type.
 
 **Status:** open. **Severity: medium.** The listing reports a false all-clear.
 
-`erpc/admin.go:721` asks each upstream for `CordonedReason("*")` only. An
+`erpc/admin.go:771` asks each upstream for `CordonedReason("*")` only. An
 upstream cordoned for a single method never appears, although the handler's own
 comment promises "every upstream currently cordoned in a project".
 
@@ -163,8 +177,8 @@ polyglot work surfaced.
 
 `thirdparty/provider.go` builds a base upstream config along two paths. The
 fresh path calls `UpstreamConfig.SetDefaults`, which forces `Type = evm` when
-the type is empty (`common/defaults.go:1913`). The override path does
-`baseCfg = override.Copy()` (line 100) and skips `SetDefaults` entirely.
+the type is empty (`common/defaults.go:1915`). The override path does
+`baseCfg = override.Copy()` (line 99) and skips `SetDefaults` entirely.
 
 So `btc:mainnet` comes out `Type=evm`, while `btc:testnet` with a matching
 override comes out `Type=""`.
@@ -197,13 +211,13 @@ Pinned by `TestNormalizeBlockHashHexString_BareZeroPrefixBecomesTheZeroHash`.
 
 **Status:** open. **Severity: low today, latent.** No caller in this repo.
 
-`erpc/config_analyzer.go:1087` hands the result of `Upstream.EvmGetChainId` to
+`erpc/config_analyzer.go:1093` hands the result of `Upstream.EvmGetChainId` to
 `common.HexToInt64`. But `EvmGetChainId` returns a **decimal** string —
 `upstream/evm_upstream_ops.go:51` formats it with `strconv.FormatUint(dec, 10)`
 — and `HexToInt64` demands a `0x` prefix.
 
 A healthy upstream on the **correct** chain therefore fails validation with
-`invalid hex string: 123`, and the mismatch check at `:1094` is unreachable.
+`invalid hex string: 123`, and the mismatch check at `:1107` is unreachable.
 
 The same file gets it right on its other path: `GenerateValidationReport` uses
 `strconv.ParseInt(chainStr, 0, 0)` at `:398`. Two readers of one value
@@ -220,9 +234,9 @@ Pinned by `TestValidateUpstreamEndpoints_MisparsesTheChainIdItJustFetched`.
 
 **Status:** open. **Severity: low.** Latent.
 
-`common/errors.go:873` calls `upstream.Id()` with no nil guard. Its siblings
-`NewErrEndpointMissingData` (`:2278`) and `NewErrEndpointContentValidation`
-(`:3032`) both guard.
+`common/errors.go:895` calls `upstream.Id()` with no nil guard. Its siblings
+`NewErrEndpointMissingData` (`:2323`) and `NewErrEndpointContentValidation`
+(`:3094`) both guard.
 
 The single call site (`clients/http_json_rpc_client.go:626`) passes a live
 upstream today.
@@ -246,7 +260,7 @@ over an in-memory connector, so a cross-process lock is not the cause.
 
 **Status:** open. **Severity: medium.** Silently merges per-vendor metrics.
 
-`upstream/upstream.go:1432` reads `if len(rooDomain) < 5`. The comment on the
+`upstream/upstream.go:1442` reads `if len(rooDomain) < 5`. The comment on the
 next line says the guard exists for "multi-level TLDs like co.uk".
 
 `"co.uk"` is exactly 5 characters, so `5 < 5` is false. The guard never fires
@@ -266,13 +280,15 @@ The fix is `<= 5`, or dropping the heuristic for a public-suffix list.
 
 **Status:** open. **Severity: none today.** Unexercised machinery.
 
-`upstream/svm_upstream_ops.go:74-84` has three branches that cannot run: the
-`resp.JsonRpcResponse()` error path, `if jrr.Error != nil`, and the `Unmarshal`
-failure. `u.Forward` already converts a JSON-RPC error answer into a returned
-error, so control never gets past the earlier `if err != nil`.
+`upstream/svm_upstream_ops.go:84-93` has three branches that cannot run: the
+`resp.JsonRpcResponse()` error path, `if jrr == nil`, and `if jrr.Error != nil`.
+The `Unmarshal` failure below them is now covered by
+`TestSvmGenesisGate_RejectsAResultThatIsNotAHash`. `u.Forward` already converts
+a JSON-RPC error answer into a returned error, so control never gets past the
+earlier `if err != nil`.
 
 Confirmed by coverage: those three blocks stay at 0 while every other line in
-the function reaches 1, across all five genesis-gate tests.
+the function reaches 1, across all six genesis-gate tests.
 
 Worth reporting because it reads as a safety net and is not one.
 
@@ -280,7 +296,9 @@ Worth reporting because it reads as a safety net and is not one.
 
 ## 13. Data race in `JsonRpcResponse.WriteTo`
 
-**Status:** open. **Severity: highest of the read-path bugs.** Verified under `-race`.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+highest of the read-path bugs.** Verified under `-race`. Pinned by
+`TestJsonRpcResponse_WriteTo_ServesConcurrentClientsWithoutRacing`.
 
 `common/json_rpc.go` `WriteTo` takes `r.errMu.RLock()` — a **read** lock. In the
 `else if r.Error != nil` branch it then WRITES the shared field:
@@ -290,26 +308,27 @@ r.errBytes, err = SonicCfg.Marshal(r.Error)
 ```
 
 Two concurrent `WriteTo` calls on a response that carries a typed `Error` and no
-`errBytes` race on that field. The race detector reports the write at `:668`
-against the read of `len(r.errBytes)` at `:653`.
+`errBytes` race on that field. The race detector reports the write at `:678`
+against the read of `len(r.errBytes)` at `:660`.
 
 Multiplexing shares one response across many waiting clients, so this is
 reachable in production rather than theoretical.
 
-**Deliberately not pinned by a test.** A race test would fail the baseline, and
-the rule for this work is that a test asserts today's behaviour without
-breaking the suite. Fix first, then pin.
+It was left unpinned at first, because a race test would have failed the
+baseline. The fork fixed it, so the test now passes under `-race`.
 
-Fix: take `errMu.Lock()` for that branch, or precompute `errBytes` before
-entering the read-locked section.
+The fork marshals the error into a LOCAL variable and leaves `r.errBytes`
+alone, so `WriteTo` writes no shared field under its read locks.
 
 ---
 
 ## 14. A prefix in `ignoreFields` makes consensus agree on divergent data
 
-**Status:** open. **Severity: high.** Silent wrong answer.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Silent wrong answer. Pinned by
+`TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension`.
 
-`common/json_rpc.go:1075-1086` builds a path tree from the ignore list. When one
+`common/json_rpc.go:1075-1105` builds a path tree from the ignore list. When one
 path is a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]`
 — the builder finds `pathTree["logs"]` already set to `true`, fails the map type
 assertion, and keeps writing the remaining segments onto the **root**.
@@ -323,7 +342,8 @@ a different answer.
 
 The shipped defaults do not hit it. Any operator-written list can.
 
-Pinned by `TestRemoveFieldsByPaths_APrefixPathPoisonsTheRootTree`.
+The consensus-level statement of the same rule is pinned by
+`TestCanonicalHashWithIgnoredFields_APathAndItsPrefixHashTheSameEitherWay`.
 
 ---
 
@@ -349,7 +369,7 @@ Pinned by
 
 **Status:** open. **Severity: low.** Unhelpful client error.
 
-`common/json_rpc.go:1636-1650`. `NewErrUpstreamMethodIgnored` stores `method`
+`common/json_rpc.go:1654-1668`. `NewErrUpstreamMethodIgnored` stores `method`
 and `upstreamId` in `Details`, but the translation passes `nil` details and
 prefixes the deepest message with a phrase the message already contains.
 
@@ -362,11 +382,11 @@ configuration"` and never learns which method, or which upstream.
 
 **Status:** open. **Severity: low.** Misleading admin output.
 
-- `ProviderConfig.MarshalJSON` (`common/config.go:881-889`) omits
-  `ignoreNetworks`; `MarshalYAML` at `:892` includes it. An operator comparing
+- `ProviderConfig.MarshalJSON` (`common/config.go:1005-1014`) omits
+  `ignoreNetworks`; `MarshalYAML` at `:1016` includes it. An operator comparing
   the JSON and YAML admin dumps sees a network exclusion in one and not the
   other.
-- `SecretStrategyConfig.MarshalJSON` (`:2953-2957`) emits only
+- `SecretStrategyConfig.MarshalJSON` (`:3082-3086`) emits only
   `{"value":"REDACTED"}`, dropping `id` and `rateLimitBudget`. In a JSON dump
   every secret strategy is indistinguishable from every other one. `MarshalYAML`
   keeps both.
@@ -393,16 +413,18 @@ Pinned by `TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePres
 
 ## 19. A wrapped nonce exception disables idempotency and re-broadcasts a transaction
 
-**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: high.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Pinned by
+`TestUpstreamPostForward_ethSendRawTransaction/AWrappedNonceExceptionReachesTheIdempotencyPath`.
 
 Fixed together with 35, which is the same root cause. See "Fixes the fork
 already carries" below. The pinning test is now
-`AWrappedNonceExceptionReachesTheIdempotencyPath`.
+`TestUpstreamPostForward_ethSendRawTransaction/AWrappedNonceExceptionReachesTheIdempotencyPath`.
 
 `architecture/evm/eth_sendRawTransaction.go:80` gates the idempotency path with
 `common.HasErrorCode(re, ErrCodeEndpointNonceException)`.
 
-`HasErrorCode` (`common/errors.go:2543`) type-asserts `StandardError` and
+`HasErrorCode` (`common/errors.go:2597`) type-asserts `StandardError` and
 `*BaseError`, and walks `Unwrap() []error`. It does **not** walk a plain
 `fmt.Errorf("%w", …)` chain.
 
@@ -412,16 +434,20 @@ So any layer that wraps an `ErrEndpointNonceException` with `%w` fails the first
 gate, returns early, and the caller re-broadcasts a transaction that is already
 in the mempool. The two checks disagree about what counts as the same error.
 
-Reordering the two checks fixes it, but that is a behaviour change, so it was
-pinned rather than fixed: `AWrappedNonceExceptionIsNotRecognised`.
+Reordering the two checks would also fix it, but the fork repaired
+`HasErrorCode` instead, so every consumer of that walk gains the same fix. See
+E in "Fixes the fork already carries".
 
 ---
 
 ## 20. `binarySearchEarliest` reports the tip as the earliest retained block
 
-**Status:** open. **Severity: high.** Two defects that compound.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Two defects that compound. Pinned by
+`TestBinarySearchEarliest/NothingAvailableIsAnError` and
+`TestBinarySearchEarliest/UnsupportedProbeIsReportedAsUnsupported`.
 
-`architecture/evm/evm_state_poller.go:1732-1752`.
+`architecture/evm/evm_state_poller.go:1770-1847`.
 
 **20a.** The loop narrows `[l, r]` and returns `l` without ever probing the
 final value. If no block in the range answers, `l` converges on `high`, and the
@@ -429,7 +455,7 @@ current tip is recorded as the earliest block the node retains. That is the most
 restrictive possible bound, not fail-open.
 
 **20b.** `checkProbe` returns `(ok, unsupported, err)` and the search discards
-`unsupported` entirely (`:1734`). A node with no tracing engine answers `-32601`
+`unsupported` entirely (now handled at `:1783`). A node with no tracing engine answers `-32601`
 to every trace method at every height, so `probe: traceData` walks about log2(N)
 requests and then declares earliest = latest — indistinguishable from a node
 that pruned its whole history.
@@ -437,13 +463,14 @@ that pruned its whole history.
 An operator who configures `blockAvailability.lower` therefore sees a node that
 answers nothing recorded as retaining history from the tip upward.
 
-**20c.** The escape hatch is dead. None of the five probe implementations ever
-returns a non-nil error — each folds transport and JSON-RPC failures into
-`(false, …, nil)`. So the two `else if err != nil` fast paths and the error
-logging in `PollEarliestBlockNumber` (`:908`) cannot fire.
+**20c.** None of the four probe implementations ever returns a non-nil error —
+each folds transport and JSON-RPC failures into `(false, …, nil)`. The
+`checkProbe` pass-through error therefore still cannot fire. The error logging
+in `PollEarliestBlockNumber` (`:940`) does fire now, because the search itself
+returns `errEarliestProbeUnsupported` and `errEarliestBlockUnavailable`.
 
-Pinned by `TestBinarySearchEarliest/NothingAvailableStillReportsHighAsEarliest`
-and `/UnsupportedProbeIsIndistinguishableFromPrunedHistory`.
+`TestBinarySearchEarliest/EarliestEqualToHighIsStillFound` pins the one case
+the post-loop probe rescues: a node that retains exactly the tip.
 
 ---
 
@@ -451,9 +478,9 @@ and `/UnsupportedProbeIsIndistinguishableFromPrunedHistory`.
 
 **Status:** open. **Severity: low.** False alarm on the admin surface.
 
-`architecture/evm/evm_state_poller.go:1234` sets `diag.SkipSyncingCheck` from
-the operator's own config. Line `:1239` then folds that flag into
-`skipSyncingCheck`, and `:1248` emits *"syncing check disabled after consecutive
+`architecture/evm/evm_state_poller.go:1266` sets `diag.SkipSyncingCheck` from
+the operator's own config. Line `:1270` then folds that flag into
+`skipSyncingCheck`, and `:1279` emits *"syncing check disabled after consecutive
 failures (method may not be supported)"*.
 
 An operator who sets `skipSyncingCheck: true` on purpose reads a diagnostic
@@ -466,9 +493,14 @@ The latest and finalized equivalents are correct: they read the poller's own
 
 ## 22. Dead branches in the EVM block-number path
 
-**Status:** open. **Severity: none.** Unexercised machinery.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+none.** Both dead branches are gone. `BuildGetBlockByNumberRequest` now converts
+a `float64` block height to hex itself, and rejects a fraction, a negative
+height and a value past 2^53. The unreachable `low < 0` clamp in
+`binarySearchEarliest` was deleted. Pinned by
+`TestBuildGetBlockByNumberRequest/NormalizesAJsonDecodedNumberToHex`.
 
-- `architecture/evm/eth_getBlockByNumber.go:31` — `BuildGetBlockByNumberRequest`
+- `architecture/evm/eth_getBlockByNumber.go:32` — `BuildGetBlockByNumberRequest`
   lists `float64` in its type switch, but `common.NormalizeHex` does not handle
   `float64`, so that branch can only produce "invalid block number or tag".
   `float64` is exactly the type a JSON-decoded number arrives as, so the case
@@ -482,7 +514,15 @@ The latest and finalized equivalents are correct: they read the poller's own
 
 ## 23. A second load-triggered flaky test, in `architecture/evm`
 
-**Status:** open. Pre-existing; reproduced with all new test files removed.
+**Status: FIXED in the fork.** Upstream still carries it. The cause was in the
+poller, not the test. `SuggestFinalizedBlock` no longer takes
+`finalizedUpdateInProgress` on its common path — the mutex is deleted — so a
+suggestion that arrives while a background update runs is no longer dropped.
+Only a MAJOR forward jump goes to the background chain-identity check, and that
+path logs the one drop it can still make. Commit 47d863f made the change.
+`go test ./architecture/evm/ -run TestSuggestFinalizedBlock -count=15 -race`
+passes. Pinned by
+`TestSuggestFinalizedBlock_SmallAdvanceSurvivesAMajorJumpVerification`.
 
 `architecture/evm/evm_state_poller_suggest_gate_test.go:226` and `:240` each
 wait 2s on `SuggestFinalizedBlock`.
@@ -509,21 +549,22 @@ second flaky test found whose cause is a test racing a background poller.
 **Status:** open. **Severity: medium.** A caller believes it enumerated
 everything.
 
-`data/postgresql.go:1194`. The query at `:1241` asks for `limit+1` rows so it
-can detect a next page. The scan loop at `:1252` calls `rows.Next()` a
-`limit+1`-th time and breaks at `:1254` **without recording that row** — so the
-extra row is already consumed. The probe at `:1284` then calls `rows.Next()`
+`data/postgresql.go:1321`. The query at `:1368` asks for `limit+1` rows so it
+can detect a next page. The scan loop at `:1379` calls `rows.Next()` a
+`limit+1`-th time and breaks at `:1381` **without recording that row** — so the
+extra row is already consumed. The probe at `:1411` then calls `rows.Next()`
 again, which would need a `limit+2`-th row the query never fetched. It always
 returns false, and `nextToken` stays empty.
 
 Measured against a live container: 30 rows, `limit 1` returns 1 row and an empty
 token; `limit 5` returns 5 rows and an empty token.
 
-`erpc_admin_listApiKeys` (`erpc/admin.go:240`) on PostgreSQL therefore returns
+`erpc_listApiKeys` (`erpc/admin.go:270`) on PostgreSQL therefore returns
 at most one page and always reports "no more pages". A caller looping until the
 token is empty stops after one page believing it saw everything.
 
-Pinned by `TestPostgreSQLConnector_CRUD/List never issues a pagination token`.
+Pinned by `TestPostgreSQLConnector_CRUD/List never issues a pagination token
+(defect pinned)`.
 
 ---
 
@@ -553,7 +594,10 @@ Pinned by `TestDynamoDBConnector_WatchCounterNonPositivePollInterval`.
 **Status:** open. **Severity: medium.** The PostgreSQL goroutine leak is now
 pinned. The panic itself is not, and cannot be: a panic in a background
 goroutine kills the test binary, so a test that triggers it fails the whole
-package instead of recording anything.
+package instead of recording anything. The PostgreSQL watch teardown has since
+been restructured — `cleanup` now calls `releaseWatcher`, which closes the
+channel under `listener.mu` — but the fallback poller still sends outside that
+lock, so both the race and the leak survive.
 
 - **DynamoDB** (`data/dynamodb.go:757-759`): `cleanup` runs `close(done)` then
   `close(updates)`. The polling goroutine can be inside `getSimpleValue` — a
@@ -561,17 +605,18 @@ package instead of recording anything.
   `select { case updates <- st: default: }` at `:743-746`. **A send on a closed
   channel panics even inside a select with a default.** The agent confirmed
   that with a standalone program.
-- **PostgreSQL** (`data/postgresql.go:667-685`, `:692-707`): the same race, plus
+- **PostgreSQL** (`data/postgresql.go:672-690`, `:692-704`): the same race, plus
   a goroutine leak. The 30-second fallback poller exits only on `ctx.Done()`.
-  `cleanup` calls `ticker.Stop()` then `close(updates)` at `:706`; `Stop`
+  `cleanup` calls `ticker.Stop()` then `releaseWatcher`, which closes `updates`
+  at `:920`; `Stop`
   neither stops the goroutine nor drains a tick already delivered, so the poller
-  can wake after the close and send at `:677`. One goroutine leaks per watch
+  can wake after the close and send at `:682`. One goroutine leaks per watch
   stopped without cancelling its context.
 
 Cancelling a shared-state watch — an upstream removed, a config reload, a
 network torn down — can therefore crash the process.
 
-The LISTEN broadcast path at `:909-916` is safe: `cleanup` removes the watcher
+The LISTEN broadcast path at `:1016-1023` is safe: `cleanup` removes the watcher
 under `listener.mu` before closing.
 
 The PostgreSQL goroutine leak is pinned by
@@ -583,10 +628,13 @@ watches on one key, stops all 25, and asserts the goroutine count stays up by
 
 ## 27. Redis reverse-index TTL comparison is dead code
 
-**Status:** open. **Severity: none today.** Worth fixing so a future change can
-rely on it.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: none
+today.** The two sentinels are now named constants in the units go-redis really
+returns: `redisTTLKeyMissing = time.Duration(-2)` and `redisTTLNoExpiry =
+time.Duration(-1)` (`data/redis.go:31-32`). Both branches now run. Pinned by
+`TestRedisReverseIndexTTL_DetectsAnExpiredTarget`.
 
-`data/redis.go:409` and `:415` compare a TTL against `-2` and `-1` seconds.
+`data/redis.go:417` and `:423` compare a TTL against `-2` and `-1` seconds.
 
 go-redis v9.22.0's `DurationCmd.readReply` (`command.go:1630-1642`) returns
 `time.Duration(n)` for those sentinels — that is **−2 nanoseconds** and −1
@@ -600,10 +648,11 @@ reverse-index target, and a future change relying on it would silently not run.
 
 ## 28. An inverted condition drops the caller's request id over HTTP
 
-**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: high.**
-One character: `err != nil` became `err == nil` at `erpc/http_server.go:580`.
-Pinned by `TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp` and a
-batch case proving each entry gets its own id back.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** One character: `err != nil` became `err == nil` at
+`erpc/http_server.go:580`. Pinned by
+`TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp` and a batch case
+proving each entry gets its own id back.
 
 `erpc/http_server.go:580`:
 
@@ -621,7 +670,7 @@ parse. So `reqId` silently stays nil.
 
 This is the **only** site in the repository with the inverted test.
 `ws_server.go:362`, `ws_server.go:501` and `common/tracing_util.go:178` all use
-`err == nil`, and the adjacent admin block at `:650` uses `if jrr != nil`.
+`err == nil`, and the adjacent admin block at `:653` uses `if jrr != nil`.
 
 Any method blocked by `ignoreMethods` or `allowMethods` therefore answers
 `{"jsonrpc":"2.0","id":null,"error":{…}}` over HTTP. Every JSON-RPC client pairs
@@ -636,7 +685,7 @@ The same project config behaves differently over HTTP and over WebSocket.
 
 **Status:** open. **Severity: medium.**
 
-`erpc/http_server.go:412` with `:1876`. `util.ReadAll` fails on a truncated body
+`erpc/http_server.go:412` with `:1881`. `util.ReadAll` fails on a truncated body
 — a gzip stream that ends early, for instance. The raw error reaches
 `handleErrorResponse`, matches none of its error-code cases, and falls through
 to the default `http.StatusOK` with a `-32603` server-fault body.
@@ -655,7 +704,7 @@ retries on server faults retries an upload that can never succeed.
 
 **Status:** open. **Severity: medium.** Every client collapses into one bucket.
 
-`erpc/http_server.go:2386` defines `parseForwardedFor`, which parses the
+`erpc/http_server.go:2391` defines `parseForwardedFor`, which parses the
 standardised `Forwarded` header. **Nothing calls it.**
 
 `resolveRealClientIP` at `:2329` parses every configured `trustedIPHeaders`
@@ -727,16 +776,22 @@ One line per handler fixes it.
 
 ## 34. Small, low-severity, easy
 
+**Status:** open. All five parts are still present, and they agree. The
+refusal paths still pass the nil outer `err`, the marshal call still shadows
+it, the typo still ships, the guard still contradicts the next line, and
+`writeMessage` still has no production caller. Only the last part moved: a
+test now calls it, so it is dead in production but no longer unexercised.
+
 - `erpc/http_server.go:689` and `:724` — refusal paths call
   `common.EndRequestSpan(requestCtx, nil, err)` where the outer `err` is nil, so
   "admin is not enabled" and "architecture and chain must be provided" record as
   **successful** spans. Span-error-rate dashboards under-report them.
-- `erpc/http_server.go:866-869` — `msg, err := common.SonicCfg.Marshal(err.Error())`
+- `erpc/http_server.go:871-873` — `msg, err := common.SonicCfg.Marshal(err.Error())`
   shadows the error parameter, so the retry on the next line marshals the
   *marshal* error rather than the original failure. Theoretical, since
   marshalling a Go string essentially cannot fail, but the shadowing hides it.
 - `erpc/http_server.go:722` — user-facing typo, `"configureed via domain aliasing"`.
-- `erpc/ws_server.go:572` — `writeMessage` is dead code.
+- `erpc/ws_server.go:581` — `writeMessage` is dead code.
 - `erpc/grpc_server.go:72` guards `if cfg != nil`, then `:103-104` and `:148`
   dereference the same config unconditionally. Unreachable after `SetDefaults`,
   but the guard states an invariant the next line breaks.
@@ -745,11 +800,12 @@ One line per handler fixes it.
 
 ## 35. `HasErrorCode` does not follow a single `Unwrap() error`
 
-**Status: FIXED IN FORK.** Upstream still needs it. **Severity was: medium.**
-Found independently by two agents, and the fix repaired a third consumer
-nobody was looking at — see below. **Severity was understated.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Found independently by two agents, and the fix repaired a third
+consumer nobody was looking at — see below. **Severity was understated.** Pinned
+by `TestHasErrorCode_FollowsAPlainWrapChain`.
 
-`common/errors.go:2543-2569` handles `StandardError`, `*BaseError` and
+`common/errors.go:2597-2633` handles `StandardError`, `*BaseError` and
 `Unwrap() []error` — but not the `Unwrap() error` that `fmt.Errorf("%w", …)`
 produces.
 
@@ -822,8 +878,13 @@ from.
 
 ## 38. Inverted numeric ranges make error classification dead code
 
-**Status:** open. **Severity: high for Alchemy.** eRPC retries failures that
-cannot succeed.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high for Alchemy.** Both bound pairs now run the right way round, so the
+branches match integers again. The body below describes the pre-fix
+expressions. Pinned by
+`TestAlchemyVendor_ApplicationDefinedBands_AreClientSideAndStopAtTheNetwork`
+and
+`TestConduitVendor_GetVendorSpecificErrorIfAny_TheServerErrorBandIsServerSide`.
 
 Two vendors compare an error code against a range whose bounds are the wrong way
 round, so **no integer can satisfy the condition**. Verified by evaluating the
@@ -889,9 +950,11 @@ it claims to standardise is worse than no helper.
 
 ## 41. Two vendors panic on a config the others reject politely
 
-**Status:** open. **Severity: medium.** Bootstrap crash instead of a config error.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Bootstrap crash instead of a config error. Pinned by
+`TestInfuraAndLlama_GenerateConfigs_AMissingEvmBlockIsAConfigError`.
 
-`thirdparty/infura.go:81` and `thirdparty/llama.go:54` read
+`thirdparty/infura.go:84` and `thirdparty/llama.go:57` read
 `upstream.Evm.ChainId` with no nil check.
 
 Ankr, BlastAPI, BlockPi and Conduit all guard first and return
@@ -900,24 +963,31 @@ Ankr, BlastAPI, BlockPi and Conduit all guard first and return
 So an operator who configures an Infura or Llama provider without an `evm` block
 gets a panic at bootstrap rather than a message naming the missing field.
 
-Pinned by `TestInfuraAndLlama_GenerateConfigs_PanicOnAMissingEvmBlock`, which
-fails loudly once the guard is added.
+`TestInfuraAndLlama_GenerateConfigs_AMissingEvmBlockIsAConfigError` requires
+each vendor to name the missing field instead of panicking.
 
 ---
 
 ## 42. Three smaller `thirdparty` defects
 
-**Status:** open. **Severity: low.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** All three defects are repaired. `fetchChainIDs` returns nothing, so
+no caller guards a dead error and every probe failure reaches the logger.
+`fetchNodes` closes each page body before it requests the next page. The
+QuickNode normaliser keeps the caller's `details`. Pinned by
+`TestFetchChainIDs_ReportsEveryFailureOnItsOwnLogger`,
+`TestChainstackFetchNodes_ReleasesEachPageBeforeTheNextRequest` and
+`TestQuicknodeVendor_GetVendorSpecificErrorIfAny_CarriesTheCallersDetails`.
 
-- **`thirdparty/chainstack.go:314` and `thirdparty/quicknode.go:466`** —
+- **`thirdparty/chainstack.go:331` and `thirdparty/quicknode.go:474`** —
   `fetchChainIDs` collects per-node errors, logs them, then always returns
-  `nil`. The callers at `chainstack.go:117` and `quicknode.go:373` guard with
+  `nil`. The callers at `chainstack.go:121` and `quicknode.go:380` guard with
   `if err != nil { logger.Warn()… }`, so that warning is dead. Nodes silently
   keep chain ID 0 and drop out of routing with no signal at the caller.
-- **`thirdparty/chainstack.go:232`** — `defer resp.Body.Close()` sits inside the
+- **`thirdparty/chainstack.go:281`** — `defer resp.Body.Close()` sits inside the
   pagination loop, so every page's body stays open until `fetchNodes` returns.
   On a large account that holds one connection per page for the whole walk.
-- **`thirdparty/quicknode.go:569`** — the normaliser shadows its own `details`
+- **`thirdparty/quicknode.go:566`** — the normaliser shadows its own `details`
   parameter with `var details map[string]interface{} = make(...)`. The caller at
   `architecture/evm/error_normalizer.go:22` fills `details` with `statusCode`
   and the response headers, and none of it reaches a QuickNode error. QuickNode
@@ -927,15 +997,16 @@ fails loudly once the guard is added.
 
 ## 43. The missing-`evm` panic is six more vendors, not two
 
-**Status:** fixed-in-fork. **Severity: medium.** Bootstrap crash instead of a
-config error.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Bootstrap crash instead of a config error. Pinned by
+`TestSixVendors_GenerateConfigs_AMissingEvmBlockIsAConfigError`.
 
 Entry 41 named Infura and Llama. A sweep of every `upstream.Evm` dereference in
 `thirdparty/` finds six more `GenerateConfigs` that read `upstream.Evm.ChainId`
 with no nil check, against eighteen that guard first:
 
 - `thirdparty/envio.go:223`
-- `thirdparty/erpc.go:116` and `thirdparty/erpc.go:134`
+- `thirdparty/erpc.go:114` and `thirdparty/erpc.go:139`
 - `thirdparty/etherspot.go:97`
 - `thirdparty/pimlico.go:176`
 - `thirdparty/routemesh.go:116`
@@ -943,7 +1014,7 @@ with no nil check, against eighteen that guard first:
 
 An operator who configures any of these six without an `evm` block crashes the
 process at bootstrap instead of reading which field is missing. eRPC's own
-vendor is the worst of the six: `erpc.go:116` sits on the preset-endpoint path,
+vendor is the worst of the six: `erpc.go:114` sits on the preset-endpoint path,
 which is the normal way to configure it.
 
 **The fix does not copy the same nil check into six more vendors.** Every
@@ -959,7 +1030,7 @@ the fix deletes the nil case instead of branching on it.
   same message.
 - `common.GenerateVendorConfigs` wraps the call and converts a panic into an
   error naming the vendor. Both call sites use it —
-  `thirdparty/provider.go:59` and `upstream/upstream.go:275` — so the ninth
+  `thirdparty/provider.go:59` and `upstream/upstream.go:285` — so the ninth
   vendor, the one nobody has written yet, reports a config error instead of
   killing the process at bootstrap. It reads `Vendor.Name()` inside the
   guarded scope, so a vendor that panics there is covered too.
@@ -981,7 +1052,8 @@ See entry 82 for what it takes to reach the panic from a config file.
 
 ## 44. Etherspot builds an endpoint with no host for an unknown chain
 
-**Status:** open. **Severity: medium.** A silent bad upstream, not a config error.
+**Status:** open. **Severity: medium.** A silent bad upstream, not a config
+error.
 
 `thirdparty/etherspot.go:126`. `generateUrl` declares `var etherspotURL string`
 and fills it only inside two `if` arms — one for a mainnet, one for a testnet. A
@@ -1078,8 +1150,10 @@ result. That removes the shared variables and makes the timeout the winner
 when it fires.
 ## 47. A PostgreSQL listener connection is never released
 
-**Status:** fixed-in-fork. **Severity: high.** Shared-state watches stop
-working once the process has watched `maxConns` distinct counter keys.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Shared-state watches stop working once the process has watched
+`maxConns` distinct counter keys. Pinned by
+`TestPostgreSQLConnector_WatchCounterInt64_ReleasesTheListenerConnection`.
 
 `getOrCreateListener` (`data/postgresql.go:872`) takes one connection out of
 the listener pool per watched key — `connectListener` at `:880`, which calls
@@ -1142,7 +1216,7 @@ fixed.
 
 **Status:** open. **Severity: medium.** The client's call never resolves.
 
-`erpc/ws_server.go:583` — `writeNormalizedResponse` opens a frame with
+`erpc/ws_server.go:592` — `writeNormalizedResponse` opens a frame with
 `NextWriter`, streams the response into it, and closes the frame. When
 `resp.WriteTo(w)` fails, eRPC logs at Debug and closes the frame anyway, so
 gorilla ships a complete text message with a zero-length payload.
@@ -1150,7 +1224,7 @@ gorilla ships a complete text message with a zero-length payload.
 The client reads a message that is not JSON and carries no `id`. It cannot
 match it to a call and it cannot report an error, so the call waits for the
 client's own timeout. The HTTP path answers the same failure with a JSON-RPC
-error envelope (`erpc/http_server.go:1913` hands over to `writeFatalError`).
+error envelope (`erpc/http_server.go:1921` hands over to `writeFatalError`).
 
 Fix: on error, abandon the frame instead of closing it, or replace it with a
 JSON-RPC error carrying the request id.
@@ -1164,7 +1238,7 @@ which records the empty payload as the current behaviour.
 
 **Status:** open. **Severity: medium.** No client signal, no server signal.
 
-`erpc/ws_server.go:641-644`:
+`erpc/ws_server.go:651-653`:
 
 ```go
 bw := NewBatchResponseWriter(responses)
@@ -1188,9 +1262,12 @@ which confirms eRPC stops writing but records nothing.
 
 ## 50. The "request premature context error" branch cannot run
 
-**Status:** open. **Severity: low.** An operator loses the log line.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** The unreachable inner block is gone: the handler reads
+`context.Cause` unconditionally and logs the reason the request ended.
+Pinned by `TestRequestHandler_ReportsWhyTheRequestContextEnded`.
 
-`erpc/http_server.go:770-780`:
+`erpc/http_server.go:770-791`:
 
 ```go
 if err := httpCtx.Err(); err != nil {
@@ -1215,7 +1292,8 @@ operator debugging "the client received nothing" has nothing to find; and
 `writeFatalError` never fires on this path. The response-release loop around it
 does run and is correct.
 
-Fix: read the cause unconditionally and log it, or delete the inner block.
+The fix reads the cause unconditionally and logs it at Debug, and the
+unreachable inner block is gone.
 
 Pinned by `TestRequestHandler_WritesNothingWhenTheRequestContextIsAlreadyDone`,
 which covers the reachable half — eRPC releases the responses and writes
@@ -1227,7 +1305,7 @@ nothing.
 
 **Status:** open. **Severity: none.** Unexercised machinery.
 
-`erpc/ws_server.go:564`, `:598` and `:631` each guard
+`erpc/ws_server.go:573`, `:607` and `:640` each guard
 `wsc.conn.SetWriteDeadline(...)` and give up on an error. gorilla's
 `Conn.SetWriteDeadline` (v1.5.3, `conn.go`) stores the deadline and returns
 `nil` unconditionally; it never touches the socket. All three branches are dead.
@@ -1238,13 +1316,16 @@ The deadline itself is load-bearing and correct — only the error check is dead
 
 ## 52. Two smaller write-path defects
 
-**Status:** open. **Severity: low.**
+**Status:** open. **Severity: low.** The first bullet is FIXED in the fork,
+pinned by `TestBatchResponseWriter_ReportsAnEntryThatWroteNothing`. The
+second bullet is still open.
 
-- `erpc/http_batch_resp.go:71` — `fmt.Errorf("no bytes written for response %d
-  error: %w", i, err)` is reached only when `err == nil`, because the line above
-  returns on a non-nil `err`. Every message this produces ends in
-  `%!w(<nil>)`, and the error it wraps is always nothing.
-- `erpc/http_server.go:1909` and `:796`, both with `:864` — when a body fails
+- `erpc/http_batch_resp.go:74` — FIXED. The message read
+  `fmt.Errorf("no bytes written for response %d error: %w", i, err)` and was
+  reached only when `err == nil`, so every message ended in `%!w(<nil>)`. The
+  fork drops the `%w` and names the entry type instead. Pinned by
+  `TestBatchResponseWriter_ReportsAnEntryThatWroteNothing`.
+- `erpc/http_server.go:1911` and `:798`, both with `:869` — when a body fails
   part-way through, `writeFatalError` calls `w.WriteHeader` a second time
   (net/http logs "superfluous response.WriteHeader call") and appends a second
   JSON document after the partial first one. With a dead socket nothing
@@ -1254,14 +1335,14 @@ The deadline itself is load-bearing and correct — only the error check is dead
 
 ## 53. The legacy upstream `failsafe:` object drops every key added since
 
-**Status:** pinned. **Severity: medium.**
-`TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys`
+**Status:** open. **Severity: medium.** A test asserts today's broken
+behaviour: `TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys`
 (`common/config_backcompat_unmarshal_test.go`).
 
-`UpstreamConfig.UnmarshalYAML` (`common/config.go:1096`) decodes into a shadow
+`UpstreamConfig.UnmarshalYAML` (`common/config.go:1220`) decodes into a shadow
 struct. When that decode fails — which a legacy single-object `failsafe:`
-always causes — it falls back to `oldShadow` (`common/config.go:1123`) and
-copies field by field (`common/config.go:1150`).
+always causes — it falls back to `oldShadow` (`common/config.go:1247`) and
+copies field by field (`common/config.go:1274`).
 
 `oldShadow` has not grown with `UpstreamConfig`. It lacks
 `rateLimitCountMode` and `creditUnits`, so both are silently discarded for any
@@ -1272,8 +1353,8 @@ counting instead. No warning, no error — their budget simply drains at the
 wrong rate. Every upstream key added after the fallback was written inherits
 the same fate.
 
-`NetworkDefaults.UnmarshalYAML` (`common/config.go:776`) and
-`NetworkConfig.UnmarshalYAML` (`common/config.go:2372`) have the same
+`NetworkDefaults.UnmarshalYAML` (`common/config.go:900`) and
+`NetworkConfig.UnmarshalYAML` (`common/config.go:2501`) have the same
 hand-listed fallback but escape the bug by accident: they decode into the
 RECEIVER, so the failed strict pass leaves the newer keys populated and the
 legacy pass only overwrites what it names. Fix the upstream path the same way,
@@ -1281,7 +1362,7 @@ or the two shapes keep diverging.
 
 ## 54. Two agent-name branches are shadowed and can never run
 
-**Status:** pinned. **Severity: low.**
+**Status:** open. **Severity: low.** A test asserts today's broken behaviour:
 `TestSimplifyAgentName_EarlierBranchesShadowQuicknodeAndEdge`
 (`common/request_http_context_test.go`).
 
@@ -1319,15 +1400,17 @@ leaf validators something to reject, or drop the `error` return.
 
 ## 57. The BDS pool leaks a connection when Shutdown races its maintainer
 
-**Status:** fixed-in-fork. **Severity: medium.** One leaked socket per race.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** One leaked socket per race. Pinned by
+`TestPoolShutdown_JoinsTheMaintainer`.
 
-`clients/grpc_bds_resilience.go:497` closed `stopCh` and then walked the
+`clients/grpc_bds_resilience.go:510` closed `stopCh` and then walked the
 connection slots. It never waited for the maintainer goroutine it started at
-`:204`.
+`:210`.
 
 The maintainer wakes every `bdsMaintainInterval`, and a tick already in flight
-dials a replacement (`recycleConn`, `:290`) and swaps it into a slot
-(`swapInReplacement`, `:330`). Both steps run after `Shutdown` has read the
+dials a replacement (`recycleConn`, `:297`) and swaps it into a slot
+(`swapInReplacement`, `:337`). Both steps run after `Shutdown` has read the
 slot it is about to overwrite. So a replacement installed after the walk is
 never closed, and its socket lives for the process lifetime.
 
@@ -1387,7 +1470,7 @@ error check.
 
 ## 59. Three vendors probe the wrong endpoint when one vendor serves two providers
 
-**Status:** pinned. **Severity: medium.** A wrong supported/unsupported verdict
+**Status:** open. **Severity: medium.** A wrong supported/unsupported verdict
 at bootstrap, from config alone.
 
 Six vendors answer `SupportsNetwork` by sending `eth_chainId` to the endpoint
@@ -1396,15 +1479,15 @@ key that map on the URL and the chain; three key it on the chain alone:
 
 | vendor | cache key | site |
 | --- | --- | --- |
-| erpc | url + chain | `thirdparty/erpc.go:251` |
+| erpc | url + chain | `thirdparty/erpc.go:261` |
 | goldsky | url + chain | `thirdparty/goldsky.go:257` |
 | routemesh | url + chain | `thirdparty/routemesh.go:153` |
 | **envio** | **chain only** | `thirdparty/envio.go:265`, `:277` |
 | **pimlico** | **chain only** | `thirdparty/pimlico.go:239`, `:251` |
-| **thirdweb** | **chain only** | `thirdparty/thirdweb.go:136`, `:148` |
+| **thirdweb** | **chain only** | `thirdparty/thirdweb.go:140`, `:152` |
 
 `ProvidersRegistry` hands every provider the SAME vendor instance
-(`thirdparty/providers_registry.go:22` calls `vendorReg.LookupByName`), so two
+(`thirdparty/providers_registry.go:23` calls `vendorReg.LookupByName`), so two
 providers of one vendor share one cache. And all three of the chain-keyed
 vendors build their URL from per-provider settings: envio from `rootDomain`,
 pimlico from `apiKey`, thirdweb from `clientId`.
@@ -1443,12 +1526,12 @@ which asserts today's split and fails once the three converge.
 **Status:** open. **Severity: low.** Dead work that reads as a feature.
 
 `thirdparty/ankr.go:125`, `blastapi.go:160`, `chainstack.go:423`,
-`erpc.go:145`, `goldsky.go:165`, `onfinality.go:102` and `tenderly.go:140`
+`erpc.go:155`, `goldsky.go:165`, `onfinality.go:102` and `tenderly.go:140`
 share one `GetVendorSpecificErrorIfAny` body: copy `jrr.Error.Data` into
 `details["data"]`, then return `nil`.
 
 Their only caller is `architecture/evm/error_normalizer.go:29`. Returning `nil`
-means control falls through to `:42-60`, which writes `details["data"]` from the
+means control falls through to `:43-64`, which writes `details["data"]` from the
 same `err.Data` on every branch of its type switch — the string branch after
 stripping a `"Reverted "` prefix, the default branch verbatim. So the vendor's
 write is always overwritten with the same value or a better one.
@@ -1463,14 +1546,14 @@ the line is deleted, which is the outcome we want.
 
 Not a bug, recorded so it is not "fixed" by mistake: the same seven bodies read
 `bodyMap.Error` with no nil check. The caller guards `jr != nil && jr.Error !=
-nil` at `error_normalizer.go:26` before it calls, so the dereference cannot
+nil` at `error_normalizer.go:27` before it calls, so the dereference cannot
 fire from the only path that reaches it.
 
 ---
 
 ## 61. Two smaller `thirdparty` divergences
 
-**Status:** pinned. **Severity: low.**
+**Status:** open. **Severity: low.**
 
 - **`thirdparty/dwellir.go:111-115`** — `SupportsNetwork` catches the chain-ID
   parse error and returns `(false, nil)`. Eleven sibling vendors — ankr,
@@ -1494,7 +1577,7 @@ fire from the only path that reaches it.
 
 ## 56. A task started after shutdown wedges its whole Initializer
 
-**Status:** pinned. **Severity: high.** A hung shutdown and a hung request path.
+**Status:** open. **Severity: high.** A hung shutdown and a hung request path.
 
 `util/initializer.go:298` runs every schedulable task under one
 `sync.WaitGroup`, and waits for all of them to *start* at `:397`. Each launched
@@ -1539,16 +1622,18 @@ only the reason is lost. Pinned by
 
 ## 62. `SuggestFinalizedBlock` drops a suggestion under contention; the latest twin does not
 
-**Status:** FIXED. **Severity: medium.** Raised from "low in production" —
-see the second reproduction below.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Raised from "low in production" — see the second reproduction
+below. Pinned by `TestSuggestFinalizedBlock_SmallAdvanceAppliesInline` and
+`TestSuggestFinalizedBlock_SmallAdvanceSurvivesAMajorJumpVerification`.
 
-`architecture/evm/evm_state_poller.go:825` — `SuggestFinalizedBlock` takes
+`architecture/evm/evm_state_poller.go:824` — `SuggestFinalizedBlock` takes
 `finalizedUpdateInProgress` with `TryLock` and RETURNS when the lock is held.
 The suggestion is discarded, not queued. Nothing re-issues it, so the finalized
 head stays where it was until the next successful poll — which the debounce can
 push a full interval away.
 
-`SuggestLatestBlock` at `:533` does not behave this way. It applies a small
+`SuggestLatestBlock` at `:532` does not behave this way. It applies a small
 advance inline and synchronously, and defers to a goroutine only for a MAJOR
 forward jump. Two counters written from the same request path therefore have
 different delivery guarantees, and only one of them is documented as
@@ -1569,7 +1654,7 @@ delayed.
 
 **Second reproduction, and why the severity rose.**
 `TestSuggestFinalizedBlock_MajorJumpMatchingApplies`
-(`architecture/evm/evm_state_poller_suggest_gate_test.go:226`) fails under
+(`architecture/evm/evm_state_poller_suggest_gate_test.go:218`) fails under
 `go test -race` with "Condition never satisfied". The race detector reports no
 data race — it only slows the process down, which widens the window until the
 drop is reliable. On this machine the unfixed code failed 2 of 20 `-race` runs
@@ -1613,17 +1698,17 @@ deterministic and needs no race detector.
 
 ## 63. A TypeScript config with no exports panics instead of explaining itself
 
-**Status:** pinned. **Severity: medium.**
-`TestLoadConfig_TypeScriptWithNoExportsPanics`
-(`common/config_load_errors_test.go`).
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Pinned by `TestLoadConfig_TypeScriptWithNoExportsExplainsItself`
+(`common/config_ts_exports_test.go`).
 
-`loadConfigFromTypescript` (`common/config.go:3254`) calls
-`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:55`)
+`loadConfigFromTypescript` (`common/config.go:3355`) calls
+`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:58`)
 is `r.vm.GlobalObject().Get("exports").ToObject(r.vm)`. When the compiled
 module declares no exports at all, that global is JS `null`, and sobek's
 `ToObject` raises a TypeError that unwinds out of the Go call as a panic.
 
-The very next statement (`common/config.go:3255`) exists to catch exactly this
+The very next statement (`common/config.go:3390`) exists to catch exactly this
 mistake: it returns "config object must be default exported from TypeScript
 code AND must be the last statement in the file". It never runs for the
 no-export case, so the operator who forgot `export default` gets a Go stack
@@ -1635,17 +1720,17 @@ error, because those leave a real `exports` object behind. The difference is
 invisible from the config file, which is what makes the panic surprising.
 
 One guard in `Runtime.Exports` — return nil when the value is null or
-undefined — fixes it, and the existing check at `:3255` then handles the rest.
+undefined — fixes it, and the existing check at `:3390` then handles the rest.
 
 ## 64. A mistyped current-schema key is reported against the legacy shadow
 
-**Status:** pinned. **Severity: medium.**
+**Status:** open. **Severity: medium.** Both pinning tests still pass.
 `TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow` and
 `TestNetworkConfig_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow`
 (`common/config_unmarshal_gaps_test.go`).
 
-`NetworkDefaults.UnmarshalYAML` (`common/config.go:776`) and
-`NetworkConfig.UnmarshalYAML` (`common/config.go:2372`) decode the node into
+`NetworkDefaults.UnmarshalYAML` (`common/config.go:900`) and
+`NetworkConfig.UnmarshalYAML` (`common/config.go:2501`) decode the node into
 the current schema, and on failure decode the SAME node into a hand-listed
 legacy shadow struct. The shadow is a subset: it has no `multiplexing` and no
 `failover`.
@@ -1668,7 +1753,7 @@ an unexported struct declared inside the function body, which appears in no
 documentation and in no config they can edit.
 
 The real error — `cannot unmarshal !!str into bool` — is what
-`return originalErr` (`common/config.go:812` and `:2411`) intends to deliver.
+`return originalErr` (`common/config.go:936` and `:2541`) intends to deliver.
 It does not arrive: the legacy attempt's unknown-field complaint is recorded
 against the decoder and surfaces from the outer `Decode` instead. A key that
 BOTH shapes declare (`rateLimitBudget`) reports correctly, which is why this
@@ -1681,11 +1766,11 @@ different symptom.
 
 ## 65. A rate-limit rule logs nanoseconds under a key that says milliseconds
 
-**Status:** pinned. **Severity: low.**
+**Status:** open. **Severity: low.**
 `TestRateLimitRuleConfig_MarshalZerologObject`
 (`common/config_unmarshal_gaps_test.go`).
 
-`RateLimitRuleConfig.MarshalZerologObject` (`common/config.go:3105`) writes
+`RateLimitRuleConfig.MarshalZerologObject` (`common/config.go:3230`) writes
 `Str("waitTimeMs", fmt.Sprintf("%d", c.WaitTime))`. `WaitTime` is a
 `common.Duration` (`common/duration.go:8`), which is `time.Duration` — a
 nanosecond count. `%d` prints that count verbatim.
@@ -1702,8 +1787,9 @@ the same line already takes the `String()` route.
 
 ## 85. One stray dash in a YAML config kills eRPC at boot
 
-**Status:** fixed-in-fork (`common/config.go`). **Severity: high.** Bootstrap
-crash instead of a config error.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Bootstrap crash instead of a config error. Pinned by
+`TestLoadConfig_AnEmptyListItemNamesItselfInsteadOfPanicking`.
 
 An operator writes a list item and leaves it empty:
 
@@ -1720,7 +1806,7 @@ The whole eleven-byte input is `projects:\n-`.
 
 Every list of config objects carries the same defect, and so does one map. Each
 site below is a distinct nil receiver, all reached from `Config.SetDefaults`
-(`common/defaults.go:95`):
+(`common/defaults.go:49`):
 
 | container | panic site |
 | --- | --- |
@@ -1849,7 +1935,8 @@ cannot be determined, so that is what goes on the wire now. Pinned by
 
 ## 88. `go vet ./...` fails on a copied `sync.Map` in a test helper
 
-**Status:** open. **Severity: low.** The repo's own vet gate is red.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** `go vet ./...` now exits 0. No test pins this fix.
 
 ```
 $ go vet ./...
@@ -1948,7 +2035,7 @@ unobservable. They are not bugs, and a test cannot pin them.
 
 ## 72. A static method is refused as a missing historical block
 
-**Status:** pinned. **Severity: high.** Every `eth_chainId` and `net_version`
+**Status:** open. **Severity: high.** Every `eth_chainId` and `net_version`
 fails on any upstream that declares a lower availability bound.
 
 `architecture/evm/block_ref.go:356` gives block-agnostic, cache-forever methods
@@ -1962,7 +2049,7 @@ against the upstream's resolved lower bound and returns
 `ErrUpstreamBlockUnavailable{blockNumber: 1}` with `retryable=false`. The lower
 bound arrives from `evm.blockAvailability.lower` **or** from the much more
 common `maxAvailableRecentBlocks`, which resolves to `latest - N`
-(`upstream/upstream.go:1022-1029`) — so any non-archive node in the pool is
+(`upstream/upstream.go:1029-1038`) — so any non-archive node in the pool is
 affected.
 
 `erpc/networks.go:2940-2969` (`eligibleUpstreamIDsForBoundary`) reads the same
@@ -1984,7 +2071,7 @@ the block *reference* (`*`) rather than the number is enough.
 
 ## 73. The gRPC query surface ignores every `queryShim` limit
 
-**Status:** pinned. **Severity: medium.** A cost and blast-radius control that
+**Status:** open. **Severity: medium.** A cost and blast-radius control that
 covers only half the traffic.
 
 `upstreams[].evm.queryShim` carries `enabled`, `allowedMethods`,
@@ -2008,7 +2095,7 @@ calls to that upstream — all billed, all against its rate budget. Setting
 
 ## 74. `shimQueryTraces` drops the cursor when a page ends on genesis
 
-**Status:** pinned. **Severity: medium.** Silent short answer.
+**Status:** open. **Severity: medium.** Silent short answer.
 
 `erpc/query_shim.go:246`:
 
@@ -2052,7 +2139,7 @@ nothing outside the package can reach them either.
 causes the caller to emit a `network_retry_attempt_total{reason}` metric", but
 `runRetry` (`:281`) calls `shouldRetryWithReason` directly and never goes
 through the wrapper. The upstream-scope twin does use both — `upstreamExecutor`
-calls its own `Timeout()` (`upstream/upstream.go:980`) and `shouldRetry()`
+calls its own `Timeout()` (`upstream/upstream.go:990`) and `shouldRetry()`
 (`upstream/upstream_executor.go:201`) — so these four look like a copied
 surface that was never wired.
 
@@ -2064,11 +2151,13 @@ Delete them, or wire `runRetry` through `shouldRetry` so the comment is true.
 
 ## 80. A TypeScript config with no exports panics instead of explaining itself
 
-**Status:** fixed-in-fork. **Severity: medium.** Bootstrap crash instead of a
-config error. (Another branch logs the same defect as entry 59.)
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Bootstrap crash instead of a config error. (Another branch logs the
+same defect as entry 63.) Pinned by
+`TestLoadConfig_TypeScriptWithNoExportsExplainsItself`.
 
-`loadConfigFromTypescript` (`common/config.go:3254`) called
-`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:55`)
+`loadConfigFromTypescript` (`common/config.go:3355`) called
+`runtime.Exports().Get("default")`. `Runtime.Exports` (`common/runtime.go:58`)
 was `r.vm.GlobalObject().Get("exports").ToObject(r.vm)`. A compiled module that
 declares no exports leaves that global as JS `null`, and sobek's `ToObject`
 raises a `TypeError` that unwinds out of the Go call as a panic.
@@ -2099,12 +2188,14 @@ friendly error.
 
 ## 81. A shared PostgreSQL listener dies with its first watcher
 
-**Status:** fixed-in-fork. **Severity: high.** Silent: later watchers of the
-same key receive nothing and report nothing.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Silent: later watchers of the same key receive nothing and report
+nothing. Pinned by
+`TestPostgreSQLConnector_WatchCounterInt64_AListenerSurvivesItsFirstWatcher`.
 
 Found while fixing entry 47, and measured against a live container.
 
-`getOrCreateListener` (`data/postgresql.go:872`) ran the listener goroutine on
+`getOrCreateListener` (`data/postgresql.go:936`) ran the listener goroutine on
 the context of whichever watcher created it. That listener is shared by every
 watcher of the key. So the first watcher cancelling its context stopped the
 goroutine for all of them, and nothing removed the dead listener from
@@ -2127,7 +2218,11 @@ nothing for 20 seconds and the test fails.
 
 ## 82. The missing-`evm` panic needs more than an omitted `evm` block
 
-**Status:** recorded. A correction to entries 41 and 43, not a new defect.
+**Status:** not a bug — this entry corrects entries 41 and 43 rather than
+reporting a defect of its own, and the correction still holds.
+`UpstreamConfig.SetDefaults` still defaults an empty `type` to `evm` and still
+creates an empty `Evm` block for any evm-prefixed type, so a plain YAML config
+never reaches the panic.
 
 Entries 41 and 43 say an operator who omits the `evm` block crashes eRPC at
 bootstrap. The panic is real, but a plain YAML config does not reach it.
@@ -2154,8 +2249,9 @@ an operator hits.
 
 ## 83. `go vet ./...` fails at HEAD on a test helper
 
-**Status:** fixed-in-fork (`erpc/query_executor_test.go:339`). The fork's own
-code.
+**Status: FIXED in the fork.** Upstream still carries it. The fix is in the
+fork's own test helper (`erpc/query_executor_test.go:342`), and `go vet ./...`
+now exits 0 with no findings. No test pins this fix.
 
 `newTestUpstreamsRegistry` built a `*sync.Map`, stored one entry in it, then
 passed `*atomicMap` to `setUnexportedField`. Dereferencing the pointer copies
@@ -2173,13 +2269,19 @@ pass, and `go vet ./...` is clean.
 
 ## F1. The chain-family cordon latch is one-shot in both directions
 
-**Status: FIXED.** This was the fork's own code, so it is simply closed.
-Cordon is now level-triggered against the upstream's live state; uncordon
-stays edge-triggered on ownership, so a recovery lifts only a cordon the
-poller placed.
+**Status: FIXED in the fork.** This was the fork's own code, so upstream never
+carried it. Cordon is now level-triggered against the upstream's live state:
+`apply` asks `u.CordonedReason("*")` at
+`upstream/chain_family_bootstrap.go:285` instead of testing a latch. Uncordon
+stays edge-triggered on ownership through
+`cordonedByProbe.CompareAndSwap(true, false)` (`:272`), so a recovery lifts
+only a cordon the poller placed. Pinned by
+`TestChainProbePoller_ReCordonsAFailingNodeAfterSomethingUncordonsIt`.
 
-`upstream/chain_family_bootstrap.go:226` guards the cordon with
-`cordonedByProbe.CompareAndSwap(false, true)`.
+`upstream/chain_family_bootstrap.go:226` guarded the cordon with
+`cordonedByProbe.CompareAndSwap(false, true)`. That call is gone. The cordon now
+reads the upstream's live state at `:285`, and only the uncordon keeps a CAS
+(`:272`).
 
 The intent was to make the UNCORDON side idempotent, so the poller does not
 fight an operator. The cordon side inherited the same latch.
@@ -2203,7 +2305,11 @@ These are working patches, not just reports. Each is a candidate pull request.
 
 ## E. `HasErrorCode` now follows a plain `%w` chain
 
-**Status:** fixed-in-fork (`common/errors.go`).
+**Status: FIXED in the fork.** Upstream still carries it. `HasErrorCode`
+(`common/errors.go:2597`) now walks a plain `Unwrap() error` link (`:2628`), and
+the `StandardError` branch no longer returns early, so the walk continues past a
+plain link inside an eRPC cause chain. Pinned by
+`TestHasErrorCode_FollowsAPlainWrapChain`.
 
 Two hunks, twelve lines. The new branch handles a plain `fmt.Errorf("%w", …)`
 wrapper at the top of the chain. Dropping an early `return` handles the same
@@ -2232,13 +2338,21 @@ method is one coherent follow-up rather than a piece to break off here.
 
 ## F. A blocked method echoes the caller's request id over HTTP
 
-**Status:** fixed-in-fork (`erpc/http_server.go:580`). One character.
+**Status: FIXED in the fork.** Upstream still carries it. One character:
+`erpc/http_server.go:580` now reads
+`if jrr, err := nq.JsonRpcRequest(); err == nil`. Pinned by
+`TestHttpServer_ABlockedMethodEchoesTheCallersIdOverHttp`.
 
 See log entry 28.
 
 ## A. Transport failures lose their cause identity
 
-**Status:** fixed-in-fork (`common/errors.go`, commit on `main`).
+**Status: FIXED in the fork.** Upstream still carries it.
+`NewErrEndpointTransportFailure` (`common/errors.go:2187`) wraps a
+non-`StandardError` cause in `redactedCauseError` (`:2177`). That type renders
+the redacted message from `Error()` and returns the untouched original from
+`Unwrap()`, so `errors.Is` reaches the sentinel again. Pinned by
+`TestErrEndpointTransportFailure_PreservesSentinelIdentity`.
 
 `NewErrEndpointTransportFailure` stripped the endpoint URL by building a new
 error with `errors.New`. That discarded the original object, so
@@ -2258,7 +2372,10 @@ assert redaction happened rather than assert a secret is absent.
 
 ## B. A `null` error member is read as a failure
 
-**Status:** fixed-in-fork (`common/json_rpc.go`, `common/json_rpc_null_error.go`).
+**Status: FIXED in the fork.** Upstream still carries it. Both parse sites
+(`common/json_rpc.go:167` and `:376`) now skip a `null` error member through
+`IsJsonNull` (`common/json_rpc_null_error.go:27`), and `ParseError` stays
+untouched. Pinned by `TestJsonRpcResponse_NullErrorMemberIsNotAnError`.
 
 JSON-RPC 1.0 requires both members on every response, so a success carries
 `"error": null`. eRPC's parser only asked whether the member was **present**.
@@ -2277,21 +2394,33 @@ where a bare `null` is malformed rather than a success.
 
 ## C. The circuit breaker wedges open on an ignored outcome
 
-**Status:** fixed-in-fork (`failsafe/breaker.go`).
+**Status: FIXED in the fork.** Upstream still carries it. `Breaker.Record`
+(`failsafe/breaker.go:187`) now decrements `halfOpenInflight` before it returns
+on `OutcomeIgnore`, so the trial permit is released without counting the outcome
+as a success or a failure. Pinned by
+`TestBreaker_HalfOpenPermitReleasedOnIgnoredOutcome`.
 
 The breaker returns early on `OutcomeIgnore` **without releasing the half-open
 trial permit**. The breaker then stays open until the process restarts.
 
 ## D. A batch entry can be forwarded to the wrong chain
 
-**Status:** fixed-in-fork (`erpc/http_server.go`).
+**Status: FIXED in the fork.** Upstream still carries it. The per-entry
+goroutine at `erpc/http_server.go:488` takes `architecture` and `chainId` as
+parameters instead of capturing them, so each batch entry resolves its own
+network. Pinned by `TestBatchRoutesEachEntryToItsOwnNetwork`.
 
 The per-batch-entry goroutine captured `architecture` and `chainId` by
 reference, so an entry could be routed to another entry's chain.
 
 ## 66. The state poller dereferences a nil response it just tested for
 
-**Status:** FIXED. `architecture/evm/evm_state_poller.go:1303` and `:1368`.
+**Status: FIXED in the fork.** Upstream still carries it. The split guards now
+stand at `architecture/evm/evm_state_poller.go:1337` (`fetchBlock`, which
+returns `(0, 0, nil)`) and `:1408` (`fetchSyncingState`, which returns an
+`ErrEvmStatePoller` error). Pinned by
+`TestFetchBlock_ANilAnswerReportsNoBlockInsteadOfPanicking` and
+`TestFetchSyncingState_ANilAnswerIsAnErrorNotANotSyncingClaim`.
 
 Both `fetchBlock` and `fetchSyncingState` do this:
 
@@ -2307,7 +2436,7 @@ if jrr == nil || jrr.Error != nil {
 (`common/response.go:315`), so `jrr` is nil exactly when `Forward` answered
 `(nil, nil)`. That pair is reachable: `Upstream.Forward` logs it by name —
 "upstream request ended with nil response and nil error"
-(`upstream/upstream.go:~803`) — and then returns `nrs, nil` with `nrs` nil,
+(`upstream/upstream.go:824`) — and then returns `nrs, nil` with `nrs` nil,
 which `failsafeExecutor.Run` passes straight through.
 
 The guard's own author meant to return the error member. Instead the poller
@@ -2316,7 +2445,7 @@ process dies. An operator sees eRPC exit with a SIGSEGV stack in
 `(*EvmStatePoller).fetchBlock` and no upstream named in the log.
 
 The same shape in the three availability probes
-(`evm_state_poller.go:1568`, `:1616`, `:1666`) is written safely — it returns
+(`evm_state_poller.go:1614`, `:1662`, `:1712`) is written safely — it returns
 `(false, false, nil)` — so the two poll helpers are the odd ones out.
 `TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported` pins the
 safe form.
@@ -2341,7 +2470,10 @@ produce a real SIGSEGV against the unfixed code.
 
 ## 67. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
 
-**Status:** upstream candidate, latent. `architecture/evm/json_rpc_cache.go:818`.
+**Status:** open. `architecture/evm/json_rpc_cache.go:818` still calls
+`rpcResp.GetResultBytes()` with no nil guard, while `shouldCacheResponse` still
+decides the same nil case explicitly. The two still disagree, and the only
+production caller still guards with `if resp != nil`.
 
 `shouldCacheResponse` documents and guards the nil case explicitly
 (`json_rpc_cache.go:1181-1189`: "both arguments can arrive nil together").
@@ -2350,15 +2482,16 @@ Its caller does not. With `resp == nil` and a policy whose empty behaviour is
 line runs `rpcResp.GetResultBytes()` on a nil `*JsonRpcResponse`.
 
 The only production caller guards with `if resp != nil`
-(`erpc/networks.go:2394`), so it cannot fire today — but that caller also
+(`erpc/networks.go:2395`), so it cannot fire today — but that caller also
 wraps the goroutine in a recover, which is what would keep the process alive
 if it ever did. Either the guard at 818 is missing or the guard inside
 `shouldCacheResponse` is unnecessary; the two disagree.
 
 ## 68. Four dead branches found while raising `architecture/evm` coverage
 
-**Status:** upstream candidates, all cosmetic-to-behaviour but each hides a
-guard that reads as active.
+**Status:** open. All four branches are still dead, and each still reads as an
+active guard. They stay upstream candidates: today's behaviour is correct, so
+the only cost is the false impression that a guard is live.
 
 1. **`json_rpc_cache.go:565-586`** — the `CacheEmptyBehaviorIgnore` arm of the
    post-fan-out emptiness switch cannot run. Every winner is filtered by the
@@ -2366,21 +2499,21 @@ guard that reads as active.
    (`jrr.IsResultEmptyish() && policy.EmptyState() == Ignore` reports a miss
    and returns), so no emptyish-under-ignore result ever reaches `:563`.
    Five statements of miss telemetry that never fire.
-2. **`evm_state_poller.go:365-367`** — the `else` arm of the syncing-failure
+2. **`evm_state_poller.go:364-366`** — the `else` arm of the syncing-failure
    handler. It runs only when the local `skip` is true, but `skip` is read at
-   `:324` and the function returns at `:335` whenever it is true. The
-   `if !skip` at `:360` is therefore always taken.
+   `:323` and the function returns at `:335` whenever it is true. The
+   `if !skip` at `:359` is therefore always taken.
 3. **`eth_getLogs.go:280-282`** — capping the split threshold by
    `getLogsMaxAllowedRange` can never change the outcome. The cap only applies
    when `threshold > maxRange`, and a split needs `requestRange > threshold`,
    which implies `requestRange > maxRange` — already rejected with an error at
    `:254`.
-4. **`eth_getLogs.go:224`** — `topicCount = 1` for a scalar `topics[0]` is
+4. **`eth_getLogs.go:225`** — `topicCount = 1` for a scalar `topics[0]` is
    unobservable. The only reader is `topicCount > maxTopics` with
    `maxTopics > 0`, so a count of one can never reject.
 
 Also confirmed unreachable, and correctly documented as such in the source:
-`evm_state_poller.go:1769` and `:1793` (`binarySearchEarliest`'s pass-through
+`evm_state_poller.go:1793`, `:1799`, `:1815` and `:1839` (`binarySearchEarliest`'s pass-through
 of a `checkProbe` error no probe implementation produces).
 
 ---
@@ -2411,9 +2544,14 @@ of a `checkProbe` error no probe implementation produces).
 
 ---
 
+# Found while raising coverage — real defects, not "not a bug" items
+
 ## 69. A consensus round can return neither a response nor an error
 
-**Status:** FIXED. **Severity: medium.** The caller got `(nil, nil)`.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** The caller got `(nil, nil)`. Pinned by
+`TestConsensus_PayloadFreeParticipantsDoNotProduceANilNilAnswer` and
+`TestRule_LowParticipantsAcceptMostCommonServesTheRealError`.
 
 `consensus/rules.go:740-742` — the "low participants + accept-most-common"
 rule returns the best error group's `FirstError`:
@@ -2424,7 +2562,7 @@ if bestError := a.getBestError(); bestError != nil {
 }
 ```
 
-`getBestError` (`consensus/analysis.go:315-332`) ranks **infrastructure-error**
+`getBestError` (`consensus/analysis.go:324-344`) ranks **infrastructure-error**
 groups alongside consensus-valid ones. An infrastructure-error group does not
 always carry an error. `classifyAndHashResponse` (`analysis.go:499-504`) files a
 participant whose `inner` returned `(nil, nil)` — no payload, no failure — as
@@ -2478,7 +2616,7 @@ correctly.
 
 ## 70. `BootstrapTask.Wait` busy-spins on a full core and ignores its context
 
-**Status:** pinned. **Severity: low.** Wasted CPU, and an uncancellable wait.
+**Status:** open. **Severity: low.** Wasted CPU, and an uncancellable wait.
 
 `util/initializer.go:111-117`:
 
@@ -2519,9 +2657,11 @@ Pinned by
 
 ## 71. `PostgreSQLConnector.List` can never hand out a next-page token (DUPLICATE of 24 — independently rediscovered, kept as corroboration)
 
-**Status:** pinned. **Severity: medium.** Silent truncation.
+**Status:** open. **Severity: medium.** Silent truncation. The duplicate claim
+holds: entry 24 reports the same unreachable `hasMore` probe in the same
+function.
 
-`data/postgresql.go:1241-1297`. The query asks for `limit+1` rows so the code
+`data/postgresql.go:1368-1426`. The query asks for `limit+1` rows so the code
 can tell whether another page exists. The scan loop then consumes that probe row
 itself:
 
@@ -2546,8 +2686,8 @@ if count == limit {
 
 `rows.Next()` advanced past the probe row before the `break`, so the second loop
 asks for row `limit+2`, which the `LIMIT` never fetched. `hasMore` is therefore
-always false and `nextToken` is always `""`. Statements `:1284-1286` and
-`:1289-1295` are unreachable.
+always false and `nextToken` is always `""`. Statements `:1411-1413` and
+`:1416-1422` are unreachable.
 
 A caller paging a cache index reads the first `limit` entries and is told the
 listing is complete. Everything past the first page is invisible, with no error
@@ -2567,7 +2707,9 @@ Pinned by
 
 ## H1. `GetNetworkUpstreams` returns aliased memory on one path and a copy on the other
 
-`upstream/registry.go:402-421`. The lock-free fast path returns the stored
+**Status:** open. The hazard is unchanged, and it is still only a hazard.
+
+`upstream/registry.go:412-439`. The lock-free fast path returns the stored
 slice itself:
 
     if v, ok := u.networkUpstreamsAtomic.Load(networkId); ok {
@@ -2602,7 +2744,9 @@ Solana mainnet-beta and Bitcoin mainnet at once. Full run:
 
 ## 90. `erpc/chain_families.go` says btc cannot serve, and btc serves
 
-**Status:** stale comment in the fork (`erpc/chain_families.go:22-27`).
+**Status:** open. The comment is still in the file, and it is now wrong twice
+over: entry 91 fixed `IsValidNetwork`, so the whole paragraph must go, not just
+its first two sentences (`erpc/chain_families.go:22-27`).
 
 The file's SCOPE note reads:
 
@@ -2612,7 +2756,7 @@ The file's SCOPE note reads:
 > no btc request is ever forwarded.
 
 That is no longer true. `detectFeatures` now ends in an `else` branch that calls
-`detectChainFamilyFeatures` (`upstream/upstream.go:1400`), which is the
+`detectChainFamilyFeatures` (`upstream/upstream.go:1410`), which is the
 registry-driven path. In the live run five btc upstreams bootstrapped and
 answered `getblockchaininfo`, `getblockhash` and `getblock` from real Bitcoin
 nodes.
@@ -2620,16 +2764,23 @@ nodes.
 The comment matters because it tells the next reader not to bother. Anyone
 adding a fourth family reads it and concludes the seam is unfinished.
 
-The second claim in the same paragraph — `common.IsValidNetwork` still knows
-only evm and svm — is still correct. See entry 91.
+The second claim in the same paragraph is now false too. It says
+`common.IsValidNetwork` (`common/validation.go`) still knows only evm and svm.
+Entry 91 fixed that function, and the function does not live in
+`common/validation.go` — it is `common/network.go:114`, and it asks the family
+registry. A reader concludes that a btc network cannot be named in a provider's
+`onlyNetworks` list, which is no longer true.
 
-**Fix:** delete the first two sentences. Keep the `IsValidNetwork` sentence
-until entry 91 is fixed.
+**Fix:** delete the whole paragraph. Both of its claims are stale.
 
 ## 91. `IsValidNetwork` enumerates two architectures, so a provider cannot name a third
 
-**Status: FIXED in the fork.** Inherited from upstream (`common/network.go:95`).
-Upstream still carries it.
+**Status: FIXED in the fork.** Upstream still carries it. Inherited from
+upstream, where the function sits at `common/network.go:95`; the fork's fixed
+version starts at `common/network.go:114`. Pinned by
+`TestIsValidNetwork_AsksTheRegistryNotAHardCodedList`,
+`TestIsValidNetwork_KeepsRejectingANonPositiveChainId` and
+`TestIsValidNetwork_AcceptsTheBuiltinFamilies`.
 
 The fix separates the two questions the function was conflating. The chain
 family owns the ID shape, so `IsValidNetwork` now asks the registry through
@@ -2692,7 +2843,9 @@ become the families' own methods, and no architecture name stays in this file.
 
 ## 92. A prober mirror is indistinguishable from client traffic in the upstream counters
 
-**Status:** open, fork code (`internal/policy/prober.go:414`).
+**Status:** open. Fork code (`internal/policy/prober.go:414`). The counter path
+still cannot carry the label: `Tracker.RecordUpstreamRequest`
+(`health/tracker.go:943`) takes no composite argument at all.
 
 One client `getblockhash` produced two upstream calls. The second went to
 `btc-onfinality`, which the selection policy had EXCLUDED for being in the
@@ -2730,7 +2883,9 @@ of in one histogram.
 
 ## 93. In-request failover never increments `erpc_network_retry_attempt_total`
 
-**Status:** open, inherited (`telemetry/metrics.go:681`).
+**Status:** open. Inherited (`telemetry/metrics.go:681`). The counter still has
+one increment site, `erpc/network_executor.go:312`, inside the network-scope
+retry loop, and no transport-driven rotation reaches it.
 
 I killed the upstream eRPC had chosen and drove 8 more requests. All 8 failed
 over to the second upstream inside the same client request:
@@ -2765,8 +2920,9 @@ retry.
 
 ## 94. `upstream="n/a"` is three different events, and only one is a cache hit
 
-**Status:** open, inherited. Semantics already pinned in
-`telemetry/metrics_semantics_test.go:53`.
+**Status:** open. Inherited. Semantics already pinned in
+`telemetry/metrics_semantics_test.go:53`. No `served_by` label exists yet, and
+`getSlot` still has no pre-forward short-circuit, so the open question stands.
 
 `upstream="n/a"` is widely read as "served from cache". In this run no cache
 existed — the config has no `database:` block — and three separate methods
@@ -2808,8 +2964,7 @@ should derive cache hit-rate from `upstream="n/a"`.
 
 ## 76. A released `NormalizedResponse` reads as `(nil, nil)`, exactly like a nil one
 
-**Status:** upstream candidate. **Severity: medium.** `common/response.go:309`
-and `:488`.
+**Status:** open. **Severity: medium.** `common/response.go:309` and `:488`.
 
 `NormalizedResponse.JsonRpcResponse` returns `(nil, nil)` for a nil receiver.
 It returns the same pair for a NON-nil receiver that has been released:
@@ -2844,8 +2999,7 @@ Found while fixing bugs 66 and 69, which are both consequences of this.
 
 ## 77. `(*executor).Run` still has one silent `(nil, nil)` route
 
-**Status:** upstream candidate, latent. **Severity: low.**
-`consensus/executor.go:163-166`.
+**Status:** open. **Severity: low.** `consensus/executor.go:164-166`.
 
     out := e.executeConsensus(...)
     if out == nil {
@@ -2871,8 +3025,8 @@ Found while fixing bug 69.
 
 ## 95. `NewUpstream` hands a vendor its logger, then overwrites it
 
-**Status: FIXED in the fork.** Upstream still carries it.
-**Severity: medium.** A data race in the bootstrap path.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** A data race in the bootstrap path. No test pins this fix.
 
 `upstream/upstream.go:275` passed `&lg` into `common.GenerateVendorConfigs`.
 A vendor may keep that pointer past the call: `AlchemyVendor.GenerateConfigs`
@@ -2896,9 +3050,9 @@ value another goroutine holds. The retro-fit itself stays — see 97.
 
 ## 96. Concurrent network bootstrap corrupts the shared selection policy
 
-**Status: FIXED in the fork.** Upstream still carries it.
-**Severity: high.** It affects the DEFAULT configuration of any project with
-more than one network.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** It affects the DEFAULT configuration of any project with more than
+one network. No test pins this fix.
 
 `internal/policy/default_policy.go` — `upgradeDefaultPolicy` rewrites three
 fields on the config it is given:
@@ -2908,7 +3062,7 @@ fields on the config it is given:
     cfg.CompiledProgram = program
 
 `Engine.RegisterNetwork` calls it BEFORE taking `e.mu`, so the write is
-unguarded. Networks bootstrap concurrently (`erpc/networks_registry.go:284`
+unguarded. Networks bootstrap concurrently (`erpc/networks_registry.go:300`
 -> `erpc/networks.go:259`), and every network that leaves `selectionPolicy`
 at the default arrives with the SAME `*SelectionPolicyConfig`. Two goroutines
 therefore write `CompiledProgram` at once. `go test -race` reports it as a
@@ -3105,7 +3259,10 @@ sketch can emit NaN, and so a future reader knows the real defence is at
 
 ## 108. `GetUpstreamMetrics` scopes results twice, and the guard that reads like the scope is the optimisation
 
-**Status:** open. Not a defect today. A hazard for the next edit.
+**Status:** not a bug — the `ups: ups` rebuild carries the scope, so no
+observable defect exists. The double scoping still stands in
+`GetUpstreamMetrics`, and the hazard for the next edit stands with it. No
+comment names `aggKey` as the guard yet.
 
 `health/tracker.go:1174-1183` filters the per-network key list by upstream id,
 then rebuilds the lookup key from the caller's own upstream:
@@ -3185,7 +3342,10 @@ seconds. Now an `atomic.Int64`.
 
 ## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
 
-**Status:** open. **Severity: medium.** Found by `go test ./util/ -race -count=2`.
+**Status:** open. **Severity: medium.** Found by `go test ./util/ -race
+-count=2`. Reconfirmed today: the leak still races, but it now needs more
+passes — two of six runs showed it, and `go test ./util/ -race -count=4 -run
+TestInitializer` reproduced the same stack at `util/initializer.go:379`.
 
 `util/initializer.go:506-512`:
 
@@ -3244,8 +3404,11 @@ test defect, not a product defect, and it is not what the detector flagged.
 
 ## 110. `/healthcheck` answers HTTP 200 when eRPC cannot serve at all
 
-**Status: FIXED in the fork** (`erpc/healthcheck.go`).
-**Severity: high.** A load balancer keeps a dead instance in rotation.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** A load balancer keeps a dead instance in rotation. `erpc/healthcheck.go`
+now writes 503 before both error bodies. Pinned by
+`TestHealthCheck_ReportsWhenNoProjectIsLoaded` and
+`TestHealthCheck_ReportsWhenErpcNeverInitialized`.
 
 Two branches of `handleHealthCheck` report failure through a plain
 `errors.New`:
@@ -3276,8 +3439,11 @@ the simple-mode failure in the same function already uses. Tests:
 
 ## 111. The genesis fork check silently drops a node that answers with no hash
 
-**Status: FIXED in the fork** (`erpc/config_analyzer.go`).
-**Severity: medium.** `erpc validate` reports a fork check that never ran.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** `erpc validate` reports a fork check that never ran.
+`erpc/config_analyzer.go` now warns in both loops when an upstream tried and
+produced no hash, and it names the reason. Pinned by
+`TestValidate_NamesTheOneUpstreamThatHidesGenesis`.
 
 `GenerateValidationReport` compares genesis hashes across a project's
 upstreams. It reported an upstream that produced no hash only when the fetch
@@ -3304,10 +3470,12 @@ fixed. Test: `TestValidate_NamesTheOneUpstreamThatHidesGenesis`.
 
 ## 112. `network_retry_attempt_total` cannot fire without a network retry policy
 
-**Status:** open, inherited. This is the mechanism behind 93, not a second bug.
+**Status:** open. Inherited. This is the mechanism behind 93, not a second bug.
+The emit site is still the only one, and the Help text in `telemetry/metrics.go`
+still does not say what the counter excludes.
 
 The counter is wired at exactly one site, `erpc/network_executor.go:312`,
-inside `executeWithRetries`. Two conditions gate it, and each one silences it
+inside `runRetry`. Two conditions gate it, and each one silences it
 on its own.
 
 First, the loop bound:
@@ -3337,8 +3505,10 @@ config with no `retry` key publishes a permanently empty series.
 
 ## 113. Chain-id verification counts upstreams it never checked
 
-**Status:** open, inherited (`erpc/healthcheck.go`, `checkEvmChainId`).
-**Severity: low.** It misreads as failures on a mixed-architecture project.
+**Status:** open. Inherited (`erpc/healthcheck.go`). **Severity: low.** It
+misreads as failures on a mixed-architecture project. `checkEvmChainId` still
+skips non-EVM upstreams and still divides by `len(upstreams)` in all three
+messages. No test covers a project with a skipped upstream.
 
 `checkEvmChainId` skips any upstream that is not EVM:
 
@@ -3362,7 +3532,11 @@ is already known at the top of the loop.
 
 ## 114. Two chain-id branches cannot run, and one map contract is unstated
 
-**Status:** open, inherited. Recorded as dead weight, not as a live fault.
+**Status:** open. Inherited. Recorded as dead weight, not as a live fault. Two
+of the three items hold. The first does not: `EvmGetChainId` returns
+`strconv.FormatUint(dec, 10)` of a uint64, so a node that reports a chain id at
+or above 2^63 makes `strconv.ParseInt(upChainId, 0, 64)` fail with a range
+error. That branch is rare, not dead.
 
 While covering the chain-identity paths I found three commitments that today's
 data does not support.
@@ -3373,10 +3547,11 @@ First, `checkEvmChainId` guards against an unparsable chain id:
     if err != nil { ... "invalid chain id format" ... }
 
 `EvmGetChainId` already normalises the wire value and returns
-`strconv.FormatUint(dec, 10)`. Its output is always a decimal string that
-`ParseInt` accepts, so the branch cannot run. `GenerateValidationReport`
-carries the same guard, and there it IS reachable: it parses into the platform
-int, so a chain id above 2^63-1 fails. Only the health-check copy is dead.
+`strconv.FormatUint(dec, 10)`. Its output is a decimal string, which `ParseInt`
+accepts for every chain id below 2^63. A node that reports a chain id at or
+above 2^63 makes `ParseInt(upChainId, 0, 64)` fail with a range error, so the
+branch is rare, not dead. `GenerateValidationReport` carries the same guard and
+fails at the same bound on a 64-bit build.
 
 Second, `GenerateValidationReport` warns on an empty chain-id answer:
 
@@ -3399,7 +3574,7 @@ call sites build the map from the same slice they pass, so nothing violates it
 today — but the function is package-level and the precondition is written
 nowhere.
 
-**Fix:** delete the two unreachable branches rather than test them, and either
+**Fix:** delete the unreachable empty-string branch rather than test it, and either
 build the detail map inside `checkEvmChainId` or skip an upstream that has no
 entry. All three are unforced commitments the caller's shape is currently
 paying for.
@@ -3407,7 +3582,10 @@ paying for.
 ## 100. A shadow test asserts an absolute value on a process-global counter
 
 **Status:** open. Found while adding `TestProjectForward_*` in
-`erpc/projects_shadow_forward_test.go`.
+`erpc/projects_shadow_forward_test.go`. Re-confirmed by probe, not by reading:
+running the two shadow tests with `-shuffle=2` puts the mismatch test first,
+and `erpc/shadow_test.go:215` then fails. The same pair with `-shuffle=1`
+passes, so the order alone decides it.
 
 `erpc/shadow_test.go:215` reads:
 
@@ -3435,7 +3613,8 @@ next author to trip over.
 ## 101. `resolveBlockTag` takes an `upper` argument it never reads
 
 **Status:** open. Found while covering the tag branches in
-`erpc/query_executor.go`.
+`erpc/query_executor.go`. `resolveBlockTag` still takes `upper` at
+`erpc/query_executor.go:318`, and its body still never reads it.
 
     func (qe *EvmQueryExecutor) resolveBlockTag(ctx context.Context, block string, upper bool) (uint64, error)
 
@@ -3455,7 +3634,12 @@ add it then, with a test.
 
 ## 115. `UpstreamConfig.Copy` is a partial deep copy
 
-**Status:** `fixed-in-fork` for the header map, `pinned` for the rest.
+**Status:** open. `Copy()` is still a partial deep copy: the seven fields
+listed below stay aliased with the original. The header-map half is FIXED in
+the fork, and upstream still carries it — pinned by
+`TestJsonRpcUpstreamConfigCopy_HeadersAreIndependent`. The aliased remainder is
+pinned by `TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal` and its
+allowlist.
 
 `upstream/registry.go:509` copies an upstream config before it bootstraps the
 upstream, and its comment says why: "Deep copy to avoid race conditions when
@@ -3506,7 +3690,10 @@ the seven above sit in an allowlist that names this entry.
 
 ## 116. `ErrUpstreamsExhausted.DeepestMessage` can never reach its single-cause branch
 
-**Status:** pinned.
+**Status:** open. The single-cause branch is still unreachable.
+`TestUpstreamsExhaustedDeepestMessage`, sub-test "a single joined cause still
+reports the bucket summary, not the upstream's own message", asserts today's
+behaviour and passes.
 
 `common/errors.go:1255` reads:
 
@@ -3539,7 +3726,10 @@ cause still reports the bucket summary, not the upstream's own message".
 
 ## 117. `AvailbilityConfidence` does not survive a YAML round trip
 
-**Status:** pinned.
+**Status:** open. `UnmarshalYAML` still accepts only `blockhead`, `1`,
+`finalizedblock` and `2`, while `String()` still emits `stateProven`.
+`TestAvailbilityConfidenceUnmarshalYAML`, sub-test "does not round-trip
+stateProven", asserts today's behaviour and passes.
 
 `common/architecture_evm.go` gives the type three values. `String()` and
 `MarshalYAML()` emit `blockHead`, `finalizedBlock` and `stateProven`.
@@ -3563,8 +3753,10 @@ round-trip stateProven".
 
 ## 118. Two different requests can share one cache key
 
-**Status:** pinned. **Confirmed independently by direct probe**, not by reading
-the code. Both requests below produce a byte-identical key:
+**Status:** open. **Confirmed independently by direct probe**, not by reading
+the code, and re-confirmed in this audit: an out-of-tree recomputation of the
+double SHA-256 that `CacheHash` performs reproduces the recorded digest for
+both parameter lists. Both requests below produce a byte-identical key:
 
     A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
     B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
@@ -3611,10 +3803,10 @@ be rewritten as a `NotEqual`.
 
 ## 120. The query shim advertises an uppercase hex prefix it always rejects
 
-**Status:** open. Pinned by
+**Status:** open. **Severity: low.** It costs one client a clear error message,
+not a wrong answer. Pinned by
 `architecture/evm/eth_query_parse_test.go:TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept`,
 which fails once the parser honours the prefix it checks for.
-**Severity: low.** It costs one client a clear error message, not a wrong answer.
 
 `architecture/evm/eth_query_helpers.go` — `parseUint64Value` reads every
 quantity the query shim takes: `limit`, and the `number` of a pagination
@@ -3644,15 +3836,14 @@ here shows a client sending `0X`.
 
 ## 121. A typo in `minSwitchInterval` silently disables the anti-flap cooldown
 
-**Status:** open. Pinned by
+**Status:** open. **Severity: medium.** It turns a one-character config mistake
+into fleet-wide primary flapping, with no log line and no metric. Pinned by
 `internal/policy/stdlib/duration_knob_test.go:TestStickyPrimary_MinSwitchInterval_DecidesTheHandover`,
 whose `UnparseableString` and `WrongType` cases assert today's handover.
-**Severity: medium.** It turns a one-character config mistake into fleet-wide
-primary flapping, with no log line and no metric.
 
 `internal/policy/stdlib/install.go` — the `durationMs` global returns 0 for
 every value it cannot read: a string `time.ParseDuration` refuses, an empty
-string, a boolean, an object. `stdlib.js` feeds it the operator's
+string, a boolean, an object. `internal/policy/stdlib/stdlib.js` feeds it the operator's
 `minSwitchInterval` and uses the result as the sticky cooldown:
 
     const minSwitchMs = (opts.minSwitchInterval != null) ? durationMs(opts.minSwitchInterval) : 30_000;
@@ -3778,3 +3969,134 @@ no translation. The fixture that would have caught it runs in no test.
 Fix: either wire the fixtures to a golden test and implement scenario 08, or
 delete the fixtures and the README claims. A fixture nothing runs is a record
 of an intention, not a test.
+
+---
+
+# Found by the 2026-08-19 status audit — recorded, not fixed
+
+These five are new. The audit that rewrote every Status line above found them
+while reading the code each entry cites. Nobody fixed them.
+
+## 130. `writeFatalError` shadows the error it was given, so every fatal POST closes its span as OK
+
+**Status:** open. **Severity: medium.** The operator loses the fatal error.
+
+`erpc/http_server.go:850` declares `writeFatalError := func(httpCtx
+context.Context, statusCode int, err error)`. Inside the `finalErrorOnce.Do`
+closure, `:871` runs:
+
+```go
+msg, err := common.SonicCfg.Marshal(err.Error())
+```
+
+`msg` is new, so `:=` is legal, and `err` becomes a **new** variable scoped to
+the closure. It holds the marshal result, not the fatal error. Two things then
+read the wrong value:
+
+- `:873` — the fallback `msg, _ = common.SonicCfg.Marshal(err.Error())` now
+  marshals the marshal error's own text, so a client that hits the fallback
+  reads "invalid character …" instead of the server fault.
+- `:878` — `common.EnrichHTTPServerSpan(httpCtx, statusCode, err)` gets the
+  marshal error, which is nil in practice.
+
+`:866-868` forces `statusCode = http.StatusOK` for every POST, per the JSON-RPC
+transport rule. `EnrichHTTPServerSpan` (`common/tracing_util.go`) takes its
+`err == nil` branch and calls `span.SetStatus(codes.Ok, "")`. So every panic and
+every fatal server error on a JSON-RPC POST closes its HTTP server span as OK
+with status 200. Tracing shows a clean request where the server died.
+
+Renaming the marshal result repairs both consumers. Found while auditing 34.
+
+No test covers the span status on this path.
+
+---
+
+## 131. `Network.Bootstrap` writes the shared selection policy before the lock that entry 96 added
+
+**Status:** open. **Severity: medium.** The fix for 96 guards the second write,
+not the first.
+
+Entry 96 records that concurrent network bootstrap corrupts a shared
+`SelectionPolicyConfig`, and the fork now serialises the rewrite inside
+`upgradeDefaultPolicy`. `Network.Bootstrap` still writes the same shared struct
+one frame earlier with no lock:
+
+- `erpc/networks.go:242` — `cfg.FailoverOnDefaultsExhausted =
+  n.cfg.Failover.Enabled()`, unconditional.
+- `erpc/networks.go:246-250` — `cfg.SetDefaults()`, which writes `EvalFunc`,
+  `EvalFuncOriginal` and `CompiledProgram` (`common/defaults.go`). Those are the
+  same three fields entry 96 protects.
+
+If entry 96's premise holds — two networks reach `RegisterNetwork` with one
+config pointer — both sites still race. The `FailoverOnDefaultsExhausted` write
+is worse than a race: two networks with different `failover.enabled` values
+write different booleans to one field, and the last writer wins. One network
+then runs with the other network's failover flag, with no log line.
+
+Found while auditing 96.
+
+---
+
+## 132. `parseUint64Value` reports a missing quantity and twelve call sites discard the error
+
+**Status:** open. **Severity: medium.** A silent wrong page, not an error.
+
+`parseUint64Value` (`architecture/evm/eth_query_helpers.go:396`) returns
+`(0, error)` for a nil, negative or unparseable quantity. Twelve call sites
+write `_` for the error and use the zero. Two of them change what the client
+reads:
+
+- `sortLogs` (`architecture/evm/eth_query_helpers.go:586-591`) keys the sort on
+  `blockNumber` and `logIndex`. A log whose `blockNumber` is absent sorts as
+  block 0 and lands at the head of an ascending page.
+- The paging loop (`architecture/evm/eth_query_shim.go:185-190`) reads the same
+  field twice: once to group logs into blocks, once to build `lastScanned`. One
+  unreadable log breaks the grouping and can write a cursor of 0, so the client
+  pages from genesis.
+
+Neither path logs anything. Entry 120 gives a confusing message on the same
+helper; this gives no message at all. Found while auditing 120.
+
+---
+
+## 133. The gRPC surface has the same RFC 7239 defect as entry 30, and no entry recorded it
+
+**Status:** open. **Severity: medium.** Fixing entry 30 alone leaves half the
+product broken.
+
+Entry 30 records that `Forwarded` is unsupported on the HTTP path and fails
+silently. `GrpcServer.grpcClientIP` (`erpc/grpc_server.go:553`) repeats it. The
+loop at `:561` walks `gs.trustedIPHeaders` and hands every one of them to
+`parseXForwardedFor` at `:566`. That parser understands the
+`client, proxy1, proxy2` form of `X-Forwarded-For`. RFC 7239 writes
+`for=192.0.2.60;proto=http`, which the parser reads as no address at all.
+
+An operator who configures `Forwarded` on a gRPC server therefore gets an empty
+chain and a fallback to the peer address. Every BDS client behind that edge
+shares one rate-limit bucket, and metrics and logs show one IP for the whole
+fleet. No gRPC test uses an RFC 7239 header. Found while auditing 30.
+
+---
+
+## 134. A second unguarded nil dereference in `Cache.Set`, earlier and broader than entry 67
+
+**Status:** open. **Severity: low today, and it fires exactly when an operator
+debugs a cache problem.**
+
+Entry 67 records that `Cache.Set` dereferences a response that
+`shouldCacheResponse` handles as nil. `architecture/evm/json_rpc_cache.go:740`
+is a second dereference of the same `rpcResp`, in the same function, and entry
+67 does not name it:
+
+```go
+RawJSON("result", rpcResp.GetResultBytes()).
+```
+
+It sits inside the `lg.GetLevel() <= zerolog.TraceLevel` block, so it runs
+before the policy fan-out and before `shouldCacheResponse`. It therefore panics
+earlier than the site entry 67 names, and for every policy rather than only an
+`only` or `allow` one.
+
+The caller guard at `erpc/networks.go:2395` keeps it latent, which is the same
+reason entry 67 stays latent. The trigger is raising the log level to trace —
+what an operator does to debug the cache. Found while auditing 67.
