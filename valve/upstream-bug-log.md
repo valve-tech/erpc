@@ -729,8 +729,7 @@ retries on server faults retries an upload that can never succeed.
 
 ## 30. RFC 7239 `Forwarded` is unsupported, and fails silently
 
-**Status:** fixed-in-fork (2026-08-19), together with entry 133 — the gRPC half
-of the same defect. **Severity: medium.** Every client collapsed into one
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.** Every client collapsed into one
 bucket. The fix, the parser it replaced both with, and the tests are recorded
 under 133.
 
@@ -2565,7 +2564,7 @@ produce a real SIGSEGV against the unfixed code.
 
 ## 67. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
 
-**Status:** fixed-in-fork (2026-08-19), together with entry 134. `GetResultBytes`
+**Status: FIXED in the fork.** Upstream still carries it. `GetResultBytes`
 and `ResultLength` now decide the nil receiver on the type, so both call sites
 and every future one are safe, and the guard inside `shouldCacheResponse` is
 deleted. The fix and its tests are recorded under 134, which also corrects the
@@ -3181,7 +3180,7 @@ mutex is all it needs.
 
 ## 97. The policy engine edits a config it does not own
 
-**Status:** half done (2026-08-19). The selection-policy half is fixed under
+**Status:** open. Partly fixed. The selection-policy half is fixed under
 entry 131: `Network.Bootstrap` registers a per-network COPY, so the policy
 engine no longer receives a config anyone else holds. The `NewUpstream` logger
 half (entry 95) is still a retro-fit. Kept open until both are done.
@@ -4015,7 +4014,7 @@ fix both requests below produced a byte-identical key:
 receive another request's data. **Confirmed independently by direct probe**,
 not by reading the code. Both requests below produced a byte-identical key:
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client could
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.** A client could
 receive another request's data. **Confirmed independently by direct probe**, not
 by reading the code, and re-confirmed in a later audit: an out-of-tree
 recomputation of the double SHA-256 that `CacheHash` performs reproduces the
@@ -4119,8 +4118,7 @@ change on upgrade.
 
 ## 120. The query shim advertises an uppercase hex prefix it always rejects
 
-**Status:** fixed-in-fork (2026-08-19), while fixing entry 132 in the same
-function. **Severity: low.** It cost one client a clear error message, not a
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low.** It cost one client a clear error message, not a
 wrong answer. The `0X` test is deleted, which is the weaker of the two options
 this entry names. Pinned by
 `architecture/evm/eth_query_parse_test.go:TestParseUint64Value_ReportsAnUppercaseHexPrefixAgainstTheInput`,
@@ -4298,7 +4296,7 @@ while reading the code each entry cites. Nobody fixed them.
 
 ## 130. `writeFatalError` shadows the error it was given, so every fatal POST closes its span as OK
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: medium.** The operator lost
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.** The operator lost
 the fatal error. Pinned by
 `erpc/http_server_fatal_span_test.go:TestRequestHandler_AFatalPostClosesItsSpanAsAnError`
 and `…_AFatalPostKeepsTheOriginalMessageInTheBody`.
@@ -4346,7 +4344,7 @@ No test covers the span status on this path.
 
 ## 131. `Network.Bootstrap` writes the shared selection policy before the lock that entry 96 added
 
-**Status:** fixed-in-fork (2026-08-19), by the weakening entry 97 asks for.
+**Status: FIXED in the fork.** Upstream still carries it.
 **Severity: medium.** Pinned by
 `erpc/networks_bootstrap_policy_ownership_test.go:TestNetworkBootstrap_DoesNotWriteTheConfigItWasGiven`
 and `…_CompilesADefaultPolicyWithoutTouchingTheSource`.
@@ -4398,7 +4396,7 @@ Found while auditing 96.
 
 ## 132. `parseUint64Value` reports a missing quantity and twelve call sites discard the error
 
-**Status:** fixed-in-fork (2026-08-19). **Severity: medium.** A silent wrong
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.** A silent wrong
 page, not an error. Pinned by
 `architecture/evm/eth_query_unreadable_quantity_test.go` (eight tests, two of
 them counterweights that must keep passing).
@@ -4468,7 +4466,7 @@ helper; this gives no message at all. Found while auditing 120.
 
 ## 133. The gRPC surface has the same RFC 7239 defect as entry 30, and no entry recorded it
 
-**Status:** fixed-in-fork (2026-08-19), together with entry 30. **Severity:
+**Status: FIXED in the fork.** Upstream still carries it. **Severity:
 medium.** Pinned by `erpc/forwarded_header_test.go` (five tests, both surfaces).
 
 **The entry was accurate.** Both surfaces handed every configured header to a
@@ -4506,7 +4504,7 @@ fleet. No gRPC test uses an RFC 7239 header. Found while auditing 30.
 
 ## 134. A second unguarded nil dereference in `Cache.Set`, earlier and broader than entry 67
 
-**Status:** fixed-in-fork (2026-08-19), together with entry 67. **Severity: low
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low
 today, and it fired exactly when an operator debugged a cache problem.** Pinned
 by
 `architecture/evm/json_rpc_cache_nil_result_test.go:TestCacheSet_ANilResponseAtTraceLevelIsNotAPanic`
@@ -5325,12 +5323,11 @@ formatting: entry 118's two versions disagree about whether the defect is open
 or fixed. Resolving it needs a person who knows which sessions produced which
 half, so it is recorded rather than guessed at.
 
-=======
 ---
 
 ## 160. An empty result corrupts the whole cache trace record
 
-**Status:** fixed-in-fork (2026-08-19), while fixing 134. **Severity: low.** It
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low.** It
 costs an operator the one log line they raised the level to read. **Confirmed by
 direct probe**, not by reading the code. Pinned by
 `architecture/evm/json_rpc_cache_nil_result_test.go:TestCacheSet_ATraceRecordStaysValidJsonWithNoResult`,
@@ -5414,7 +5411,7 @@ code does not have, which is worse than no comment.
 
 ## 163. The bug log carried three unresolved merge-conflict markers on `main`
 
-**Status:** fixed here (2026-08-19). **Severity: low for the product, high for
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low for the product, high for
 this file.** Found while opening entries 130-134.
 
 `valve/upstream-bug-log.md` at commit `8fe74b2` contained six conflict-marker
@@ -5467,7 +5464,6 @@ config or an admin-API path could still alias. It stops mattering in the fork,
 because entry 131's fix means `Network.Bootstrap` registers a copy and no shared
 pointer can reach the engine. Recorded so the next reader does not inherit the
 premise unexamined.
->>>>>>> worktree-agent-aefdbca58fa03b317
 
 ---
 
