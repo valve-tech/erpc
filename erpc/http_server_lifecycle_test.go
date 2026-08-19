@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -310,4 +312,96 @@ func TestStart_ReportsAPortItCannotBind(t *testing.T) {
 	require.Error(t, err, "Start must return the listener's failure, not nil")
 	require.Contains(t, err.Error(), "IPv4 server error")
 	require.Contains(t, err.Error(), "address already in use")
+}
+
+// TestStart_ServesOverTlsAndReturnsCleanlyWhenShutDown is the success path the
+// three failure tests above never reach. Two claims matter to an operator, and
+// neither is visible from a process that started without complaint.
+//
+// First, a listener configured for TLS must actually speak TLS. Nothing else in
+// eRPC would notice a server that loaded a certificate and then served
+// plaintext on port 443, so the test drives a real HTTPS client that trusts
+// only this certificate, and then proves a plaintext request to the same port
+// is not served.
+//
+// Second, Start must return nil after Shutdown. Start blocks on its listener
+// goroutines, so a supervisor reads its return value to tell an orderly stop
+// from a crash. Returning an error on a clean shutdown would restart a node an
+// operator deliberately drained.
+func TestStart_ServesOverTlsAndReturnsCleanlyWhenShutDown(t *testing.T) {
+	logger := log.Logger
+	dir := t.TempDir()
+	certFile, keyFile, certPEM := writeSelfSignedCert(t, dir)
+
+	// Take a port, then release it so Start can bind the same number.
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := held.Addr().(*net.TCPAddr).Port
+	require.NoError(t, held.Close())
+
+	srv := &HttpServer{
+		serverV4: &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`served`))
+			}),
+			ReadHeaderTimeout: 5 * time.Second,
+		},
+		serverCfg: &common.ServerConfig{
+			ListenV4:   util.BoolPtr(true),
+			HttpHostV4: util.StringPtr("127.0.0.1"),
+			HttpPortV4: &port,
+			TLS: &common.TLSConfig{
+				Enabled:  true,
+				CertFile: certFile,
+				KeyFile:  keyFile,
+			},
+		},
+	}
+
+	started := make(chan error, 1)
+	go func() { started <- srv.Start(&logger) }()
+
+	pool := x509.NewCertPool()
+	require.True(t, pool.AppendCertsFromPEM(certPEM))
+	tlsClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}
+	url := fmt.Sprintf("https://127.0.0.1:%d/", port)
+
+	var body []byte
+	require.Eventually(t, func() bool {
+		resp, gerr := tlsClient.Get(url)
+		if gerr != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		body, _ = io.ReadAll(resp.Body)
+		return resp.StatusCode == http.StatusOK
+	}, 20*time.Second, 50*time.Millisecond,
+		"a TLS-enabled listener never answered an HTTPS request")
+	require.Equal(t, "served", string(body))
+
+	// A plaintext request to the same port must not be served. This is the half
+	// that catches a listener that loaded the certificate and then ignored it.
+	plainResp, plainErr := (&http.Client{Timeout: 5 * time.Second}).
+		Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if plainErr == nil {
+		defer plainResp.Body.Close()
+		plainBody, _ := io.ReadAll(plainResp.Body)
+		require.NotEqual(t, "served", string(plainBody),
+			"the listener answered a plaintext request while TLS was configured")
+	}
+
+	require.NoError(t, srv.Shutdown(&logger))
+
+	select {
+	case err := <-started:
+		require.NoError(t, err,
+			"a deliberate shutdown must not look like a crash to the supervisor")
+	case <-time.After(30 * time.Second):
+		t.Fatal("Start did not return after Shutdown")
+	}
 }
