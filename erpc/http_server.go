@@ -868,9 +868,17 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				}
 				w.WriteHeader(statusCode)
 
-				msg, err := common.SonicCfg.Marshal(err.Error())
-				if err != nil {
-					msg, _ = common.SonicCfg.Marshal(err.Error())
+				// Name the marshal result something other than `err`. A `:=`
+				// here rebinds `err` to the encoder's own outcome, which is nil
+				// on success — and both the body below and the span status
+				// afterwards would then report a healthy request for one that
+				// died. See entry 130 in valve/upstream-bug-log.md.
+				msg, marshalErr := common.SonicCfg.Marshal(err.Error())
+				if marshalErr != nil {
+					// Retrying the same call with the same input cannot
+					// succeed, so fall back to a literal that is valid JSON by
+					// construction. The fault itself still reaches the span.
+					msg = []byte(`"internal server error"`)
 				}
 				body := fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32603,"message":%s}}`, msg)
 
@@ -2331,7 +2339,7 @@ func (s *HttpServer) resolveRealClientIP(r *http.Request) string {
 			continue
 		}
 		if v := strings.TrimSpace(r.Header.Get(hdr)); v != "" {
-			ips := parseXForwardedFor(v)
+			ips := parseForwardedChain(v)
 			if ip := trimRightTrustedAndPick(ips, s.isTrustedForwarder); ip != nil {
 				return ip.String()
 			}
@@ -2370,13 +2378,28 @@ func parseRemoteIP(remoteAddr string) net.IP {
 	return net.ParseIP(host)
 }
 
-func parseXForwardedFor(xff string) []net.IP {
-	parts := strings.Split(xff, ",")
-	ips := make([]net.IP, 0, len(parts))
-	for _, p := range parts {
-		v := strings.TrimSpace(p)
+// parseForwardedChain reads the ordered list of addresses out of ONE forwarding
+// header, whichever of the two wire syntaxes it uses.
+//
+// Every configured header goes through here, so the parser reads the value it
+// is given rather than assuming a syntax from the header's name. An element is
+// either a bare address (`X-Forwarded-For`, `X-Real-IP`) or a set of RFC 7239
+// parameters carrying `for=` (`Forwarded`). Anything that names no address —
+// RFC 7239 also allows obfuscated identifiers such as `for=_hidden` — is
+// dropped, so the caller falls back to the peer instead of inventing a client.
+//
+// Two parsers used to live here, one per syntax, and nothing ever called the
+// RFC 7239 one. See entries 30 and 133 in valve/upstream-bug-log.md.
+func parseForwardedChain(value string) []net.IP {
+	elements := strings.Split(value, ",")
+	ips := make([]net.IP, 0, len(elements))
+	for _, element := range elements {
+		v := forwardedElementAddr(element)
+		if v == "" {
+			continue
+		}
 		v = stripAddrDecorations(v)
-		// Some implementations might include host:port; strip port if present
+		// Some implementations include host:port; strip the port if present.
 		if h, _, err := net.SplitHostPort(v); err == nil {
 			v = h
 		}
@@ -2387,31 +2410,20 @@ func parseXForwardedFor(xff string) []net.IP {
 	return ips
 }
 
-// parseForwardedFor parses RFC 7239 Forwarded header and extracts the sequence of for= IPs
-func parseForwardedFor(fwd string) []net.IP {
-	// Split elements by comma, then params by ';', pick for= value
-	items := strings.Split(fwd, ",")
-	ips := make([]net.IP, 0, len(items))
-	for _, it := range items {
-		params := strings.Split(it, ";")
-		for _, p := range params {
-			p = strings.TrimSpace(p)
-			if len(p) >= 4 && strings.HasPrefix(strings.ToLower(p), "for=") {
-				v := strings.TrimSpace(p[4:])
-				// Remove optional quotes
-				v = strings.Trim(v, "\"")
-				v = stripAddrDecorations(v)
-				// Strip optional :port if present
-				if h, _, err := net.SplitHostPort(v); err == nil {
-					v = h
-				}
-				if ip := net.ParseIP(v); ip != nil {
-					ips = append(ips, ip)
-				}
-			}
+// forwardedElementAddr returns the address one element claims: the `for=`
+// parameter when the element carries RFC 7239 parameters, otherwise the element
+// itself.
+func forwardedElementAddr(element string) string {
+	if !strings.Contains(element, "=") {
+		return strings.TrimSpace(element)
+	}
+	for _, param := range strings.Split(element, ";") {
+		param = strings.TrimSpace(param)
+		if len(param) > 4 && strings.EqualFold(param[:4], "for=") {
+			return strings.Trim(strings.TrimSpace(param[4:]), `"`)
 		}
 	}
-	return ips
+	return ""
 }
 
 // trimRightTrustedAndPick removes trailing trusted proxy IPs and returns the nearest untrusted IP (client)

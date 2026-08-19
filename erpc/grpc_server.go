@@ -563,7 +563,7 @@ func (gs *GrpcServer) grpcClientIP(ctx context.Context, md metadata.MD) string {
 			continue
 		}
 		if v := firstMD(md, hdr); v != "" {
-			ips := parseXForwardedFor(v)
+			ips := parseForwardedChain(v)
 			if ip := trimRightTrustedAndPick(ips, gs.isTrustedForwarder); ip != nil {
 				return ip.String()
 			}
