@@ -770,22 +770,62 @@ Fix: call `SetReadDeadline(now + pingInterval*2)` once before the read loop.
 
 ## 32. The gRPC surface silently ignores three declared wire fields
 
-**Status:** open. **Severity: high for the first.** Silent wrong answers.
+**Status:** fixed-in-fork. **Severity: high for the first.** Silent wrong
+answers.
 
-- **`GetLogs` ignores `blockHash`** (`erpc/grpc_server.go:279-318`).
+- **`GetLogs` ignored `blockHash`** (`erpc/grpc_server.go`).
   `evm.GetLogsRequest` defines `blockHash` as the alternative to
-  `fromBlock`/`toBlock`. The handler never reads it, so a client filtering by
-  block hash sends an empty `{}` filter and the upstream applies its own default
-  range — the latest block on most clients. The operator sees a 200 and a
+  `fromBlock`/`toBlock`. The handler never read it, so a client filtering by
+  block hash sent an empty `{}` filter and the upstream applied its own default
+  range — the latest block on most clients. The operator saw a 200 and a
   well-formed log list **for the wrong block**.
-- **Every handler ignores `chainId` and `chainGenesisHash`**
-  (`erpc/grpc_server.go:191-490`). Those fields exist on every BDS request so a
-  client can pin the chain it expects. eRPC takes the chain only from the
+- **Every handler ignored `chainId` and `chainGenesisHash`**
+  (`erpc/grpc_server.go`). Those fields exist on every BDS request so a
+  client can pin the chain it expects. eRPC took the chain only from the
   `x-erpc-chain-id` metadata, so a client sending `chainId: 1` in the body with
-  `x-erpc-chain-id: 137` in the metadata receives Polygon data without complaint.
+  `x-erpc-chain-id: 137` in the metadata received Polygon data without
+  complaint.
 
-Either honour these fields or reject a mismatch. Accepting and discarding them
-is the worst of the three options.
+**One answer per field, and no third state.**
+
+- `blockHash` is **honoured**. `GetLogs` puts it in the eth_getLogs filter. A
+  request that sets `blockHash` AND a `fromBlock`/`toBlock` range is a
+  contradiction the wire itself forbids, so the handler returns
+  `InvalidArgument` instead of serving one half of it.
+- `chainId` is **honoured**. It names the chain when the metadata omits it, and
+  a value that contradicts `x-erpc-chain-id` returns `InvalidArgument` naming
+  both numbers. The comparison uses the decimal string the router builds the
+  network id from, so the check asks exactly the question that matters: will
+  eRPC route to the chain you pinned?
+- `chainGenesisHash` is **refused**. eRPC selects a network by chain id alone
+  and holds no genesis hash for an EVM network, so it cannot honour the pin.
+  The handler returns `Unimplemented` naming the field. An explicit refusal is
+  the honest answer: the client learns the pin did nothing.
+
+The check is one function, `pinnedChain`, reading the two fields off the
+message descriptor by name. It is not a table of request types. Every BDS
+request message that declares `chainId` or `chainGenesisHash` is covered,
+including the request type nobody has written yet, and `extractRequestInput`
+runs it for all thirteen handlers — seven unary RPCs, five query streams and
+the block stream.
+
+Pinned by `erpc/grpc_server_chain_pin_test.go`:
+`TestGrpcGetLogs_SendsTheBlockHashFilter`,
+`TestGrpcGetLogs_RejectsABlockHashTogetherWithARange`,
+`TestGrpcChainPin_RejectsAChainIdTheMetadataContradicts`,
+`TestGrpcChainPin_TakesTheChainFromTheRequestWhenTheMetadataOmitsIt`,
+`TestGrpcChainPin_AcceptsAChainIdThatAgreesWithTheMetadata` and
+`TestGrpcChainPin_RefusesAChainGenesisHashItCannotHonour`. The two chainId
+tables each run over GetLogs, GetBlockByNumber, QueryBlocks and StreamBlocks,
+and the genesis table runs over the three of those whose message declares the
+field. They prove the check sits on the shared path and not on one handler.
+
+Mutation: deleting the `blockHash` block fails the two GetLogs tests; deleting
+the genesis refusal fails all three subtests of the refusal table; deleting the
+chainId branch fails all eight subtests of the two chainId tables.
+
+No test pinned the silent-ignore behaviour for these three fields. One test did
+pin the same defect on a fourth field — see entry 165.
 
 ---
 
@@ -3173,23 +3213,78 @@ is a wrong one.
 which occupies the port and asserts the process exit.
 **Severity: medium for an embedder, high for a test run.**
 
-`erpc/init.go:142`, `:155` and `:178` call `util.OsExit(...)` from inside the
-`erpc` package. That package is a library: `cmd/erpc` is the binary, and
-`erpc.Init` is what an embedder calls.
+**Status:** fixed-in-fork. **Severity: medium for an embedder, high for a test
+run.**
 
-So a Go program that embeds eRPC and fails to bind its HTTP port does not get
-an error it can handle. Its whole process ends, inside a goroutine the caller
-never started.
+`erpc/init.go` called `util.OsExit(...)` at three sites from inside the `erpc`
+package. That package is a library: `cmd/erpc` is the binary, and `erpc.Init`
+is what an embedder calls.
 
-This is not theoretical. `go test ./test/` dies with exit 234 and prints NO
-assertion, no panic and no reason — the HTTP server cannot bind, the goroutine
-calls `OsExit`, and the test binary is gone before it can report anything. The
-package is excluded from `make test-fast`, so nobody sees it.
+So a Go program that embeds eRPC and fails to bind its HTTP port did not get
+an error it could handle. Its whole process ended, inside a goroutine the
+caller never started.
 
-The `OsExit` indirection (`var OsExit = os.Exit`) exists so a test can replace
-it, which shows the problem was already understood. The weakening is to return
-the error to the caller and let `cmd/erpc` decide to exit — the one place that
-owns the process.
+This is not theoretical. `go test ./test/` died with exit 234 and printed NO
+assertion, no panic and no reason — the HTTP server could not bind, the
+goroutine called `OsExit`, and the test binary was gone before it could report
+anything. The package is excluded from `make test-fast`, so nobody saw it.
+
+**The fix returns the error, and the binary keeps the exit code.**
+
+`Init` starts three transports in goroutines: the HTTP server, the gRPC server
+and the metrics server. A failure in any of them is asynchronous, so it has to
+travel back somehow. `Init` already blocked on `<-appCtx.Done()` at the end, so
+the report needs no new machinery beyond a value on that wait:
+
+    serverFailed := make(chan error, 3)   // one slot per transport
+    ...
+    select {
+    case <-appCtx.Done():
+        // graceful shutdown, as before
+    case serverErr = <-serverFailed:
+        // return it to the caller
+    }
+
+The buffer holds one slot per transport, so a goroutine that fails after `Init`
+has already returned writes its error and exits instead of leaking. No
+callback, no error group, no new type. The wait that was already there simply
+became a wait on two things instead of one.
+
+The three goroutines wrap their error with `erpc.ErrServerFailed`. `cmd/erpc`
+is the one place that owns the process, so it does the mapping:
+
+    code := util.ExitCodeERPCStartFailed
+    if errors.Is(err, erpc.ErrServerFailed) {
+        code = util.ExitCodeHttpServerFailed
+    }
+    util.OsExit(code)
+
+An operator watching for the HTTP-server exit code still sees it. An embedder
+gets an error value and decides for itself. (Entry 98 is still open: the two
+exit-code CONSTANTS do not fit in a byte. That is a separate defect and this
+fix does not change either value — it only moves where the code is chosen.)
+
+Pinned by `erpc/init_test.go`:
+`TestInit_ReturnsWhenTheHttpPortIsAlreadyBound` is the embedder's test — it
+holds a port, calls `Init`, and asserts `Init` returns an error naming that
+port. `TestInit_InvalidHttpPort` was rewritten: it asserted the old exit code,
+which pinned the defect, and now asserts the returned error. Both tests replace
+`util.OsExit` with a function that fails the test, so a return to the old
+behaviour reports itself with the exit code it tried to use.
+`cmd/erpc/main_test.go:TestMain_Start_HttpPortAlreadyBound` pins the other
+half: the binary still exits with `ExitCodeHttpServerFailed`.
+
+Mutation: restoring `util.OsExit` in the HTTP goroutine fails both `Init`
+tests ("Init must not end the process, but it called util.OsExit(1002)");
+removing the `errors.Is` mapping in `cmd/erpc` fails the binary test with
+"expected exit code 1002, got 1001".
+
+**The test-level workaround:** the brief for this work said an agent had
+replaced `util.OsExit` with a recorder inside `test/`. No such workaround
+exists at this branch's base — `grep -rn OsExit test/` finds nothing, so there
+was nothing to remove. What `test/` had instead was a goroutine that logged the
+`Init` error and dropped it, over a data race; see entry 167. That is now gone:
+the harness returns the failure with its reason.
 
 Update: the `test/` package now takes that indirection. Its test binary
 replaces `util.OsExit` with a recorder that stops only the calling goroutine,
@@ -4724,3 +4819,114 @@ The replacement, `hexQuantityDigits`, drops the branch: an input that is not a
 bare `0x` quantity comes back with `ok` false and reaches the hash whole. That
 is the weaker rule — it commits to nothing about what a quoted value means —
 and `TestHexQuantityDigits` pins it with the quoted case asserting `false`.
+
+## 165. `GetBlockReceipts` picks one of two mutually exclusive fields, and a test pinned it
+
+**Status:** fixed-in-fork. Found while fixing 32. **Severity: medium.** A
+silent wrong block, same shape as the `blockHash` half of 32.
+
+`evm.GetBlockReceiptsRequest` declares `blockNumber` and `blockHash`, and the
+proto says of each: "Mutually exclusive with" the other.
+`erpc/grpc_server.go` read them as a preference order:
+
+    if len(req.BlockHash) > 0 {
+        blockParam = evm.BytesToHex(req.BlockHash)
+    } else if req.BlockNumber != nil {
+        blockParam = *req.BlockNumber
+    }
+
+A client that sets both gets the hash's block and never learns the number was
+dropped. The handler now returns `InvalidArgument` when both are set.
+
+**A test pinned the defect.**
+`TestGrpcGetBlockReceipts_PrefersTheHashWhenBothAreGiven` asserted the
+precedence, with the comment "pins the precedence the handler chose". A wire
+contract that says "mutually exclusive" is not a precedence to preserve, so the
+test was rewritten rather than worked around. It is now
+`TestGrpcGetBlockReceipts_RejectsABlockNumberTogetherWithABlockHash`
+(`erpc/grpc_server_rpc_test.go`).
+
+Mutation: deleting the guard fails the rewritten test.
+
+---
+
+## 166. The gRPC surface never fills the chain fields it can answer
+
+**Status:** open. **Severity: low.** The mirror image of 32, on the response
+side.
+
+BDS declares chain identity on responses too, and eRPC leaves all of it unset:
+
+- `ChainIdResponse.genesisHash` (`erpc/grpc_server.go`, the `ChainId` handler
+  returns `&evm.ChainIdResponse{ChainId: chainID}` only).
+- `GetBlockResponse.chainId` and `GetBlockResponse.chainGenesisHash`
+  (`GetBlockByNumber` and `GetBlockByHash`).
+
+`chainId` is the cheap one: the handler already knows the network it routed to,
+so it can fill `GetBlockResponse.chainId` with no new lookup. That closes the
+loop for a client that wants to confirm which chain answered — the same
+question entry 32's request-side `chainId` asks. The two genesis-hash fields
+need a genesis hash eRPC does not hold, which is the same reason 32 refuses the
+request-side field; leaving them unset is correct until eRPC learns one.
+
+A client cannot tell "chain 0" from "not set" through the generated
+`GetChainId()` accessor, only through the pointer field, which is why an unset
+`chainId` is worth filling rather than leaving to the reader.
+
+---
+
+## 167. The stress harness writes one `err` from two goroutines and reads neither
+
+**Status:** fixed-in-fork. Found while fixing 99. **Severity: medium.** A data
+race, plus a swallowed reason.
+
+`test/fake_erpc.go`, in `executeStressTest`:
+
+    go func() {
+        err = initializeERPC(erpcConfig)      // writes the outer err
+        if err != nil {
+            log.Error().Err(err).Msg("Error initializing eRPC")
+        }
+    }()
+
+    time.Sleep(1 * time.Second)
+
+    err = runK6StressTest(fs, localBaseUrl, config)   // writes it again
+
+`err` is the function-scope variable from `prepareERPCConfig`. The goroutine
+and the main path both write it with no synchronisation, so `go test -race`
+has a real race to find. Worse, nothing reads the goroutine's value: if eRPC
+never came up, the harness logged one line, slept a second, and ran k6 against
+nothing.
+
+The fix gives the goroutine its own channel and makes the wait a `select`, so
+the harness returns "failed to initialize eRPC: ..." with the reason instead of
+sleeping and guessing. This is only reachable now that `Init` returns its
+transport failures (entry 99); before, the same failure killed the test binary
+outright.
+
+## 168. A third load-triggered flaky test, in `internal/policy/stdlib`
+
+**Status:** open. **Severity: low for correctness, medium for CI trust.** Same
+shape as entries 10 and 23.
+
+`TestStdlib_DemoteTag_RanksLastNeverDrops`
+(`internal/policy/stdlib/stdlib_test.go:1688`) failed once during a
+`make test-fast` run that shared the machine with two other full test runs. It
+expected the four ranked upstream ids and got an empty list:
+
+    expected: []string{"primA", "primB", "fb1", "fb2"}
+    actual  : []string{}
+
+An empty result means the policy never produced an ordering, not that it
+produced a wrong one. The test sets `EvalTimeout: 50ms` and then reads
+`GetOrdered` straight after `RegisterNetwork`, so a starved CPU can miss the
+first evaluation window. That is a 50ms bet on how busy the machine is, which
+is exactly what entries 10 and 23 describe.
+
+The same test passes 5 runs in a row on a quiet machine, and the whole
+`internal/policy/...` tree passes. Nothing in the failing path was modified by
+the work that found this.
+
+The fix is the one entries 10 and 23 point at: wait for the condition instead
+of betting on a deadline.
