@@ -1486,7 +1486,12 @@ func (c *JsonRpcUpstreamConfig) Copy() *JsonRpcUpstreamConfig {
 	copied := &JsonRpcUpstreamConfig{}
 	*copied = *c
 
+	// Allocate first: `*copied = *c` gave copied.Headers the SAME map as c, so
+	// copying into it without this line copies the map into itself and leaves
+	// the two configs sharing one header map. Headers carry credentials, and a
+	// vendor writes into them per upstream.
 	if c.Headers != nil {
+		copied.Headers = make(map[string]string, len(c.Headers))
 		maps.Copy(copied.Headers, c.Headers)
 	}
 

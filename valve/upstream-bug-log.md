@@ -2940,3 +2940,151 @@ pointer out, rather than retro-fitting a field afterwards.
 
 Neither is done here, because both are wider than a race fix and each needs
 its own pin.
+
+---
+
+## 115. `UpstreamConfig.Copy` is a partial deep copy
+
+**Status:** `fixed-in-fork` for the header map, `pinned` for the rest.
+
+`upstream/registry.go:509` copies an upstream config before it bootstraps the
+upstream, and its comment says why: "Deep copy to avoid race conditions when
+detectFeatures modifies the config". Line 547 copies again per attempt, because
+"NewUpstream mutates it (vendor detection)". Both rely on `Copy()` producing an
+object that shares nothing with the operator's config or with the sibling
+copies.
+
+`Copy()` does not produce that object. It starts with `*copied = *c`, then
+deep-copies seven fields and leaves the rest aliased.
+
+The worst case was `JsonRpcUpstreamConfig.Copy`:
+
+```go
+copied := &JsonRpcUpstreamConfig{}
+*copied = *c
+if c.Headers != nil {
+    maps.Copy(copied.Headers, c.Headers)   // dst IS src
+}
+```
+
+`*copied = *c` gives `copied.Headers` the same map header as `c.Headers`, so
+`maps.Copy` copies the map into itself and does nothing. Every copy of an
+upstream shares one header map. Headers carry credentials — `thirdparty/
+blockdaemon.go:116` writes `Authorization: Bearer <key>`, `thirdparty/
+satelink.go:132` writes `X-API-Key` — and two bootstrap attempts writing that
+map concurrently is a Go fatal concurrent map write, not a recoverable error.
+The sibling `GrpcUpstreamConfig.Copy` allocates first and gets it right, which
+is what shows the intent.
+
+**Fixed here:** `common/config.go` now allocates the destination map before
+copying into it.
+
+Still aliased after the fix, and recorded rather than changed because each one
+needs a decision about what the field means:
+
+- `UpstreamConfig.Tags` — a slice, so `append` on a copy can write into the
+  original's backing array.
+- `UpstreamConfig.CreditUnits` — a map.
+- `UpstreamConfig.Svm`, `.Shadow`, `.Routing` — pointers to structs with their
+  own maps and slices inside.
+- `RetryPolicyConfig.EmptyResultAccept` and `.EmptyResultIgnore` — slices.
+
+No caller mutates any of those in place today, so this half is a latent hazard
+rather than a live fault. `TestUpstreamConfigCopy_SharesNoMemoryWithTheOriginal`
+walks the whole config tree by reflection and fails on any NEW aliased field;
+the seven above sit in an allowlist that names this entry.
+
+## 116. `ErrUpstreamsExhausted.DeepestMessage` can never reach its single-cause branch
+
+**Status:** pinned.
+
+`common/errors.go:1255` reads:
+
+```go
+s := e.SummarizeCauses()
+if s != "" {
+    return s
+}
+if joinedErr, ok := e.Cause.(interface{ Unwrap() []error }); ok {
+    children := joinedErr.Unwrap()
+    if len(children) == 1 && children[0] != nil {
+        ...return the child's own message...
+    }
+```
+
+`SummarizeCauses` uses the same type assertion and classifies every child into
+some bucket — an unrecognised error falls through to `other++`. So for any
+joined cause with at least one child it returns a non-empty string, and
+`DeepestMessage` returns before the branch below. For a joined cause with zero
+children `len(children) == 1` is false. The branch is unreachable on every
+input.
+
+What an operator sees: on a network with one upstream, a failure reports
+`1 upstream server errors` instead of the node's own text
+(`execution reverted at 0x...`). The code that would have surfaced the text is
+there and never runs.
+
+Pinned by `TestUpstreamsExhaustedDeepestMessage`, sub-test "a single joined
+cause still reports the bucket summary, not the upstream's own message".
+
+## 117. `AvailbilityConfidence` does not survive a YAML round trip
+
+**Status:** pinned.
+
+`common/architecture_evm.go` gives the type three values. `String()` and
+`MarshalYAML()` emit `blockHead`, `finalizedBlock` and `stateProven`.
+`UnmarshalYAML` accepts `blockhead`, `1`, `finalizedblock` and `2`, and
+rejects everything else.
+
+So `stateProven` marshals out and fails to parse back, and so does the
+`unknown(0)` an unset value produces. An operator who dumps the effective
+config and feeds it back gets `invalid availability confidence: stateProven`.
+
+The reachable damage is small today: the only YAML-configurable field of this
+type is `EvmNetworkConfig.EmptyResultConfidence`, and its two readers
+(`architecture/evm/common.go:79`, `erpc/networks.go:871`) only test for
+`Finalized`, so `stateProven` would be inert there even if it parsed. That is
+the reason to record the asymmetry rather than close it by adding a value the
+readers ignore — the parser and the printer should agree on one set, whichever
+set that is.
+
+Pinned by `TestAvailbilityConfidenceUnmarshalYAML`, sub-test "does not
+round-trip stateProven".
+
+## 118. Two different requests can share one cache key
+
+**Status:** pinned.
+
+`JsonRpcRequest.CacheHash` (`common/json_rpc.go:1405`) hashes the parameters by
+feeding each one to `hashValue` in turn:
+
+```go
+hasher := sha256.New()
+for _, p := range r.Params {
+    err := hashValue(hasher, p)
+    ...
+}
+```
+
+`hashValue` writes each value's bytes and nothing else. No separator goes
+between adjacent parameters, and none goes between a map key and its value or
+between array elements. Two parameter lists whose concatenations match
+therefore produce the same key for the same method.
+
+A worked case, both `eth_getStorageAt`:
+
+- `["0xabc", "0xdef", "latest"]` hashes `0xabc` + `0xdef` + `latest`
+- `["0xabc0xdef", "", "latest"]` hashes the same bytes
+
+The second request is nonsense to a node, but the cache answers it before any
+node sees it — and a write under the second key serves the first. The same
+collision class exists between an array and a flattened string, and between an
+object's keys and its values.
+
+The fix is a delimiter that cannot occur in a value (a length prefix, or a byte
+outside the hex/JSON alphabet) between every written piece. It changes every
+cache key, so it wants its own change and a cache-generation bump.
+
+Pinned by `TestCacheHash_ConcatenatesAdjacentParamsWithoutASeparator`, whose
+assertion is the defect: when the separator lands, that test fails and should
+be rewritten as a `NotEqual`.
