@@ -3504,7 +3504,17 @@ round-trip stateProven".
 
 ## 118. Two different requests can share one cache key
 
-**Status:** pinned.
+**Status:** pinned. **Confirmed independently by direct probe**, not by reading
+the code. Both requests below produce a byte-identical key:
+
+    A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
+    B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
+
+The worked case below uses `eth_getStorageAt`, where the colliding twin is
+nonsense a node rejects. `eth_getLogs` is the case to worry about: its topics
+are ARRAYS of hex strings, so `["0xa","0xb"]` and `["0xab"]` are both requests
+a node answers, and both are cacheable. Whichever lands first serves the
+other.
 
 `JsonRpcRequest.CacheHash` (`common/json_rpc.go:1405`) hashes the parameters by
 feeding each one to `hashValue` in turn:
