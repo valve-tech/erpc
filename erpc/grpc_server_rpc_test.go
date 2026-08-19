@@ -475,9 +475,11 @@ func TestGrpcGetBlockReceipts_ServesReceiptsForABlockNumber(t *testing.T) {
 	assert.Equal(t, "0x64", h.node.lastParams("eth_getBlockReceipts")[0])
 }
 
-// TestGrpcGetBlockReceipts_PrefersTheHashWhenBothAreGiven pins the precedence
-// the handler chose. A client that sets both must get the hash's block.
-func TestGrpcGetBlockReceipts_PrefersTheHashWhenBothAreGiven(t *testing.T) {
+// TestGrpcGetBlockReceipts_RejectsABlockNumberTogetherWithABlockHash replaces
+// a test that pinned the old precedence: the handler took the hash and dropped
+// the number without a word. BDS declares the two mutually exclusive, so a
+// client that sets both gets told, not answered for a block it did not name.
+func TestGrpcGetBlockReceipts_RejectsABlockNumberTogetherWithABlockHash(t *testing.T) {
 	h := newGrpcHarness(t, nil)
 	txHash := "0x" + fmt.Sprintf("%064x", 0xbeef)
 	h.node.reply("eth_getBlockReceipts", "["+grpcReceiptJSON(txHash, 0x64, 0)+"]")
@@ -489,8 +491,10 @@ func TestGrpcGetBlockReceipts_PrefersTheHashWhenBothAreGiven(t *testing.T) {
 		BlockNumber: &number,
 		BlockHash:   grpcHexBytes(t, grpcBlockHash(0x64)),
 	})
-	require.NoError(t, err)
-	assert.Equal(t, grpcBlockHash(0x64), h.node.lastParams("eth_getBlockReceipts")[0])
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Zero(t, h.node.callCount("eth_getBlockReceipts"),
+		"the server must refuse the contradiction instead of silently picking one side")
 }
 
 // grpcReceiptJSON builds a receipt complete enough for JsonRpcReceipt.ToProto.

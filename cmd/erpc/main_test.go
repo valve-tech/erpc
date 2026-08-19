@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -338,6 +339,43 @@ func TestMain_Start_WithInvalidEndpoint(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Error("timeout waiting for program exit")
+	}
+}
+
+// TestMain_Start_HttpPortAlreadyBound is the other half of the erpc.Init fix.
+// Init now hands a dead listener back to its caller instead of ending the
+// process from a goroutine, so this test proves the binary still exits, and
+// still exits with the code operators watch for.
+func TestMain_Start_HttpPortAlreadyBound(t *testing.T) {
+	mainMutex.Lock()
+	defer mainMutex.Unlock()
+
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to take a port: %v", err)
+	}
+	defer squatter.Close()
+	port := squatter.Addr().(*net.TCPAddr).Port
+
+	f, err := afero.TempFile(afero.NewOsFs(), "", "erpc.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(getWorkingConfig(port))
+
+	exitChan := make(chan int, 1)
+	util.OsExit = func(code int) { exitChan <- code }
+
+	os.Args = []string{"erpc-test", "--config", f.Name()}
+	go main()
+
+	select {
+	case code := <-exitChan:
+		if code != util.ExitCodeHttpServerFailed {
+			t.Errorf("expected exit code %d, got %d", util.ExitCodeHttpServerFailed, code)
+		}
+	case <-time.After(20 * time.Second):
+		t.Error("the binary never exited on a port it could not bind")
 	}
 }
 

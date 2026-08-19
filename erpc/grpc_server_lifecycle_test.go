@@ -507,7 +507,7 @@ func TestGrpcPanicRecovery_PassesAStreamErrorThroughUntouched(t *testing.T) {
 
 func TestGrpcExtractRequestInput_RejectsACallWithNoMetadata(t *testing.T) {
 	gs := &GrpcServer{}
-	_, err := gs.extractRequestInput(context.Background(), "eth_chainId")
+	_, err := gs.extractRequestInput(context.Background(), "eth_chainId", &evm.ChainIdRequest{})
 	require.Error(t, err)
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	assert.Equal(t, "missing metadata", status.Convert(err).Message())
@@ -529,7 +529,7 @@ func TestGrpcExtractRequestInput_CarriesTheClientIdentityAndDefaultsTheArchitect
 		Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5000},
 	})
 
-	input, err := gs.extractRequestInput(ctx, "eth_chainId")
+	input, err := gs.extractRequestInput(ctx, "eth_chainId", &evm.ChainIdRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, "main", input.ProjectId)
 	assert.Equal(t, "123", input.ChainId)
@@ -548,7 +548,7 @@ func TestGrpcExtractRequestInput_HonoursAnExplicitArchitecture(t *testing.T) {
 		"x-erpc-chain-id":     "mainnet",
 		"x-erpc-architecture": "btc",
 	})
-	input, err := gs.extractRequestInput(metadata.NewIncomingContext(context.Background(), md), "eth_chainId")
+	input, err := gs.extractRequestInput(metadata.NewIncomingContext(context.Background(), md), "eth_chainId", &evm.ChainIdRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, "btc", input.Architecture)
 }

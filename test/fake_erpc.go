@@ -163,16 +163,22 @@ func executeStressTest(config StressTestConfig) (*StressTestResult, error) {
 		return nil, err
 	}
 
-	// Initialize eRPC
+	// Initialize eRPC. Init reports a failed transport to its caller instead of
+	// ending the process, so the harness can name the failure. It used to end
+	// the test binary here with no assertion, no panic and no reason.
+	initFailed := make(chan error, 1)
 	go func() {
-		err = initializeERPC(erpcConfig)
-		if err != nil {
-			log.Error().Err(err).Msg("Error initializing eRPC")
+		if err := initializeERPC(erpcConfig); err != nil {
+			initFailed <- err
 		}
 	}()
 
-	// Wait for servers to start
-	time.Sleep(1 * time.Second)
+	// Wait for servers to start, or report why eRPC never came up.
+	select {
+	case err := <-initFailed:
+		return nil, fmt.Errorf("failed to initialize eRPC: %w", err)
+	case <-time.After(1 * time.Second):
+	}
 
 	// Run stress test
 	err = runK6StressTest(fs, localBaseUrl, config)
