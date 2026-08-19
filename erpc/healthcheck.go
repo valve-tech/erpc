@@ -112,7 +112,15 @@ func (s *HttpServer) handleHealthCheck(
 	}
 	logger = logger.With().Str("evalStrategy", evalStrategy).Logger()
 
+	// A plain error carries no HTTP status, and handleErrorResponse defaults to
+	// 200 for anything it cannot classify. That default is right for JSON-RPC
+	// traffic and wrong here: a load balancer reads the status code, so an
+	// instance that cannot serve at all must answer 503 the way the draining
+	// branch above already does. Write the status first — handleErrorResponse
+	// still writes the JSON-RPC error body, and the recorder keeps the first
+	// status. The simple-mode failure below uses the same idiom.
 	if s.erpc == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
 		handleErrorResponse(ctx, &logger, startedAt, nil, errors.New("eRPC is not initialized"), w, encoder, writeFatalError, s.serverCfg.IncludeErrorDetails, s.executionHeadersMode())
 		return
 	}
@@ -121,6 +129,7 @@ func (s *HttpServer) handleHealthCheck(
 	if projectId == "" {
 		projects = s.erpc.GetProjects()
 		if len(projects) == 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
 			handleErrorResponse(ctx, &logger, startedAt, nil, errors.New("no projects found"), w, encoder, writeFatalError, s.serverCfg.IncludeErrorDetails, s.executionHeadersMode())
 			return
 		}
