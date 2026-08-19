@@ -3611,3 +3611,205 @@ fixing. Parse failure is not the same event as absence, and the code collapses
 the two. Report the failure — the engine already has a logger on the eval path
 — or fall back to the same 30 seconds absence gets. Silent zero is the one
 answer that cannot be right.
+
+## 140. The stress harness builds a server config eRPC refuses, and the refusal kills the test binary
+
+**Status:** fixed here. **Severity: high for the test suite.** It hid the whole
+`test/` package.
+
+`test/fake_erpc.go` — `prepareERPCConfig` built a `common.ServerConfig` with
+`HttpHostV4`, `HttpHostV6` and `HttpPortV4`, and set neither `ListenV4` nor
+`ListenV6`. `HttpServer.Start` rejects that config outright:
+
+    if s.serverV4 == nil && s.serverV6 == nil {
+        return fmt.Errorf("you must configure at least one of server.listenV4 or server.listenV6")
+    }
+
+`erpc.Init` runs `httpServer.Start` in a goroutine and answers any error with
+`util.OsExit` (bug 99), so `go test ./test/` ended in 0.7 s with no assertion,
+no panic and no reason. Measured before the fix:
+
+    $ go test -c -o /tmp/testpkg.test ./test/ && (cd test && /tmp/testpkg.test)
+    === RUN   TestStress_EvmJsonRpc_SimpleVariedFailures
+    $ echo $?
+    234
+
+234 is `1002 & 0xFF` — bug 98, still open on this branch despite a report that
+it had landed. `util/exit.go` still reads `ExitCodeHttpServerFailed = 1002`.
+
+The reason stayed invisible because `util.ConfigureTestLogger` sets the global
+zerolog level to `Disabled`. eRPC does log the cause; nothing prints it:
+
+    $ LOG_LEVEL=trace /tmp/testpkg.test
+    ERR failed to start http server: you must configure at least one of
+        server.listenV4 or server.listenV6
+
+Three separate defects had to line up: a config the library refuses, a library
+that exits instead of returning, and a logger that swallows the one line that
+explains it. Only the first is fixed here — `ListenV4` is now set. The other
+two are 99 and 98.
+
+## 141. The stress harness raced on `err` and threw away eRPC's start result
+
+**Status:** fixed here. **Severity: medium.** A dead eRPC looked exactly like a
+live one.
+
+`test/fake_erpc.go` — `executeStressTest` started eRPC like this:
+
+    erpcConfig, localBaseUrl, err := prepareERPCConfig(config)
+    ...
+    go func() {
+        err = initializeERPC(erpcConfig)
+        ...
+    }()
+    time.Sleep(1 * time.Second)
+    err = runK6StressTest(fs, localBaseUrl, config)
+
+Two defects in six lines. The goroutine writes the outer `err` while the test
+goroutine writes and reads it — an unsynchronised write to a shared variable.
+And whatever the goroutine writes is overwritten by the next line, so a failed
+`erpc.Init` never reached the caller.
+
+The one-second sleep stood in for readiness. It is not a readiness check: it
+passes whether eRPC is serving or gone.
+
+The harness now returns `erpc.Init`'s error on a channel and polls the service
+port until it accepts a connection, with the exit-code guard checked on every
+pass. A boot failure is reported in about 0.1 s and names the cause.
+
+## 142. The WebSocket mock upstreams write to one connection from two goroutines
+
+**Status:** fixed here. **Severity: medium for the test suite.** Three
+reproducible data races, and the WS tests could not be trusted under `-race`.
+
+`erpc/ws_server_test.go` — `mockWsUpstream` handed each handler the raw
+`*websocket.Conn`. gorilla/websocket permits one concurrent writer per
+connection; its own documentation says so. Several mock handlers break that
+rule: they answer `eth_subscribe` from the read loop and then deliver a
+notification from a timer goroutine, both with `conn.WriteJSON`.
+
+    go func() {
+        time.Sleep(300 * time.Millisecond)
+        deliverLog(conn, "0xblock1", "0xtx1", "0x0")   // writer 1
+    }()
+    ...
+    conn.WriteJSON(...)                                 // writer 2, read loop
+
+`go test -race ./erpc/ -run 'TestWebSocket_'` reported four races on
+`Conn.beginMessage` and `messageWriter.flushFrame`, and failed
+`TestWebSocket_RegressionFilterFanOutAcrossUpstreams`. The same shape sits in
+`TestWebSocket_SubscriptionDedup/TwoClientsShareOneUpstreamSubscription`,
+whose 500 ms notification goroutine shares the connection with its read loop.
+
+The counters in these tests were already guarded — the shared plain variable
+everyone looks for was not the problem. The connection was.
+
+The fix serialises writes by construction rather than per site: `mockWsUpstream`
+now hands handlers a `mockWsConn`, which embeds the connection and holds a
+mutex across `WriteJSON`. A handler cannot reach the unguarded write method by
+accident. `ws_server_selfheal_test.go` already used this shape by hand, which
+is what a per-site fix looks like when someone remembers.
+
+No assertion changed.
+
+## 143. `ConfigureTestLogger` disables logging by default, so a test's only diagnostic is silence
+
+**Status:** open. **Severity: low on its own, high next to 99.**
+
+`util/testing.go` — `ConfigureTestLogger` sets `zerolog.SetGlobalLevel(
+zerolog.Disabled)` unless `LOG_LEVEL` is set. Every package that calls it from
+`init()` therefore runs its tests with all eRPC logging off.
+
+That is the right default for a passing run. It is the wrong default for a
+failing one, because eRPC reports several classes of failure only through the
+logger. Bug 140 is the worked example: the library printed the exact reason it
+refused to start, the logger dropped it, and the operator saw an empty test
+run.
+
+The cost is not the missing lines. It is that a developer has no way to know
+the lines exist. Nothing in the failure output mentions `LOG_LEVEL`.
+
+The weakening is to let the failure decide, not the package: keep the default
+quiet but write through `t.Log`, so Go prints the buffered output for failing
+tests only. Short of that, name the switch in the harness — the `test/` package
+now does, in the message it prints when eRPC exits during boot.
+
+## 144. The policy eval timeout races on `evalErr`, and then always loses
+
+**Status:** open, production code, NOT fixed here — a concurrency change to
+the selection path needs its own pin and its own tests. **Severity: medium.**
+The eval timeout cannot fire, and `-race` reports the write.
+
+`internal/policy/slot.go:225-244` — `Slot.tickOnce` runs the JS eval in a
+goroutine and guards it with a timeout:
+
+    var (
+        evalRes *EvalResult
+        evalErr error
+    )
+    done := make(chan struct{})
+    go func() {
+        defer close(done)
+        evalRes, evalErr = runEval(...)      // line 232
+    }()
+
+    if timeout > 0 {
+        select {
+        case <-done:
+        case <-time.After(timeout):
+            evalErr = fmt.Errorf("%w after %s", ErrEvalTimeout, timeout)  // line 239
+            <-done // let the goroutine finish
+        }
+    }
+
+Two goroutines write `evalErr` with nothing ordering them. The race detector
+caught it during `go test -race ./erpc/ -run 'TestWebSocket_' -count=5`, on
+the network bootstrap path:
+
+    WARNING: DATA RACE
+    Write at 0x00c0048343e0 by goroutine 45690:
+      internal/policy.(*Slot).tickOnce.func1()  slot.go:232
+    Previous write at 0x00c0048343e0 by goroutine 45668:
+      internal/policy.(*Slot).tickOnce()        slot.go:239
+
+The race is the smaller half. The bigger half is that the timeout branch can
+never take effect. The goroutine assigns `evalErr` and only then runs its
+deferred `close(done)`, so `<-done` returns after that assignment and with it
+visible. Line 239 writes the timeout error, line 240 waits, and the wait
+guarantees the goroutine's value has replaced it.
+
+`ErrEvalTimeout` is written at exactly one place in the tree and read at none:
+
+    $ grep -rn ErrEvalTimeout internal/ erpc/
+    internal/policy/slot.go:239
+    internal/policy/errors.go:14  // comment
+    internal/policy/errors.go:16  // declaration
+
+So the "selection policy eval failed; retaining previous cache" warning below
+never fires for a slow eval, `consecutiveFails` never increments for one, and
+a policy that overruns its timeout is published as if it had finished on time.
+The knob reports a bound the code does not hold.
+
+The fix returns the outcome on a channel instead of sharing variables, which
+removes the race and makes the timeout verdict stand:
+
+    type evalOutcome struct {
+        res *EvalResult
+        err error
+    }
+    outcome := make(chan evalOutcome, 1)
+    go func() {
+        r, e := runEval(...)
+        outcome <- evalOutcome{r, e}
+    }()
+
+    select {
+    case o := <-outcome:
+        evalRes, evalErr = o.res, o.err
+    case <-time.After(timeout):
+        evalErr = fmt.Errorf("%w after %s", ErrEvalTimeout, timeout)
+        <-outcome // drain and discard; the timeout verdict stands
+    }
+
+That changes what eRPC does when an eval overruns, so it needs a test that
+pins the new behaviour before it lands.
