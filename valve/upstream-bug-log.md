@@ -3539,3 +3539,65 @@ cache key, so it wants its own change and a cache-generation bump.
 Pinned by `TestCacheHash_ConcatenatesAdjacentParamsWithoutASeparator`, whose
 assertion is the defect: when the separator lands, that test fails and should
 be rewritten as a `NotEqual`.
+
+## 120. The query shim advertises an uppercase hex prefix it always rejects
+
+**Status:** open. Pinned by
+`architecture/evm/eth_query_parse_test.go:TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept`,
+which fails once the parser honours the prefix it checks for.
+**Severity: low.** It costs one client a clear error message, not a wrong answer.
+
+`architecture/evm/eth_query_helpers.go` — `parseUint64Value` reads every
+quantity the query shim takes: `limit`, and the `number` of a pagination
+cursor. Its string case tests for both hex prefixes:
+
+    if strings.HasPrefix(v, "0x") || strings.HasPrefix(v, "0X") {
+        return common.HexToUint64(v)
+    }
+
+`common.HexToUint64` then rejects the uppercase form outright:
+
+    if len(hex) < 2 || hex[:2] != "0x" {
+        return 0, fmt.Errorf("invalid hex string: %s", hex)
+    }
+
+So `"0X2a"` reaches the branch written for it and comes back as an error. The
+caller sees `invalid limit: invalid hex string: 0X2a`, or the same wording for
+a cursor number, and has no way to tell that only the case of one character is
+wrong. The decimal fallthrough below never runs for these values either,
+because the prefix test already claimed them.
+
+The `0X` test is an unforced commitment: it promises a shape the converter does
+not accept. Either delete it, so an uppercase value falls to the decimal parser
+and fails with a plain message, or lowercase the prefix before the conversion.
+Deleting is the weaker change and the one the observed data supports — nothing
+here shows a client sending `0X`.
+
+## 121. A typo in `minSwitchInterval` silently disables the anti-flap cooldown
+
+**Status:** open. Pinned by
+`internal/policy/stdlib/duration_knob_test.go:TestStickyPrimary_MinSwitchInterval_DecidesTheHandover`,
+whose `UnparseableString` and `WrongType` cases assert today's handover.
+**Severity: medium.** It turns a one-character config mistake into fleet-wide
+primary flapping, with no log line and no metric.
+
+`internal/policy/stdlib/install.go` — the `durationMs` global returns 0 for
+every value it cannot read: a string `time.ParseDuration` refuses, an empty
+string, a boolean, an object. `stdlib.js` feeds it the operator's
+`minSwitchInterval` and uses the result as the sticky cooldown:
+
+    const minSwitchMs = (opts.minSwitchInterval != null) ? durationMs(opts.minSwitchInterval) : 30_000;
+
+A cooldown of 0 makes the elapsed-time guard `(ctx.now - lastSwitchAt) <
+minSwitchMs` always false, so every tick re-decides the primary on the score
+gap alone. During an incident that gap is large, which is exactly the case the
+cooldown exists for. `stickyPrimary({ minSwitchInterval: '30 s' })` and
+`stickyPrimary({ minSwitchInterval: '30sec' })` therefore behave as if sticky
+were switched off.
+
+The absent-value default is 30 seconds, so an operator who writes the knob
+wrongly gets LESS protection than one who omits it. That is the part worth
+fixing. Parse failure is not the same event as absence, and the code collapses
+the two. Report the failure — the engine already has a logger on the eval path
+— or fall back to the same 30 seconds absence gets. Silent zero is the one
+answer that cannot be right.
