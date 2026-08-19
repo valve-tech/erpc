@@ -1,8 +1,10 @@
 package common
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,6 +23,7 @@ type failAfterNWrites struct {
 	remaining int
 	written   int
 	failed    int
+	bytes     bytes.Buffer
 }
 
 func (w *failAfterNWrites) Write(p []byte) (int, error) {
@@ -30,6 +33,7 @@ func (w *failAfterNWrites) Write(p []byte) (int, error) {
 	}
 	w.remaining--
 	w.written += len(p)
+	w.bytes.Write(p)
 	return len(p), nil
 }
 
@@ -167,18 +171,140 @@ func TestCacheHash_SeparatesByMethodAndParameterValue(t *testing.T) {
 	require.NotEqual(t, baseHash, otherParam)
 }
 
-// TestCacheHash_ConcatenatesAdjacentParamsWithoutASeparator records bug 118.
-// hashValue writes each value straight after the previous one, so two
-// parameter lists whose concatenations match produce ONE cache key. The
-// assertion below is the defect, not the requirement: when the separator
-// lands, this test fails and should be rewritten as a NotEqual.
-func TestCacheHash_ConcatenatesAdjacentParamsWithoutASeparator(t *testing.T) {
-	split, err := NewJsonRpcRequest("eth_getStorageAt", []interface{}{"0xabc", "0xdef", "latest"}).CacheHash()
-	require.NoError(t, err)
-	joined, err := NewJsonRpcRequest("eth_getStorageAt", []interface{}{"0xabc0xdef", "", "latest"}).CacheHash()
-	require.NoError(t, err)
+// TestCacheHash_SeparatesParamListsThatConcatenateToTheSameBytes covers bug
+// 118. hashValue used to write each value straight after the previous one, so
+// any two parameter lists whose bytes concatenated the same way shared ONE
+// cache key — and whichever request landed first served the other its data.
+// Every pair below collided under the old hasher.
+func TestCacheHash_SeparatesParamListsThatConcatenateToTheSameBytes(t *testing.T) {
+	t.Parallel()
 
-	require.Contains(t, split, "eth_getStorageAt:", "both requests must produce a real key")
-	require.Equal(t, split, joined,
-		"bug 118: two different parameter lists share one cache key because hashValue writes no separator")
+	hash := func(method string, params []interface{}) string {
+		t.Helper()
+		h, err := NewJsonRpcRequest(method, params).CacheHash()
+		require.NoError(t, err)
+		require.Contains(t, h, method+":", "every request must produce a real key")
+		return h
+	}
+
+	// Three well-formed 32-byte log topics.
+	topicA := "0x" + strings.Repeat("a", 64)
+	topicB := "0x" + strings.Repeat("b", 64)
+	topicC := "0x" + strings.Repeat("c", 64)
+
+	cases := []struct {
+		name   string
+		method string
+		left   []interface{}
+		right  []interface{}
+	}{
+		{
+			// The probe that confirmed the bug: the boundary between two
+			// adjacent string params moves and nothing records that it moved.
+			name:   "adjacent params",
+			method: "eth_getStorageAt",
+			left:   []interface{}{"0xabc", "0xdef", "latest"},
+			right:  []interface{}{"0xabc0xdef", "", "latest"},
+		},
+		{
+			// The reachable case, and the worst one: BOTH sides are valid
+			// eth_getLogs filters that a node answers and eRPC caches, and
+			// they ask different questions. On the left topic0 is A or B and
+			// topic1 is C. On the right topic0 is A and topic1 is B or C. The
+			// old hasher wrote A, B and C in that order for both.
+			name:   "eth_getLogs topic nesting",
+			method: "eth_getLogs",
+			left: []interface{}{map[string]interface{}{
+				"topics": []interface{}{[]interface{}{topicA, topicB}, topicC},
+			}},
+			right: []interface{}{map[string]interface{}{
+				"topics": []interface{}{topicA, []interface{}{topicB, topicC}},
+			}},
+		},
+		{
+			name:   "an array against the string its members concatenate to",
+			method: "eth_call",
+			left:   []interface{}{[]interface{}{"0xa", "b"}},
+			right:  []interface{}{"0xab"},
+		},
+		{
+			// The boundary between an object key and its value.
+			name:   "object key against object value",
+			method: "eth_call",
+			left:   []interface{}{map[string]interface{}{"ab": "c"}},
+			right:  []interface{}{map[string]interface{}{"a": "bc"}},
+		},
+		{
+			name:   "two arrays against one",
+			method: "eth_call",
+			left:   []interface{}{[]interface{}{"0xa"}, []interface{}{"0xb"}},
+			right:  []interface{}{[]interface{}{"0xa", "0xb"}},
+		},
+		{
+			// A number and the string that spells it must not share a key.
+			name:   "a number against its own digits",
+			method: "eth_call",
+			left:   []interface{}{42},
+			right:  []interface{}{"42"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.NotEqual(t, hash(tc.method, tc.left), hash(tc.method, tc.right),
+				"two different requests must not share one cache key")
+		})
+	}
+}
+
+// TestHashValue_EncodesEveryStructureDistinctly states the rule the cases
+// above sample: the byte stream hashValue writes must identify the value it
+// came from. Any two distinct values that produce the same bytes are two
+// requests that share one cached answer.
+func TestHashValue_EncodesEveryStructureDistinctly(t *testing.T) {
+	t.Parallel()
+
+	values := []interface{}{
+		nil,
+		"",
+		"null",
+		"a",
+		"ab",
+		"a:b",
+		"1",
+		1,
+		1.0,
+		true,
+		"true",
+		[]interface{}{},
+		[]interface{}{""},
+		[]interface{}{"a"},
+		[]interface{}{"ab"},
+		[]interface{}{"a", "b"},
+		[]interface{}{[]interface{}{"a"}, "b"},
+		[]interface{}{[]interface{}{"a", "b"}},
+		[]interface{}{nil},
+		map[string]interface{}{},
+		map[string]interface{}{"a": "b"},
+		map[string]interface{}{"ab": ""},
+		map[string]interface{}{"a": "", "b": ""},
+		map[string]interface{}{"a": []interface{}{"b"}},
+		// A string that spells a whole frame must not be read as one.
+		"s1:a",
+		[]interface{}{"s1:a"},
+	}
+
+	seen := make(map[string]interface{}, len(values))
+	for _, v := range values {
+		w := &failAfterNWrites{remaining: 1 << 20}
+		require.NoError(t, hashValue(w, v))
+		encoded := w.bytes.String()
+
+		if prev, clash := seen[encoded]; clash {
+			require.Failf(t, "two values encode to the same bytes",
+				"%#v and %#v both encode to %q", prev, v, encoded)
+		}
+		seen[encoded] = v
+	}
 }
