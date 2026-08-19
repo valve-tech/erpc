@@ -492,15 +492,25 @@ func (i *Initializer) MarkTaskAsFailed(name string, err error) {
 func (i *Initializer) Stop(destroyFn func() error) error {
 	i.logger.Debug().Msg("stopping initializer")
 
-	i.tasksMu.Lock()
-	defer i.tasksMu.Unlock()
-
+	// Cancel the auto-retry loop and wait for it to exit BEFORE taking tasksMu.
+	//
+	// The loop calls attemptRemainingTasks, which takes tasksMu itself. Waiting
+	// for the loop while holding that lock is a deadlock: the goroutine cannot
+	// acquire the mutex, so it never returns, so autoRetryWg never drains, so
+	// Stop never returns and never releases the mutex. Nothing breaks the
+	// cycle — Stop has no timeout on this wait.
+	//
+	// `go test -race ./util/ -count=6` hit it: Stop sat at this Wait for 39
+	// minutes holding tasksMu while the retry goroutine sat on the Lock. In
+	// production the same cycle hangs shutdown forever, so an orchestrator has
+	// to kill the process after its grace period.
 	if cancel := i.cancelAutoRetry.Load(); cancel != nil {
 		cancel.(context.CancelFunc)()
 	}
-
-	// Wait for auto-retry goroutine to finish
 	i.autoRetryWg.Wait()
+
+	i.tasksMu.Lock()
+	defer i.tasksMu.Unlock()
 
 	// Now, wait for any tasks that might still be running to finish or fail.
 	waitCtx, waitCancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout+100*time.Millisecond)

@@ -447,9 +447,13 @@ func TestInitializer_MultipleRapidFailures(t *testing.T) {
 	defer cancel()
 	init := setupInitializer(t, appCtx, conf)
 
-	var attempts int
+	// The task body runs on the initializer's goroutine while this test reads
+	// the counter, so a plain int is a data race. `go test -race ./util/`
+	// reports it: the write is the increment below, the read is the assertion
+	// further down.
+	var attempts atomic.Int64
 	task := NewBootstrapTask("quick-failer", func(ctx context.Context) error {
-		attempts++
+		attempts.Add(1)
 		// Fail quickly:
 		return errors.New("keep failing")
 	})
@@ -466,7 +470,7 @@ func TestInitializer_MultipleRapidFailures(t *testing.T) {
 	require.Error(t, err, "task should eventually fail or context should time out")
 
 	// Check we tried multiple times (rapidly)
-	assert.True(t, attempts > 1, "should attempt multiple times in quick succession")
+	assert.True(t, attempts.Load() > 1, "should attempt multiple times in quick succession")
 
 	// Check final State is either partial or failed
 	state := init.State()

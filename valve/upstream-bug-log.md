@@ -3124,6 +3124,58 @@ peer; only the `ups: ups` rebuild keeps it out.
 A comment on `aggKey` naming it as the scope guard costs one line and removes
 the trap.
 
+## 122. `Initializer.Stop` deadlocks against its own auto-retry loop
+
+**Status: FIXED in the fork.** Upstream still carries it.
+**Severity: high.** Shutdown hangs forever, with a mutex held.
+
+`Stop` took `tasksMu` and then, still holding it, waited for the auto-retry
+goroutine:
+
+    i.tasksMu.Lock()
+    defer i.tasksMu.Unlock()
+    if cancel := i.cancelAutoRetry.Load(); cancel != nil { cancel.(context.CancelFunc)() }
+    i.autoRetryWg.Wait()          // <- blocks here, holding tasksMu
+
+The loop it waits for calls `attemptRemainingTasks`, which takes `tasksMu`
+itself (`initializer.go:299`). If the loop passed its context check just
+before `Stop` cancelled, it goes on to that `Lock` and blocks. It then never
+returns, so `autoRetryWg` never drains, so `Stop` never returns and never
+releases the mutex. Nothing breaks the cycle — that `Wait` has no timeout and
+takes no context.
+
+Found by `go test -race ./util/ -count=6`, which wedged for the full 40-minute
+test timeout. The dump is unambiguous:
+
+    goroutine 14668 [sync.WaitGroup.Wait, 39 minutes]:
+      util.(*Initializer).Stop  .../util/initializer.go:503
+    goroutine 10698 [sync.Mutex.Lock, 39 minutes]:
+      util.(*Initializer).Stop  .../util/initializer.go:495
+
+In production this hangs shutdown until the orchestrator's grace period
+expires and it sends SIGKILL.
+
+Fix: cancel the loop and wait for it BEFORE taking `tasksMu`. The wait no
+longer needs the lock, and the loop can finish.
+
+Pinned by `TestInitializer_StopDoesNotDeadlockAgainstTheAutoRetryLoop`. The
+window is between the loop's context check and its `Lock`, so one `Stop` almost
+always misses it — the test drives 400 short-lived initializers and fails on
+the first `Stop` that does not return. Against the old ordering it fails at
+round 71; with the fix it passes at `-count=3` and under `-race`.
+
+## 123. A test counted attempts with a plain int across two goroutines
+
+**Status: FIXED in the fork.** Fork-owned test defect, not upstream's.
+
+`util/initializer_test.go` incremented `var attempts int` inside a task body,
+which runs on the initializer's goroutine, and read it from the test
+goroutine. `go test -race ./util/` reported the write and the read.
+
+It stayed hidden because 122 wedged the package first: the run never got far
+enough to report anything. With the deadlock fixed the race surfaces in 0.2
+seconds. Now an `atomic.Int64`.
+
 ## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
 
 **Status:** open. **Severity: medium.** Found by `go test ./util/ -race -count=2`.
