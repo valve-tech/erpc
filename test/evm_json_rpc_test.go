@@ -31,10 +31,14 @@ func TestStress_EvmJsonRpc_SimpleVariedFailures(t *testing.T) {
 		},
 	}
 
+	requireK6(t)
+	requireFreePorts(t, stressPorts(config)...)
+
 	result, err := executeStressTest(config)
 	if err != nil {
 		t.Fatalf("Stress test failed: %v", err)
 	}
+	requireNoLibraryExit(t)
 
 	totalNetworkRequests := 0
 	sums := result.SumCounter("erpc_network_request_received_total", []string{})

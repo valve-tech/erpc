@@ -36,9 +36,28 @@ func init() {
 	util.ConfigureTestLogger()
 }
 
+// mockWsConn is the connection a mock upstream handler writes to.
+//
+// gorilla/websocket allows one concurrent writer per connection. Several mock
+// handlers answer a request from the read loop and deliver a notification from
+// a timer goroutine, so both goroutines reach the same connection. The mutex
+// serialises them. Handlers therefore never touch the embedded *websocket.Conn
+// write methods directly.
+type mockWsConn struct {
+	*websocket.Conn
+	writeMu sync.Mutex
+}
+
+// WriteJSON shadows the embedded method and holds the write lock.
+func (c *mockWsConn) WriteJSON(v interface{}) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.Conn.WriteJSON(v)
+}
+
 // mockWsUpstream creates a test HTTP server that upgrades to WebSocket
 // and delegates all message handling to the provided callback.
-func mockWsUpstream(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Server {
+func mockWsUpstream(t *testing.T, handler func(conn *mockWsConn)) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +67,7 @@ func mockWsUpstream(t *testing.T, handler func(conn *websocket.Conn)) *httptest.
 			return
 		}
 		defer c.Close()
-		handler(c)
+		handler(&mockWsConn{Conn: c})
 	}))
 	return srv
 }
@@ -254,7 +273,7 @@ func setupTestERPCServer(t *testing.T, cfg *common.Config) (string, context.Canc
 // standardMockWsHandler handles the common set of state poller methods
 // (eth_chainId, eth_getBlockByNumber, eth_syncing) that the upstream
 // must respond to before the WS client is considered ready.
-func standardMockWsHandler(conn *websocket.Conn, customHandler func(method string, id interface{}, req map[string]interface{})) {
+func standardMockWsHandler(conn *mockWsConn, customHandler func(method string, id interface{}, req map[string]interface{})) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -618,7 +637,7 @@ func TestWebSocket_Subscriptions(t *testing.T) {
 	// Verifies the full subscribe -> receive notification -> unsubscribe lifecycle
 	t.Run("SubscribeReceiveUnsubscribe", func(t *testing.T) {
 		notifCh := make(chan struct{}, 1)
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -726,7 +745,7 @@ func TestWebSocket_Subscriptions(t *testing.T) {
 	// Verifies client disconnect cleanly removes the client from the fan-out
 	// group without disturbing the persistent upstream newHeads subscription.
 	t.Run("SubscriptionCleanupOnDisconnect", func(t *testing.T) {
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -774,7 +793,7 @@ func TestWebSocket_Subscriptions(t *testing.T) {
 func TestWebSocket_UpstreamClient(t *testing.T) {
 	// Verifies regular RPC requests can be routed through a WS upstream
 	t.Run("RPCThroughWsUpstream", func(t *testing.T) {
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_getBalance":
@@ -840,7 +859,7 @@ func TestWebSocket_UpstreamClient(t *testing.T) {
 		connCount := 0
 		var connMu sync.Mutex
 
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			connMu.Lock()
 			connCount++
 			count := connCount
@@ -908,7 +927,7 @@ func TestWebSocket_SubscriptionRecovery(t *testing.T) {
 	t.Run("ClientDisconnectedOnUpstreamDrop", func(t *testing.T) {
 		closeUpstream := make(chan struct{})
 
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			for {
 				_, msg, err := conn.ReadMessage()
 				if err != nil {
@@ -977,7 +996,7 @@ func TestWebSocket_SubscriptionRecovery(t *testing.T) {
 	t.Run("SubscribeFailsWhenUpstreamDisconnected", func(t *testing.T) {
 		// Create a mock that immediately closes the WS connection,
 		// so eRPC's upstream WS stays disconnected.
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			conn.Close()
 		})
 		defer mockUpstream.Close()
@@ -1011,7 +1030,7 @@ func TestWebSocket_SubscriptionDedup(t *testing.T) {
 		var subMu sync.Mutex
 		upstreamSubId := "0xsharedsub123"
 
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -1234,7 +1253,7 @@ func TestWebSocket_GracefulShutdown(t *testing.T) {
 	// Verifies server shutdown closes the upstream WS connection (which implicitly
 	// terminates all upstream subscriptions) and closes all client connections.
 	t.Run("ServerShutdownCleansUpSubscriptions", func(t *testing.T) {
-		mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+		mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -1388,7 +1407,7 @@ func TestWebSocket_RegressionFailedSubscribeKeepsConnectionOpen(t *testing.T) {
 // first failure caused permanent silence on the network.
 func TestWebSocket_RegressionBootstrapRetriedOnEverySubscribe(t *testing.T) {
 	subscribeCount := int64(0)
-	mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+	mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 		standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 			switch method {
 			case "eth_subscribe":
@@ -1445,7 +1464,7 @@ func TestWebSocket_RegressionSuggestLatestBlockOnEveryUpstream(t *testing.T) {
 	// Two WS upstreams that both deliver the same block.
 	upSubId := "0xupsub"
 
-	deliverNotification := func(conn *websocket.Conn, blockHash string) {
+	deliverNotification := func(conn *mockWsConn, blockHash string) {
 		conn.WriteJSON(map[string]interface{}{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
@@ -1460,7 +1479,7 @@ func TestWebSocket_RegressionSuggestLatestBlockOnEveryUpstream(t *testing.T) {
 	}
 
 	makeMock := func() *httptest.Server {
-		return mockWsUpstream(t, func(conn *websocket.Conn) {
+		return mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -1517,7 +1536,7 @@ func TestWebSocket_RegressionFilterFanOutAcrossUpstreams(t *testing.T) {
 	subscribeCount := int64(0)
 	logSubId := "0xlogsub"
 
-	deliverLog := func(conn *websocket.Conn, blockHash, txHash, logIndex string) {
+	deliverLog := func(conn *mockWsConn, blockHash, txHash, logIndex string) {
 		conn.WriteJSON(map[string]interface{}{
 			"jsonrpc": "2.0",
 			"method":  "eth_subscription",
@@ -1539,7 +1558,7 @@ func TestWebSocket_RegressionFilterFanOutAcrossUpstreams(t *testing.T) {
 	}
 
 	makeMock := func() *httptest.Server {
-		return mockWsUpstream(t, func(conn *websocket.Conn) {
+		return mockWsUpstream(t, func(conn *mockWsConn) {
 			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 				switch method {
 				case "eth_subscribe":
@@ -1606,7 +1625,7 @@ func TestWebSocket_RegressionFilterFanOutAcrossUpstreams(t *testing.T) {
 // after the group is removed from the parent map.
 func TestWebSocket_RegressionUnsubscribeDoesNotPanicOnReconnect(t *testing.T) {
 	logSubId := "0xunsublog"
-	mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+	mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 		standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 			if method == "eth_subscribe" {
 				params, _ := req["params"].([]interface{})
@@ -1661,7 +1680,7 @@ func TestWebSocket_RegressionInternalRequestIdsDontCollide(t *testing.T) {
 	subscribeIds := make([]int64, 0)
 	var idMu sync.Mutex
 
-	mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
+	mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
 		standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 			if method == "eth_subscribe" {
 				idMu.Lock()
