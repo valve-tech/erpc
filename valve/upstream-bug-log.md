@@ -2940,3 +2940,183 @@ pointer out, rather than retro-fitting a field afterwards.
 
 Neither is done here, because both are wider than a race fix and each needs
 its own pin.
+
+
+## 105. A negative or fractional JSON block number becomes a real block number
+
+**Status:** open. Found while covering `util/`.
+
+`util/json_rpc.go:99` converts a JSON number to a block number with a bare
+cast:
+
+    case float64:
+        blockNumber = fmt.Sprintf("0x%x", uint64(v))
+
+Every JSON number arrives as a `float64`, so the cast decides what an
+out-of-range or non-integral value means. Go leaves that result
+implementation-defined: the spec says a float-to-integer conversion whose value
+the target type cannot represent "succeeds but the result value is
+implementation-dependent". The parser returns no error either way.
+
+Measured on this machine (darwin/arm64, Go's saturating conversion):
+
+    -1      -> "0x0"                  (genesis)
+    -1e18   -> "0x0"                  (genesis)
+    NaN     -> "0x0"                  (genesis)
+    1e30    -> "0xffffffffffffffff"
+    +Inf    -> "0xffffffffffffffff"
+    1.5     -> "0x1"                  (truncated, no error)
+
+An architecture whose conversion traps to the minimum instead of saturating
+produces a different block number for the same request. The same eRPC build on
+two CPUs disagrees on what block a request refers to.
+
+`architecture/evm/block_ref.go:483` feeds the result into
+`parseCompositeBlockParam`, which is the cache block reference and the input to
+block-availability upstream selection. So `eth_getBlockByNumber` with `-1`
+routes and caches as genesis — a block every pruned node claims to have —
+while the upstream itself rejects the parameter.
+
+The weakening is to stop guessing. The switch already has an exact rule for
+the well-formed cases; the out-of-range and non-integral cases are not in the
+observed data as valid input, so they belong in the error return that the
+`default` branch already provides:
+
+    case float64:
+        if v < 0 || v > math.MaxUint64 || v != math.Trunc(v) {
+            return "", nil, fmt.Errorf("invalid block number: %v", v)
+        }
+        blockNumber = fmt.Sprintf("0x%x", uint64(v))
+
+## 106. `ParseBlockHashHexToBytes` guards against its own guarantee
+
+**Status:** open. Minor. Dead code, not a live defect.
+
+`util/json_rpc.go:72-78` checks two conditions that the line above rules out:
+
+    b, err := evm.HexToBytes(norm)
+    if err != nil { ... }
+    if len(b) != 32 { ... }
+
+`norm` comes from `NormalizeBlockHashHexString`, which returns either an error
+or a string of `0x` plus exactly 64 lowercase hex digits. Given that string,
+`HexToBytes` cannot fail and cannot return other than 32 bytes. Both branches
+are unreachable, and the coverage profile confirms no test in the tree reaches
+them.
+
+The cost is not the two statements. It is that the pair reads as "this
+function handles hashes of any length", so a later change to the normalizer
+looks safe when it is not. Either delete the branches and state the
+normalizer's guarantee in a comment, or move the length check into the
+normalizer where the invariant is actually established.
+
+## 107. The quantile tracker's NaN guard cannot fire, and would not help if it did
+
+**Status:** open. Minor. Dead code, verified by probe.
+
+`health/quantile.go:159-167` guards the value coming out of the sketch:
+
+    if math.IsNaN(seconds) || math.IsInf(seconds, 0) { ... return 0 }
+
+DDSketch rejects NaN and both infinities at `Add`, which
+`QuantileTracker.Add` (`health/quantile.go:47`) logs and drops. A sketch
+therefore never holds a value that could produce a NaN or Inf quantile. I
+probed all three inputs: each one is refused at the input, and a real sample
+added next to them still reads back correctly.
+
+The second half matters more. `GetQuantile` converts the result with
+`time.Duration(seconds * float64(time.Second))`, and a float-to-integer
+conversion of NaN is implementation-defined — on this machine it yields 0. So
+even if the sketch did return NaN, the caller would already see 0. The guard
+adds a log line, not a behaviour.
+
+Keeping it is cheap; the entry exists so nobody reads it as evidence that the
+sketch can emit NaN, and so a future reader knows the real defence is at
+`Add`.
+
+## 108. `GetUpstreamMetrics` scopes results twice, and the guard that reads like the scope is the optimisation
+
+**Status:** open. Not a defect today. A hazard for the next edit.
+
+`health/tracker.go:1174-1183` filters the per-network key list by upstream id,
+then rebuilds the lookup key from the caller's own upstream:
+
+    if k.ups == nil || k.ups.Id() != targetID { continue }
+    aggKey := upstreamKey{ups: ups, method: k.method, finality: ...All}
+
+Two mutations prove which one enforces the scope. Deleting the id filter
+changes nothing observable — `aggKey` carries the caller's upstream, so a
+peer's method produces a key that is not in the map and the load misses.
+Changing `ups: ups` to `ups: k.ups` also changes nothing on its own, because
+the filter has already dropped the foreign keys. Only both together leak one
+upstream's metrics into another's map.
+
+That is fine as defence in depth. The hazard is the comment: the filter looks
+like the correctness guard, so an optimisation pass that keeps the filter and
+switches `aggKey` to the already-loaded `k.ups` reads as a safe change. It is
+not. `upstreamKey` compares the interface value, and the tree already has a
+test (`TestGetUpstreamMetrics_DistinctUpstreamsSameID_Buckets`) asserting that
+two DISTINCT upstream instances can share an id. The filter passes for such a
+peer; only the `ups: ups` rebuild keeps it out.
+
+A comment on `aggKey` naming it as the scope guard costs one line and removes
+the trap.
+
+## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
+
+**Status:** open. **Severity: medium.** Found by `go test ./util/ -race -count=2`.
+
+`util/initializer.go:506-512`:
+
+    waitCtx, waitCancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout+100*time.Millisecond)
+    defer waitCancel()
+    if err := i.WaitForTasks(waitCtx); err != nil {
+        i.logger.Warn().Err(err).Msg("failed waiting for tasks to finish within the stop sequence")
+    }
+
+`Stop` gives the in-flight tasks one task-timeout to end. When they do not, it
+logs a warning and returns anyway. The goroutines that
+`attemptRemainingTasks` launched at `:332` keep running, and they keep writing
+to `i.logger` — `:366`, `:379` and `:384` all log after the task body
+returns.
+
+So `Stop` returning does not mean the initializer stopped. It means the
+initializer gave up waiting. The caller frees whatever the initializer was
+guarding, while task goroutines still hold the logger it lent them and still
+emit "initialization task failed" lines for a component the operator has
+already torn down.
+
+The race detector makes it visible. `util/initializer_test.go:19` gives each
+test a `zerolog.NewTestWriter(t)`, so a leaked goroutine's log call lands in
+`t.Log` after `tRunner` has finished the test:
+
+    WARNING: DATA RACE
+    Read at ... by goroutine 6083:
+      testing.(*common).destination()
+      zerolog.TestWriter.Write()
+      util.(*Initializer).attemptRemainingTasks.func1.1()
+          util/initializer.go:379
+    Previous write at ... by goroutine 6082:
+      testing.tRunner.func1()
+
+`go test ./util/ -race -count=1` passes; `-count=2` fails in
+`TestInitializer_MultipleRapidFailures`, which is the one test that drives
+`Stop` into the timeout branch. I reproduced it on a clean tree with my new
+test files removed, so it is not introduced by this work.
+
+Two separate things are wrong, and they need separate fixes:
+
+1. **`Stop` has no way to say "I could not stop".** It logs the timeout and
+   returns `destroyFn`'s error, so the caller cannot tell a clean stop from an
+   abandoned one. Returning the wait error (joined with `destroyFn`'s) is the
+   weaker design — it reports what happened instead of deciding for the caller
+   that a timeout is survivable.
+
+2. **A task goroutine outlives the logger's owner.** The task context is
+   already cancelled by then; the goroutine simply has more work to do after
+   the task body returns. Either it stops logging once the initializer is
+   stopped, or `Stop` blocks until the launch WaitGroup drains.
+
+The same test also reads `attempts` (`util/initializer_test.go:452, 469`)
+without synchronisation while retry goroutines increment it. That one is a
+test defect, not a product defect, and it is not what the detector flagged.
