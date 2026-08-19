@@ -230,10 +230,18 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if n.policyEngine == nil {
 		return nil
 	}
-	cfg := n.cfg.SelectionPolicy
-	if cfg == nil {
-		cfg = &common.SelectionPolicyConfig{}
-		n.cfg.SelectionPolicy = cfg
+	// Register a copy, never the operator's own struct. Two networks can hold
+	// one *SelectionPolicyConfig, and everything below writes it: the failover
+	// flag here, and EvalFunc / EvalFuncOriginal / CompiledProgram inside
+	// SetDefaults and inside the engine's default-policy upgrade. With a shared
+	// struct the last network to bootstrap wins, so one network silently runs
+	// under another's failover flag. See entries 96, 97 and 131 in
+	// valve/upstream-bug-log.md. The copy is shallow on purpose: the only
+	// pointer field it carries is the compiled program, which nothing mutates
+	// after compilation.
+	cfg := &common.SelectionPolicyConfig{}
+	if n.cfg.SelectionPolicy != nil {
+		*cfg = *n.cfg.SelectionPolicy
 	}
 	// `failover.onDefaultsExhausted` reaches the HTTP path through the
 	// selection policy: the engine publishes this to the eval as

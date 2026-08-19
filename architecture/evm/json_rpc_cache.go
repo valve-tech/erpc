@@ -731,13 +731,21 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 	}
 
 	if lg.GetLevel() <= zerolog.TraceLevel {
+		// zerolog writes a RawJSON value verbatim, so an empty one leaves a
+		// dangling key and corrupts the whole record. A response eRPC could not
+		// read, or one whose bytes live in a result writer, both arrive here
+		// with nothing. See entry 160 in valve/upstream-bug-log.md.
+		result := rpcResp.GetResultBytes()
+		if len(result) == 0 {
+			result = []byte("null")
+		}
 		lg.Trace().
 			Str("blockRef", blockRef).
 			Str("primaryKey", pk).
 			Str("rangeKey", rk).
 			Int64("blockNumber", blockNumber).
 			Interface("policies", policies).
-			RawJSON("result", rpcResp.GetResultBytes()).
+			RawJSON("result", result).
 			Str("finalityState", finState.String()).
 			Msg("caching the response")
 	} else {
@@ -1178,15 +1186,11 @@ func shouldCacheResponse(
 		return false, nil
 	}
 
-	// NormalizedResponse.JsonRpcResponse() answers (nil, nil) for a nil
-	// response, so both arguments can arrive nil together. ResultLength and
-	// GetResultBytes below lock the receiver and panic on a nil pointer, so the
-	// nil case is decided here — before either call — rather than in the
-	// isEmpty expression further down, which never got the chance to run.
-	size := 0
-	if rpcResp != nil {
-		size = rpcResp.ResultLength()
-	}
+	// NormalizedResponse.JsonRpcResponse() answers (nil, nil) for a nil or a
+	// released response, so both arguments can arrive nil together.
+	// ResultLength decides that case itself — see GetResultBytes in
+	// common/json_rpc.go — so no caller needs its own guard.
+	size := rpcResp.ResultLength()
 	// Check if the response size is within the limits
 	if !policy.MatchesSizeLimits(size) {
 		lg.Debug().Int("size", size).Msg("skip caching because response size does not match policy limits")

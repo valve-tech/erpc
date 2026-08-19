@@ -57,8 +57,12 @@ func DefaultPolicySource() string {
 //
 // The early return below already makes the rewrite idempotent — the second
 // caller sees the replaced EvalFunc and stops — so serialising is all this
-// needs. The deeper fix is for the engine to stop editing a config it does
-// not own; that is logged as a separate finding.
+// needs.
+//
+// Network.Bootstrap now hands RegisterNetwork a per-network COPY, so no two
+// production registrations reach here with one pointer any more (entry 131).
+// The mutex stays because RegisterNetwork is exported: it bounds what any
+// other caller can do to a config it shares, which the copy alone cannot.
 var upgradeDefaultPolicyMu sync.Mutex
 
 func upgradeDefaultPolicy(cfg *common.SelectionPolicyConfig) error {

@@ -193,23 +193,19 @@ func TestNewHttpServer_TrimsAndDropsBlankTrustedIPHeaders(t *testing.T) {
 	require.Equal(t, "203.0.113.4", got)
 }
 
-// TestResolveRealClientIP_DoesNotUnderstandTheRfc7239ForwardedHeader pins
-// today's behaviour for an operator who configures `Forwarded` (RFC 7239)
-// instead of `X-Forwarded-For`. resolveRealClientIP parses every configured
-// header as a bare comma-separated IP list, so `for=203.0.113.7` never parses
-// as an address and the request is attributed to the proxy instead of the
-// client — every caller behind that edge shares one rate-limit bucket.
-//
-// http_server.go carries a parseForwardedFor that would handle this, but
-// nothing calls it. This test fails the moment that changes, which is the point:
-// the fix is to wire it up, and this expectation is what must then be updated.
-func TestResolveRealClientIP_DoesNotUnderstandTheRfc7239ForwardedHeader(t *testing.T) {
+// TestResolveRealClientIP_ReadsAForwardedHeaderWhateverSyntaxItCarries covers
+// an operator who configures `Forwarded` (RFC 7239) instead of
+// `X-Forwarded-For`. eRPC accepts any header name, so it must read the value
+// that name carries. Reading `for=203.0.113.7` as no address at all attributed
+// the request to the proxy, and every caller behind that edge then shared one
+// rate-limit bucket. See entry 30 in valve/upstream-bug-log.md; the gRPC half
+// is entry 133, and both surfaces now go through parseForwardedChain.
+func TestResolveRealClientIP_ReadsAForwardedHeaderWhateverSyntaxItCarries(t *testing.T) {
 	srv := newClientIPServer(t, []string{"10.0.0.0/8"}, []string{"Forwarded"})
 
 	got := srv.resolveRealClientIP(requestFrom("10.0.0.1:51000", map[string]string{
 		"Forwarded": `for=203.0.113.7;proto=https`,
 	}))
 
-	require.Equal(t, "10.0.0.1", got,
-		"RFC 7239 syntax is not parsed today; see parseForwardedFor, which is unreachable")
+	require.Equal(t, "203.0.113.7", got)
 }

@@ -63,16 +63,21 @@ func TestParseUint64Value_RefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// parseUint64Value tests for the "0X" prefix and then hands the value to
-// common.HexToUint64, which only accepts a lowercase "0x". So the uppercase
-// branch always ends in an error and the caller sees "invalid hex string". This
-// test pins that behaviour; see entry 120 in valve/upstream-bug-log.md. It fails
-// once the parser honours the prefix it already checks for.
-func TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept(t *testing.T) {
+// parseUint64Value no longer tests for a "0X" prefix. It used to, and then
+// handed the value to common.HexToUint64, which accepts only the lowercase
+// "0x" — so the branch written for the uppercase form always ended in
+// "invalid hex string", a message that hides which single character is wrong.
+// Deleting the test lets the value fall through to the decimal parser and fail
+// with a message that names the input. See entry 120 in
+// valve/upstream-bug-log.md.
+func TestParseUint64Value_ReportsAnUppercaseHexPrefixAgainstTheInput(t *testing.T) {
 	got, err := parseUint64Value("0X2a")
-	require.Error(t, err, "today the uppercase prefix is a dead branch")
+	require.Error(t, err, "no converter here accepts an uppercase hex prefix")
 	assert.Equal(t, uint64(0), got)
-	assert.Contains(t, err.Error(), "invalid hex string")
+	assert.Contains(t, err.Error(), "0X2a",
+		"the message must quote what the client sent, not name a hex format it never claimed")
+	assert.NotContains(t, err.Error(), "invalid hex string",
+		"a dead uppercase branch would still route this to the hex converter")
 }
 
 func TestNormalizeFieldSelection_CopiesAndFilters(t *testing.T) {

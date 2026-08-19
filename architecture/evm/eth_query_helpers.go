@@ -420,13 +420,37 @@ func parseUint64Value(raw interface{}) (uint64, error) {
 		if v == "" {
 			return 0, fmt.Errorf("empty quantity")
 		}
-		if strings.HasPrefix(v, "0x") || strings.HasPrefix(v, "0X") {
+		// Only the lowercase prefix. common.HexToUint64 rejects "0X" outright,
+		// so testing for it here only stole the value from the decimal parser
+		// below and answered with "invalid hex string" — a message that hides
+		// which character is wrong. Nothing observed shows a client sending
+		// "0X". See entry 120 in valve/upstream-bug-log.md.
+		if strings.HasPrefix(v, "0x") {
 			return common.HexToUint64(v)
 		}
 		return strconv.ParseUint(v, 10, 64)
 	default:
 		return 0, fmt.Errorf("unsupported quantity type %T", raw)
 	}
+}
+
+// parseOptionalQuantity reads a wire quantity that a vendor may legitimately
+// omit. Parity omits `gas` and `transactionIndex` on a reward trace, and the
+// proto these values feed has no way to say "absent", so an absent field keeps
+// the zero.
+//
+// A field that is PRESENT and unreadable is a different event. eRPC reports it
+// rather than answering the client with a number it invented. See entry 132 in
+// valve/upstream-bug-log.md.
+func parseOptionalQuantity(raw string, field string) (uint64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := parseUint64Value(raw)
+	if err != nil {
+		return 0, fmt.Errorf("unreadable %s: %w", field, err)
+	}
+	return value, nil
 }
 
 func uint32FromUint64(value uint64, field string) (uint32, error) {
@@ -583,25 +607,61 @@ func jsonMapFromProtoTransfer(transfer *bdsevm.NativeTransfer) map[string]interf
 	return out
 }
 
-func sortLogs(logs []map[string]interface{}, order string) {
-	sort.SliceStable(logs, func(i, j int) bool {
-		leftBlock, _ := parseUint64Value(logs[i]["blockNumber"])
-		rightBlock, _ := parseUint64Value(logs[j]["blockNumber"])
-		leftIndex, _ := parseUint64Value(logs[i]["logIndex"])
-		rightIndex, _ := parseUint64Value(logs[j]["logIndex"])
+// sortLogs orders a page of logs by (blockNumber, logIndex) and returns the
+// block number of each log in its sorted position.
+//
+// Both keys are read exactly once, here. The page order AND the pagination
+// cursor come from them, so a log whose blockNumber eRPC cannot read is
+// reported rather than sorted as block 0 — a zero sorts to the head of an
+// ascending page and can hand the client a cursor that restarts at genesis.
+// See entry 132 in valve/upstream-bug-log.md.
+func sortLogs(logs []map[string]interface{}, order string) ([]uint64, error) {
+	type sortKey struct {
+		block uint64
+		index uint64
+	}
+	keys := make([]sortKey, len(logs))
+	for i, log := range logs {
+		block, err := parseUint64Value(log["blockNumber"])
+		if err != nil {
+			return nil, fmt.Errorf("log at position %d has an unreadable blockNumber: %w", i, err)
+		}
+		index, err := parseUint64Value(log["logIndex"])
+		if err != nil {
+			return nil, fmt.Errorf("log at position %d has an unreadable logIndex: %w", i, err)
+		}
+		keys[i] = sortKey{block: block, index: index}
+	}
 
-		if strings.EqualFold(order, "desc") {
-			if leftBlock != rightBlock {
-				return leftBlock > rightBlock
+	// Sort a permutation so the keys stay paired with their log without
+	// re-reading the maps on every comparison.
+	pos := make([]int, len(logs))
+	for i := range pos {
+		pos[i] = i
+	}
+	descending := strings.EqualFold(order, "desc")
+	sort.SliceStable(pos, func(i, j int) bool {
+		left, right := keys[pos[i]], keys[pos[j]]
+		if left.block != right.block {
+			if descending {
+				return left.block > right.block
 			}
-			return leftIndex > rightIndex
+			return left.block < right.block
 		}
-
-		if leftBlock != rightBlock {
-			return leftBlock < rightBlock
+		if descending {
+			return left.index > right.index
 		}
-		return leftIndex < rightIndex
+		return left.index < right.index
 	})
+
+	sorted := make([]map[string]interface{}, len(logs))
+	blocks := make([]uint64, len(logs))
+	for i, p := range pos {
+		sorted[i] = logs[p]
+		blocks[i] = keys[p].block
+	}
+	copy(logs, sorted)
+	return blocks, nil
 }
 
 func traceAddressLen(raw interface{}) int {

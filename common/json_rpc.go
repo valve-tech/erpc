@@ -65,7 +65,19 @@ func (r *JsonRpcResponse) SetResult(result []byte) {
 	r.result = result
 }
 
+// GetResultBytes returns the raw result bytes, or nil when there is no
+// response at all.
+//
+// NormalizedResponse.JsonRpcResponse answers (nil, nil) both for a nil
+// response and for one that has been released, so every caller can be handed a
+// nil receiver. IsResultEmptyish on this type already decides that case; this
+// method and ResultLength did not, and locking their receiver panicked instead.
+// Deciding it here fixes every caller at once. See entries 67 and 134 in
+// valve/upstream-bug-log.md.
 func (r *JsonRpcResponse) GetResultBytes() []byte {
+	if r == nil {
+		return nil
+	}
 	r.resultMu.RLock()
 	defer r.resultMu.RUnlock()
 	return r.result
@@ -75,7 +87,12 @@ func (r *JsonRpcResponse) GetResultString() string {
 	return util.B2Str(r.GetResultBytes())
 }
 
+// ResultLength returns the size of the result, or 0 when there is no response
+// at all. See GetResultBytes for why the nil receiver is decided here.
 func (r *JsonRpcResponse) ResultLength() int {
+	if r == nil {
+		return 0
+	}
 	r.resultMu.RLock()
 	ln := len(r.result)
 	rw := r.resultWriter

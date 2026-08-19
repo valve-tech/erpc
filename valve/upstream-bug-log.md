@@ -729,7 +729,10 @@ retries on server faults retries an upload that can never succeed.
 
 ## 30. RFC 7239 `Forwarded` is unsupported, and fails silently
 
-**Status:** open. **Severity: medium.** Every client collapses into one bucket.
+**Status:** fixed-in-fork (2026-08-19), together with entry 133 — the gRPC half
+of the same defect. **Severity: medium.** Every client collapsed into one
+bucket. The fix, the parser it replaced both with, and the tests are recorded
+under 133.
 
 `erpc/http_server.go:2391` defines `parseForwardedFor`, which parses the
 standardised `Forwarded` header. **Nothing calls it.**
@@ -2562,10 +2565,12 @@ produce a real SIGSEGV against the unfixed code.
 
 ## 67. `Cache.Set` dereferences a response that `shouldCacheResponse` handles as nil
 
-**Status:** open. `architecture/evm/json_rpc_cache.go:818` still calls
-`rpcResp.GetResultBytes()` with no nil guard, while `shouldCacheResponse` still
-decides the same nil case explicitly. The two still disagree, and the only
-production caller still guards with `if resp != nil`.
+**Status:** fixed-in-fork (2026-08-19), together with entry 134. `GetResultBytes`
+and `ResultLength` now decide the nil receiver on the type, so both call sites
+and every future one are safe, and the guard inside `shouldCacheResponse` is
+deleted. The fix and its tests are recorded under 134, which also corrects the
+assumption below: the caller's `if resp != nil` does NOT prove `rpcResp != nil`,
+because a released response also reads as `(nil, nil)` (entry 76).
 
 `shouldCacheResponse` documents and guards the nil case explicitly
 (`json_rpc_cache.go:1181-1189`: "both arguments can arrive nil together").
@@ -3142,9 +3147,15 @@ value another goroutine holds. The retro-fit itself stays — see 97.
 
 ## 96. Concurrent network bootstrap corrupts the shared selection policy
 
-**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
-high.** It affects the DEFAULT configuration of any project with more than
-one network. No test pins this fix.
+**Status: FIXED in the fork**, and superseded by entry 131 (2026-08-19), which
+stops `Network.Bootstrap` writing the config at all. Upstream still carries it.
+**Severity was: high.** The mutex stays because `RegisterNetwork` is exported;
+no production registration reaches it with a shared pointer any more.
+
+**One premise below is unconfirmed:** "every network that leaves
+`selectionPolicy` at the default arrives with the SAME
+`*SelectionPolicyConfig`". I traced every config-load path and could not
+reproduce it — see entry 164. The fix under 131 makes the question moot.
 
 `internal/policy/default_policy.go` — `upgradeDefaultPolicy` rewrites three
 fields on the config it is given:
@@ -3170,8 +3181,10 @@ mutex is all it needs.
 
 ## 97. The policy engine edits a config it does not own
 
-**Status:** open. The design behind 95 and 96, recorded so the shallow fixes
-are not mistaken for the real one.
+**Status:** half done (2026-08-19). The selection-policy half is fixed under
+entry 131: `Network.Bootstrap` registers a per-network COPY, so the policy
+engine no longer receives a config anyone else holds. The `NewUpstream` logger
+half (entry 95) is still a retro-fit. Kept open until both are done.
 
 Both races come from the same habit: a component mutates an object the caller
 owns and may share. `upgradeDefaultPolicy` rewrites the caller's
@@ -4002,6 +4015,13 @@ fix both requests below produced a byte-identical key:
 receive another request's data. **Confirmed independently by direct probe**,
 not by reading the code. Both requests below produced a byte-identical key:
 
+**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client could
+receive another request's data. **Confirmed independently by direct probe**, not
+by reading the code, and re-confirmed in a later audit: an out-of-tree
+recomputation of the double SHA-256 that `CacheHash` performs reproduces the
+recorded digest for both parameter lists. Both requests below produced a
+byte-identical key:
+
     A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
     B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
 
@@ -4099,10 +4119,13 @@ change on upgrade.
 
 ## 120. The query shim advertises an uppercase hex prefix it always rejects
 
-**Status:** open. **Severity: low.** It costs one client a clear error message,
-not a wrong answer. Pinned by
-`architecture/evm/eth_query_parse_test.go:TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept`,
-which fails once the parser honours the prefix it checks for.
+**Status:** fixed-in-fork (2026-08-19), while fixing entry 132 in the same
+function. **Severity: low.** It cost one client a clear error message, not a
+wrong answer. The `0X` test is deleted, which is the weaker of the two options
+this entry names. Pinned by
+`architecture/evm/eth_query_parse_test.go:TestParseUint64Value_ReportsAnUppercaseHexPrefixAgainstTheInput`,
+which replaces
+`TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept`.
 
 `architecture/evm/eth_query_helpers.go` — `parseUint64Value` reads every
 quantity the query shim takes: `limit`, and the `number` of a pagination
@@ -4275,7 +4298,21 @@ while reading the code each entry cites. Nobody fixed them.
 
 ## 130. `writeFatalError` shadows the error it was given, so every fatal POST closes its span as OK
 
-**Status:** open. **Severity: medium.** The operator loses the fatal error.
+**Status:** fixed-in-fork (2026-08-19). **Severity: medium.** The operator lost
+the fatal error. Pinned by
+`erpc/http_server_fatal_span_test.go:TestRequestHandler_AFatalPostClosesItsSpanAsAnError`
+and `…_AFatalPostKeepsTheOriginalMessageInTheBody`.
+
+**The entry was accurate.** A panic on a JSON-RPC POST closed its
+`Http.ReceivedRequest` span with status `Ok` and no recorded error. The body was
+already correct, so the span assertion is the one that catches it.
+
+**Fix.** `erpc/http_server.go` names the marshal result `marshalErr`, so `err`
+still holds the fault when `EnrichHTTPServerSpan` reads it. The fallback no
+longer retries the same call with the same input — that retry could never
+succeed — and writes a JSON literal instead. `SonicCfg` has `ValidateString:
+false`, so marshalling a Go string cannot fail today; the literal is there so
+the body stays valid JSON if that ever changes, not because a case is known.
 
 `erpc/http_server.go:850` declares `writeFatalError := func(httpCtx
 context.Context, statusCode int, err error)`. Inside the `finalErrorOnce.Do`
@@ -4309,8 +4346,34 @@ No test covers the span status on this path.
 
 ## 131. `Network.Bootstrap` writes the shared selection policy before the lock that entry 96 added
 
-**Status:** open. **Severity: medium.** The fix for 96 guards the second write,
-not the first.
+**Status:** fixed-in-fork (2026-08-19), by the weakening entry 97 asks for.
+**Severity: medium.** Pinned by
+`erpc/networks_bootstrap_policy_ownership_test.go:TestNetworkBootstrap_DoesNotWriteTheConfigItWasGiven`
+and `…_CompilesADefaultPolicyWithoutTouchingTheSource`.
+
+**The entry was accurate about the code.** Both writes run outside the lock,
+`Bootstrap` writes a struct it does not own, and on a shared struct
+`FailoverOnDefaultsExhausted` is last-writer-wins.
+
+**The consequence needs sharing, and I could not confirm sharing** — see entry
+164. I traced the config-load paths and found no way for two networks to arrive
+holding one `*SelectionPolicyConfig`, so entry 96's premise looks like a
+test-fixture condition rather than a production one. That changes the severity,
+not the fix: writing an object you do not own is wrong whether or not today's
+callers happen to share it.
+
+**Fix.** `Network.Bootstrap` now registers a shallow COPY of the network's
+`SelectionPolicyConfig`. That is entry 97's weakening: the component stops
+writing an object it does not own, so no lock is needed and no two networks can
+reach the engine with one struct. The copy carries one pointer,
+`CompiledProgram`, which nothing mutates after compilation. `upgradeDefaultPolicy`
+keeps its mutex — `RegisterNetwork` is exported, and the mutex bounds what any
+other caller can do — but no production registration reaches it with a shared
+pointer any more.
+
+The tests pin the ownership rule directly rather than chasing a race: they hand
+two networks ONE config, then assert that the operator's struct is untouched and
+that each network's registered config keeps its own failover flag.
 
 Entry 96 records that concurrent network bootstrap corrupts a shared
 `SelectionPolicyConfig`, and the fork now serialises the rewrite inside
@@ -4335,7 +4398,55 @@ Found while auditing 96.
 
 ## 132. `parseUint64Value` reports a missing quantity and twelve call sites discard the error
 
-**Status:** open. **Severity: medium.** A silent wrong page, not an error.
+**Status:** fixed-in-fork (2026-08-19). **Severity: medium.** A silent wrong
+page, not an error. Pinned by
+`architecture/evm/eth_query_unreadable_quantity_test.go` (eight tests, two of
+them counterweights that must keep passing).
+
+**The entry was accurate**, with one number off: thirteen call sites discard the
+error, not twelve, and two more sites drop it with an `err == nil` guard.
+
+**The rule I applied at every site: eRPC never turns a value it could not read
+into a number.** An ABSENT field may keep a zero where the shape has no way to
+say "absent". A field that is PRESENT and unreadable is a different event, and
+it is reported. The sites do not all want the same thing, so here is each one.
+
+**Reject — the value decides what the client reads.**
+
+- `sortLogs` (4 sites) now returns `([]uint64, error)`. It reads `blockNumber`
+  and `logIndex` once per log, up front, and reports the first log it cannot
+  read. The shim always builds its `eth_getLogs` filter with concrete
+  `fromBlock`/`toBlock`, so a pending log — the only conforming log with a null
+  block number — cannot appear. Nothing forces tolerance here.
+- The paging loop (2 sites) no longer re-reads the maps. It consumes the block
+  numbers `sortLogs` returned, so the group boundary and the cursor come from
+  the same read that was already validated. This deletes two call sites rather
+  than guarding them.
+- `fetchTracesForBlock` (1 site) reports a block with no readable `number`. The
+  fallback below it would have asked for `trace_block("0x0")` and stamped every
+  trace with block 0 — the wrong block's traces, served as this block's.
+- `fetchTracesForBlock`'s timestamp (1 site, previously `err == nil`) reports a
+  timestamp that is present and unreadable. Dropping it to nil reads downstream
+  as a chain that does not report block times.
+- `protoTraceFromJSON`'s `traceAddress` entries (1 site). Every entry is present
+  by construction, so an unreadable one is always garbage, and a zero moves the
+  trace to a different position in the call tree.
+- `protoTraceFromJSON`'s `blockTimestamp` (1 site, previously `err == nil`).
+
+**Absent keeps the zero, present-but-unreadable is rejected.** The five
+remaining `protoTraceFromJSON` sites — `gas`, `gasUsed`, `subtraces`,
+`transactionIndex`, `blockNumber` — go through a new `parseOptionalQuantity`.
+Parity omits `gas` and `transactionIndex` on a reward trace, and the proto these
+values feed types them as plain `uint64`/`uint32` with no absent state, so
+rejecting an absent field would make eRPC refuse valid chain data. Today's data
+forces the zero for absence and forces nothing for garbage.
+
+**Entry 120's dead branch, fixed here too.** `parseUint64Value` no longer tests
+for a `0X` prefix. Entry 120 named deletion as the weaker of the two options and
+said nothing observed shows a client sending `0X`. An uppercase value now falls
+to the decimal parser and fails with a message that quotes the input.
+`TestParseUint64Value_RejectsTheUppercaseHexPrefixItClaimsToAccept` is replaced
+by `TestParseUint64Value_ReportsAnUppercaseHexPrefixAgainstTheInput`.
 
 `parseUint64Value` (`architecture/evm/eth_query_helpers.go:396`) returns
 `(0, error)` for a nil, negative or unparseable quantity. Twelve call sites
@@ -4357,8 +4468,27 @@ helper; this gives no message at all. Found while auditing 120.
 
 ## 133. The gRPC surface has the same RFC 7239 defect as entry 30, and no entry recorded it
 
-**Status:** open. **Severity: medium.** Fixing entry 30 alone leaves half the
-product broken.
+**Status:** fixed-in-fork (2026-08-19), together with entry 30. **Severity:
+medium.** Pinned by `erpc/forwarded_header_test.go` (five tests, both surfaces).
+
+**The entry was accurate.** Both surfaces handed every configured header to a
+parser that reads bare addresses only, so `for=203.0.113.7` produced an empty
+chain and the request fell back to the peer.
+
+**Fix — one parser, not two.** `parseXForwardedFor` and the unreachable
+`parseForwardedFor` are replaced by `parseForwardedChain`, which reads whichever
+syntax the element carries: an element with `for=` yields that parameter, any
+other element is the address itself. HTTP and gRPC both call it. The parser
+reads the VALUE rather than deciding from the header's NAME, so an operator can
+name any header and eRPC does not need a table of which name means which syntax.
+An element that names no address — RFC 7239 also allows obfuscated identifiers
+such as `for=_hidden` — is dropped, so the request falls back to the peer rather
+than eRPC inventing a client. The trusted-forwarder check is untouched, and a
+test pins that reading a standard header did not become a way around it.
+
+`erpc/http_server_client_ip_test.go:TestResolveRealClientIP_DoesNotUnderstandTheRfc7239ForwardedHeader`
+recorded the old behaviour and is replaced by
+`…_ReadsAForwardedHeaderWhateverSyntaxItCarries`.
 
 Entry 30 records that `Forwarded` is unsupported on the HTTP path and fails
 silently. `GrpcServer.grpcClientIP` (`erpc/grpc_server.go:553`) repeats it. The
@@ -4376,8 +4506,33 @@ fleet. No gRPC test uses an RFC 7239 header. Found while auditing 30.
 
 ## 134. A second unguarded nil dereference in `Cache.Set`, earlier and broader than entry 67
 
-**Status:** open. **Severity: low today, and it fires exactly when an operator
-debugs a cache problem.**
+**Status:** fixed-in-fork (2026-08-19), together with entry 67. **Severity: low
+today, and it fired exactly when an operator debugged a cache problem.** Pinned
+by
+`architecture/evm/json_rpc_cache_nil_result_test.go:TestCacheSet_ANilResponseAtTraceLevelIsNotAPanic`
+and `TestJsonRpcResponse_NilReceiverReadsAsNoResult`.
+
+**The entry was accurate about the panic and its position.** One claim is too
+strong: it does NOT fire for every policy. A nil response is emptyish, so
+`MatchesForSet` drops any policy whose empty behaviour is `ignore`, and
+`len(policies) == 0` returns before the trace block. The trace site needs the
+same policy set entry 67 names — `allow` or `only`. What is genuinely different
+is the position: it runs before the fan-out, so it panics before
+`shouldCacheResponse` gets to decide anything.
+
+**Also worth recording:** the caller guard at `erpc/networks.go:2395` is weaker
+than both entries assume. `NormalizedResponse.JsonRpcResponse` answers
+`(nil, nil)` for a RELEASED response too (entry 76), so `if resp != nil` does not
+prove `rpcResp != nil`.
+
+**Fix — extended, not duplicated, exactly as this entry suggests.**
+`GetResultBytes` and `ResultLength` now decide the nil receiver themselves and
+return nil and 0. `IsResultEmptyish` on the same type already did, so this makes
+the type consistent and fixes 67, 134 and every future reader at once. The
+per-call-site guard inside `shouldCacheResponse` is deleted — the type answers
+now, so no caller needs its own.
+
+The trace line needed one more change; see entry 160.
 
 Entry 67 records that `Cache.Set` dereferences a response that
 `shouldCacheResponse` handles as nil. `architecture/evm/json_rpc_cache.go:740`
@@ -4396,6 +4551,8 @@ earlier than the site entry 67 names, and for every policy rather than only an
 The caller guard at `erpc/networks.go:2395` keeps it latent, which is the same
 reason entry 67 stays latent. The trigger is raising the log level to trace —
 what an operator does to debug the cache. Found while auditing 67.
+
+
 ---
 
 
@@ -4614,6 +4771,8 @@ above 2^53 must send it as a hex string, which JSON-RPC has always allowed and
 which loses nothing. The same limit applies to any JSON number eRPC reads,
 not just this one.
 
+
+---
 
 ## 140. The stress harness builds a server config eRPC refuses, and the refusal kills the test binary
 
@@ -5165,4 +5324,147 @@ sit inside a three-way conflict. The two sides differ in substance, not
 formatting: entry 118's two versions disagree about whether the defect is open
 or fixed. Resolving it needs a person who knows which sessions produced which
 half, so it is recorded rather than guessed at.
->>>>>>> worktree-agent-abf93cd02a682e9f0
+
+=======
+---
+
+## 160. An empty result corrupts the whole cache trace record
+
+**Status:** fixed-in-fork (2026-08-19), while fixing 134. **Severity: low.** It
+costs an operator the one log line they raised the level to read. **Confirmed by
+direct probe**, not by reading the code. Pinned by
+`architecture/evm/json_rpc_cache_nil_result_test.go:TestCacheSet_ATraceRecordStaysValidJsonWithNoResult`,
+which parses every record the call emits.
+
+`Cache.Set`'s trace branch wrote `RawJSON("result", rpcResp.GetResultBytes())`.
+zerolog copies a `RawJSON` value into the record verbatim, so an empty slice
+leaves a dangling key. With the nil guard removed the probe produced exactly
+this line, and it is not JSON:
+
+    {"level":"trace",…,"policies":[…],"result":,"finalityState":"unknown",…}
+
+Everything after `"result":` is unreadable to any log pipeline, including the
+`policies` array a cache investigation needs. Two inputs produce it: a response
+eRPC could not read (entry 134's nil), and a response whose bytes live in a
+`resultWriter` rather than in `result` — `GetResultBytes` returns nil for that
+one while `ResultLength` reports a real size.
+
+Fix: the branch substitutes the JSON literal `null` when the result is empty.
+This is entry 15 again in a different function — a value written straight into a
+log record without checking that it is what the encoder promised.
+
+---
+
+## 161. `protoTraceFromJSON` discards every hex-decode error, the same way it discarded quantities
+
+**Status:** open. **Severity: low-medium.** Same class as 132, different helper.
+Found while fixing 132.
+
+`architecture/evm/eth_query_shim.go:567-575` — six sites in
+`protoTraceFromJSON` hand a wire string to `common.HexToBytes` and drop the
+error: `From`, `To`, `Input`, `Output`, `TransactionHash` and `BlockHash`. Only
+`To` is guarded against absence (`decoded.To != nil && *decoded.To != ""`); the
+other five cannot tell an absent field from a garbage one.
+
+A garbage `from` becomes an empty byte slice, and `NativeTransfersFromTraces`
+then reports a transfer with no sender. Entry 132's rule fits here unchanged:
+absent stays absent, present-but-unreadable is reported. I did not apply it, to
+keep 132's change reviewable.
+
+`fetchTracesForBlock:443` has a seventh, on the block hash it stamps onto every
+trace of the block.
+
+---
+
+## 162. The fallback-tier default selection policy assigns nil to nil
+
+**Status:** open. **Severity: low.** Dead code that reads like a live default.
+Found while auditing 131.
+
+`common/defaults.go` — `NetworkConfig.SetDefaults` installs a default selection
+policy when any upstream carries `tier:fallback`:
+
+    if anyUpstreamInFallbackTier && n.SelectionPolicy == nil {
+        defCfg := NewDefaultNetworkConfig(upstreams)
+        n.SelectionPolicy = defCfg.SelectionPolicy
+    }
+
+`NewDefaultNetworkConfig` (`common/defaults.go:3368`) is
+`return &NetworkConfig{}`. Its `SelectionPolicy` is nil, so the branch assigns
+nil to a field that is already nil. The function also ignores the `upstreams`
+argument it takes.
+
+An operator who tags an upstream `tier:fallback` and writes no
+`selectionPolicy` therefore gets no policy from this branch. What they do get is
+the placeholder identity policy, from the path
+`Network.Bootstrap` -> `SetDefaults` -> `upgradeDefaultPolicy`, which is a
+different mechanism than the branch above describes. Either delete the branch or
+give `NewDefaultNetworkConfig` a body — but do not leave a reader believing a
+default is installed here.
+
+**A second dead pair in the same file.**
+`SelectionPolicyConfig.SetDefaults` (`common/defaults.go:3063-3064`) computes
+`aliasMethodSet` and `aliasFinalitySet`, writes a nine-line comment explaining
+that explicit-false must count as "operator set the key" for a branch below,
+and then discards both: `_ = aliasMethodSet` / `_ = aliasFinalitySet`. The
+branch the comment describes is gone. The comment now documents behaviour the
+code does not have, which is worse than no comment.
+
+---
+
+## 163. The bug log carried three unresolved merge-conflict markers on `main`
+
+**Status:** fixed here (2026-08-19). **Severity: low for the product, high for
+this file.** Found while opening entries 130-134.
+
+`valve/upstream-bug-log.md` at commit `8fe74b2` contained six conflict-marker
+lines — `<<<<<<< HEAD`, `=======`, `>>>>>>> worktree-agent-…` — in three places,
+one of them nested. They were committed, not left in a working tree:
+
+- entry 118's status block, where the two sides disagreed about whether the
+  cache-key collision was fixed;
+- entries 125-134 against 135-138 (the inner conflict);
+- that whole block against 140-144 (the outer one).
+
+Every side held DIFFERENT entries, so nothing had to be chosen — the merge just
+concatenates. The 118 status block was the only real disagreement, and the
+"fixed-in-fork" side is correct: commit `1e58054` carries the fix. The
+re-confirmation sentence from the other side is kept.
+
+The markers meant three worktree agents merged into `main` without reading the
+result. A conflicted document still renders, which is why nobody noticed.
+
+---
+
+## 164. Entry 96's shared-config premise is not reachable from any config path I traced
+
+**Status:** open as a question, moot in the fork. **Severity: none today.**
+Found while fixing 131.
+
+Entries 96 and 131 both rest on one claim: two networks can reach
+`Engine.RegisterNetwork` holding the SAME `*SelectionPolicyConfig`. I could not
+find a path that produces it.
+
+- `PreparedProject.FindNetworkConfig` (`erpc/projects.go:86`) walks
+  `Config.Networks` and returns the entry whose `NetworkId()` matches, so one
+  `*NetworkConfig` serves one network id.
+- `NetworkConfig.SetDefaults` copies rather than aliases when it inherits from
+  `networkDefaults`: `n.SelectionPolicy = &SelectionPolicyConfig{}` then
+  `*n.SelectionPolicy = *defaults.SelectionPolicy`.
+- The fallback-tier branch that looks like it could share one is entry 162 — it
+  assigns nil.
+- `resolveNetworkConfig` builds a fresh `NetworkConfig` for a lazily-created
+  network.
+- No package-level `SelectionPolicyConfig` exists.
+
+The race entry 96 reports is real — `go test -race` named it — but a TEST
+fixture that reuses one config literal across two networks would produce exactly
+that report, and test fixtures do reuse literals. That would make 96 a test
+defect wearing a production label.
+
+This is a question, not a correction: I did not read every config path, and a TS
+config or an admin-API path could still alias. It stops mattering in the fork,
+because entry 131's fix means `Network.Bootstrap` registers a copy and no shared
+pointer can reach the engine. Recorded so the next reader does not inherit the
+premise unexamined.
+>>>>>>> worktree-agent-aefdbca58fa03b317
