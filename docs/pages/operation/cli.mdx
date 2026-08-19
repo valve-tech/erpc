@@ -180,8 +180,8 @@ pprof — build with `-tags pprof` to activate.
 
 | Flag | Type | Default | Behavior / footguns |
 |------|------|---------|---------------------|
-| `--config` | string | `""` | Path to config file. When non-empty, sets `requireConfig=true`; no fallback to auto-discovery. If the path does not exist, exits 1001. |
-| `--endpoint` / `-e` | []string | `[]` | Zero or more upstream endpoint URLs. Validated with `url.ParseRequestURI`; invalid URLs abort with exit 1001. Injected as synthetic upstreams into the first project when no providers/upstreams exist. |
+| `--config` | string | `""` | Path to config file. When non-empty, sets `requireConfig=true`; no fallback to auto-discovery. If the path does not exist, exits 11. |
+| `--endpoint` / `-e` | []string | `[]` | Zero or more upstream endpoint URLs. Validated with `url.ParseRequestURI`; invalid URLs abort with exit 11. Injected as synthetic upstreams into the first project when no providers/upstreams exist. |
 | `--require-config` | bool | `false` | If `true` and no config file found, aborts. Skips auto-discovery and `--endpoint`-only mode. |
 | `validate --format` | string | `"json"` | Output format: `json` or `md`. |
 | `dump --format` | string | `"yaml"` | Output format: `yaml`, `yml`, or `json`. Any other value triggers `"unsupported format"` and exits 1. |
@@ -260,8 +260,8 @@ Exit `0` if `errors` is empty, exit `1` otherwise.
 
 **Exit codes** — <SourceLink file="util/exit.go" lines="7-10" />
 
-- `1001` (`ExitCodeERPCStartFailed`) — CLI/config load failure or `erpc.Init` error.
-- `1002` (`ExitCodeHttpServerFailed`) — HTTP or gRPC server fatal error.
+- `11` (`ExitCodeERPCStartFailed`) — CLI/config load failure or `erpc.Init` error.
+- `12` (`ExitCodeHttpServerFailed`) — HTTP or gRPC server fatal error.
 
 ### Worked examples
 
@@ -457,7 +457,7 @@ the bootstrap interacts with the process environment.
 ### Edge cases & gotchas
 
 1. **`--config` sets `requireConfig=true` implicitly.** If the specified path does not
-   exist, the process exits 1001 with no fallback to auto-discovery.
+   exist, the process exits 11 with no fallback to auto-discovery.
    [<SourceLink file="cmd/erpc/main.go" lines="300-302" />]
 2. **Positional argument works in all subcommands.** `erpc validate ./config.yaml` and
    `erpc dump ./config.yaml` both work — first positional arg is treated as a config path
@@ -550,7 +550,7 @@ messages (zerolog JSON unless `LOG_WRITER=console`):
 - [`common/validation.go:L15`](https://github.com/erpc/erpc/blob/main/common/validation.go#L15) — `Config.Validate`: exhaustive validation rules
 - [`cmd/erpc/pprof.go`](https://github.com/erpc/erpc/blob/main/cmd/erpc/pprof.go) — build-tag `pprof`: `init()` registering pprof routes and starting `0.0.0.0:<port>` listener
 - [`cmd/erpc/initflags.go`](https://github.com/erpc/erpc/blob/main/cmd/erpc/initflags.go) — build-tag `!test`: `ERPC_NOLOGS` and `ERPC_NOMETRICS` init hooks
-- [`util/exit.go:L7-L10`](https://github.com/erpc/erpc/blob/main/util/exit.go#L7-L10) — exit codes `1001` (start failed) and `1002` (HTTP/gRPC server fatal)
+- [`util/exit.go:L7-L10`](https://github.com/erpc/erpc/blob/main/util/exit.go#L7-L10) — exit codes `11` (start failed) and `12` (HTTP/gRPC server fatal)
 - [`erpc/config_analyzer.go`](https://github.com/erpc/erpc/blob/main/erpc/config_analyzer.go) — `GenerateValidationReport`, `RenderValidationReportJSON`, `RenderValidationReportMarkdown`
 - [`common/runtime.go`](https://github.com/erpc/erpc/blob/main/common/runtime.go) — `NewRuntime()`: creates a sobek runtime, populates `process.env` map and `env` array from `os.Environ()`; used for TypeScript selection-policy evaluation
 - [`common/compiler.go`](https://github.com/erpc/erpc/blob/main/common/compiler.go) — `CompileTypeScript` (esbuild IIFE bundle), `CompileFunction` (sobek single-function eval), `CompileProgram` (sobek.Compile with paren-wrap)

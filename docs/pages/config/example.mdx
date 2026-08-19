@@ -827,7 +827,7 @@ pipeline, env-var semantics, validate/dump tooling — applies to whichever form
 
 #### How it works
 
-**File discovery.** When no `--config` flag or positional argument is supplied, eRPC probes a hardcoded list in order: `./erpc.yaml`, `./erpc.yml`, `./erpc.ts`, `./erpc.js`, then the same four filenames under `/` and `/root/`. The first path where `fs.Stat` succeeds wins. YAML takes priority over TypeScript within the same directory — a leftover `erpc.yaml` silently shadows a newly added `erpc.ts`. Passing an explicit path forces that file and treats a missing file as a fatal error (exit 1001). A `.env` file in the working directory is loaded at process `init()` time via `godotenv` before any config parsing.
+**File discovery.** When no `--config` flag or positional argument is supplied, eRPC probes a hardcoded list in order: `./erpc.yaml`, `./erpc.yml`, `./erpc.ts`, `./erpc.js`, then the same four filenames under `/` and `/root/`. The first path where `fs.Stat` succeeds wins. YAML takes priority over TypeScript within the same directory — a leftover `erpc.yaml` silently shadows a newly added `erpc.ts`. Passing an explicit path forces that file and treats a missing file as a fatal error (exit 11). A `.env` file in the working directory is loaded at process `init()` time via `godotenv` before any config parsing.
 
 **YAML loading.** `common.LoadConfig` reads the file, runs `os.ExpandEnv` on the raw bytes (substituting every `$VAR` and `${VAR}` pattern from the OS environment), then decodes with `gopkg.in/yaml.v3` in strict mode (`KnownFields(true)` — unknown keys are errors). After decode, it applies `LegacyTranslateFn` (legacy key migration), then `SetDefaults`, then `Validate`.
 
@@ -844,7 +844,7 @@ pipeline, env-var semantics, validate/dump tooling — applies to whichever form
 
 **Function preservation at runtime.** `cfg.UserScript` is re-evaluated once per policy-engine runtime-pool acquire, rebuilding `__erpcFns` natively in that runtime so closures and module-level helpers remain live. At tick time, a `__ts_fn__:fn_<n>` sentinel is resolved by id lookup in `__erpcFns` and invoked directly.
 
-**Shared post-load pipeline.** Both formats share `LegacyTranslateFn` → `SetDefaults` → `Validate`. Validation errors cause exit 1001. `erpc validate` loads config, runs static analysis (orphan rate-limit budgets, missing upstreams, etc.), and prints a JSON or Markdown report. `erpc dump` loads config and renders the fully defaulted effective config as YAML or JSON — useful for seeing what TS sentinel functions resolve to.
+**Shared post-load pipeline.** Both formats share `LegacyTranslateFn` → `SetDefaults` → `Validate`. Validation errors cause exit 11. `erpc validate` loads config, runs static analysis (orphan rate-limit budgets, missing upstreams, etc.), and prints a JSON or Markdown report. `erpc dump` loads config and renders the fully defaulted effective config as YAML or JSON — useful for seeing what TS sentinel functions resolve to.
 
 #### Config schema
 
@@ -929,10 +929,10 @@ Config formats own no additional YAML runtime fields. The table below documents 
 
 | Flag | Type | Default | Behavior / footguns |
 |---|---|---|---|
-| `--config` | string | `""` | Path to config file; skips auto-discovery; sets `requireConfig=true` implicitly — missing file exits 1001. |
+| `--config` | string | `""` | Path to config file; skips auto-discovery; sets `requireConfig=true` implicitly — missing file exits 11. |
 | positional arg | string | — | Same as `--config`; forces `requireConfig=true`; works with all subcommands (`start`, `validate`, `dump`). |
 | `--require-config` | bool | `false` | Abort if no config found in search path; no effect when `--config` is given (already implied). |
-| `--endpoint` / `-e` | `[]string` | `[]` | Inject upstream endpoint URLs when no providers/upstreams exist in config. Provider-scheme URLs (e.g. `alchemy://key`) are converted to providers at `SetDefaults` time. Invalid URLs abort with exit 1001. |
+| `--endpoint` / `-e` | `[]string` | `[]` | Inject upstream endpoint URLs when no providers/upstreams exist in config. Provider-scheme URLs (e.g. `alchemy://key`) are converted to providers at `SetDefaults` time. Invalid URLs abort with exit 11. |
 | `validate --format` | string | `"json"` | `"json"` or `"md"`. |
 | `dump --format` | string | `"yaml"` | `"yaml"`, `"yml"`, or `"json"`. Any other value exits 1 via an explicit error branch. |
 | `--set` / `-s` | — | **not available** | Commented out of the source. Passing `-s` produces `"flag provided but not defined: -s"` — not a graceful error. |
@@ -1124,8 +1124,8 @@ erpc dump --format json ./erpc.ts | jq '.projects[0].networks[0].failsafe'
 Config loading is a startup-phase operation, not a per-request path. No HTTP headers or JSON-RPC bodies are involved. The loader reports its outcome through log messages and exit codes only.
 
 **Exit codes** (<SourceLink file="util/exit.go" lines="7-10" />):
-- `1001` (`ExitCodeERPCStartFailed`) — CLI/config load failure, validation error, or `erpc.Init` error.
-- `1002` (`ExitCodeHttpServerFailed`) — HTTP or gRPC server fatal error.
+- `11` (`ExitCodeERPCStartFailed`) — CLI/config load failure, validation error, or `erpc.Init` error.
+- `12` (`ExitCodeHttpServerFailed`) — HTTP or gRPC server fatal error.
 
 #### Best practices
 
@@ -1175,7 +1175,7 @@ The config-loading and format subsystems emit no Prometheus metrics. Operational
 | `"networks bootstrap completed"` | INFO | After all configured networks are initialised |
 | `"shutting down gracefully..."` | INFO | On SIGINT/SIGTERM context cancel |
 | `"pprof server started at http://localhost:<port>"` | INFO | Only when built with `-tags pprof` |
-| `"failed to load configuration"` | ERROR | Any `LoadConfig` error before exit 1001 |
+| `"failed to load configuration"` | ERROR | Any `LoadConfig` error before exit 11 |
 | `"build failed: <messages>"` | ERROR | esbuild compilation error in `.ts`/`.js` file |
 | `"compile ts config: …"` | ERROR | sobek compile error after bundling |
 | `"ts config json-stringify: …"` | ERROR | JSON.stringify step failed on TS config object |

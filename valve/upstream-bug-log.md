@@ -2945,7 +2945,11 @@ its own pin.
 
 ## 98. The documented exit codes are not the codes the shell sees
 
-**Status:** open. **Severity: medium.** Every documented exit code is wrong.
+**Status:** FIXED. `util/exit.go` now uses 11 and 12, and every exit-code
+reference in `docs/` moved with them. Pinned by
+`cmd/erpc/cli_test.go:TestExitCodes_FitInOneByte`, which fails for any code
+that does not survive `& 0xFF`, collides with the config-error code 1, or
+reaches the shell's signal range. **Severity was medium.**
 
 `util/exit.go`:
 
@@ -2980,7 +2984,10 @@ is a wrong one.
 
 ## 99. A library package terminates the operator's process
 
-**Status:** open. **Severity: medium for an embedder, high for a test run.**
+**Status:** open. Pinned by
+`cmd/erpc/cli_test.go:TestStart_HttpServerCannotBind_LibraryGoroutineExitsTheProcess`,
+which occupies the port and asserts the process exit.
+**Severity: medium for an embedder, high for a test run.**
 
 `erpc/init.go:142`, `:155` and `:178` call `util.OsExit(...)` from inside the
 `erpc` package. That package is a library: `cmd/erpc` is the binary, and
@@ -3663,3 +3670,111 @@ fixing. Parse failure is not the same event as absence, and the code collapses
 the two. Report the failure — the engine already has a logger on the eval path
 — or fall back to the same 30 seconds absence gets. Silent zero is the one
 answer that cannot be right.
+
+## 125. An unreadable `LOG_LEVEL` silences the process instead of defaulting to debug
+
+**Status:** open. Pinned by
+`cmd/erpc/cli_test.go:TestLogLevelEnv_InvalidValueSilencesLogging`.
+**Severity: medium.** The operator loses every log line at the moment the
+config is wrong.
+
+`cmd/erpc/main.go:354` reads the `LOG_LEVEL` environment variable on every
+command:
+
+    level, err := zerolog.ParseLevel(lvl)
+    if err != nil {
+        logger.Warn().Msgf("invalid log level '%s', defaulting to 'debug': %s", lvl, err)
+    } else {
+        cfg.LogLevel = level.String()
+    }
+    zerolog.SetGlobalLevel(level)
+
+`zerolog.ParseLevel` returns `NoLevel` with the error. The `SetGlobalLevel`
+call sits OUTSIDE the else branch, so the failure path installs `NoLevel` as
+the global floor. `NoLevel` is 6. Debug, info, warn and error are all below
+it, so eRPC drops every one of them. The message promises debug and the code
+delivers silence.
+
+The same file gets this right at `main.go:59`, where the identical parse only
+calls `SetGlobalLevel` in the else branch. One `LOG_LEVEL=warining` typo
+therefore blinds the operator, and the warning that explains it is itself
+suppressed on any writer that respects the global level.
+
+Fix: move `SetGlobalLevel(level)` into the else branch, or set
+`zerolog.DebugLevel` on the error path so the code does what the message says.
+
+## 126. The legacy translator rewrites network-level keys with no warning
+
+**Status:** open. Pinned by
+`common/legacy/translate_config_test.go:TestTranslateFromConfig_NetworkLegacyFieldsWarnNothing`.
+**Severity: low.** Nothing breaks today, but the operator never learns the
+config is deprecated.
+
+`common/legacy/translate.go:39` builds the warning list from project-level
+fields only — `routingStrategy`, `scoreMetricsMode`, and the four inert score
+knobs. The network-level legacy keys translate silently:
+
+- `selectionPolicy.evalFunction` is wrapped into the modern `eval`;
+- `selectionPolicy.resampleExcluded` appends `.probeExcluded(...)`.
+
+`common/legacy/warnings.go` holds the exact messages for both cases —
+`WarnLegacySelectionPolicy` and `WarnResampleExcluded` — plus
+`WarnRoutingPolicyEnvVars`. All three are exported, and a repo-wide grep finds
+no caller. They are dead code that documents a behaviour the package does not
+have.
+
+The effect is a silent rewrite. An operator whose `evalFunction` becomes a
+wrapped legacy call gets different selection behaviour with no line in the log
+that says so, and no signal that the key is on its way out.
+
+Fix: call the three functions from `Translate` where each condition already
+tests true, or delete them. The current state claims a contract the code does
+not keep.
+
+## 127. `--config` silently ignores a one-character path
+
+**Status:** open. Pinned by
+`cmd/erpc/cli_test.go:TestConfig_OneCharacterPathIsIgnored`.
+**Severity: low.** The blast radius is small, but the failure mode is the bad
+kind: eRPC runs a config the operator did not ask for.
+
+`cmd/erpc/main.go:300`:
+
+    if configFile := cmd.String("config"); len(configFile) > 1 {
+
+The guard tests for length, not for emptiness. `erpc --config a dump` drops
+the flag, falls through to auto-discovery, and loads `./erpc.yaml` instead.
+No error, no warning — the operator reads a dump of the wrong file.
+
+The same path treats every other missing config as fatal, which is what makes
+this inconsistent rather than merely odd: `--config aa` on a missing file
+exits, `--config a` starts.
+
+Fix: test `configFile != ""`. The length bound commits to a rule about file
+names that nothing in the data supports.
+
+## 128. The legacy translator's golden fixtures are wired to nothing
+
+**Status:** open. **Severity: low**, and it hides a larger claim.
+
+`common/legacy/testdata/` holds two fixture pairs
+(`01-routing-strategy-round-robin`, `08-routing-policy-env-vars`) and a README
+that describes ten scenarios and an acceptance test. No Go file in the repo
+reads the directory — a grep for `testdata` across `common/legacy/` finds only
+the fixtures themselves.
+
+Scenario 08 is the part worth reading. Its `.expected.yaml` says the
+translator detects an implicit fallback-group policy and synthesizes an eval
+that reads `ROUTING_POLICY_MAX_ERROR_RATE`, `ROUTING_POLICY_MAX_BLOCK_HEAD_LAG`
+and `ROUTING_POLICY_MIN_HEALTHY_THRESHOLD`. `common/legacy/translate.go` does
+no such thing: it never inspects `upstream.group`, and the env vars appear
+nowhere in the package. `WarnRoutingPolicyEnvVars` (see 126) is the dead
+warning for this same missing feature.
+
+So an operator who upgrades from a config that relied on the `ROUTING_POLICY_*`
+fallback policy gets the canonical default policy instead, with no warning and
+no translation. The fixture that would have caught it runs in no test.
+
+Fix: either wire the fixtures to a golden test and implement scenario 08, or
+delete the fixtures and the README claims. A fixture nothing runs is a record
+of an intention, not a test.
