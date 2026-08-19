@@ -3829,6 +3829,10 @@ A client can receive another request's data. Confirmed independently by direct
 probe, not by reading the code, and re-confirmed in the status audit. Before the
 fix both requests below produced a byte-identical key:
 
+**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A client can
+receive another request's data. **Confirmed independently by direct probe**,
+not by reading the code. Both requests below produced a byte-identical key:
+
     A = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
     B = eth_getStorageAt:5153a6f084c403121fd652f1b9d01eab89d6fac7c28b5106fd459fa00bfd1b08
 
@@ -3920,8 +3924,9 @@ holds two generations for one TTL. Plan capacity for both. A wrong answer is
 worse than a cold cache, but an operator must not meet the miss storm by
 surprise.
 
-The same collision class exists in the CONSENSUS response hash, and that one is
-NOT fixed. See entry 135.
+The same collision class existed in the CONSENSUS response hash. Entry 135
+fixes it with the same framing, and states why that hash costs nothing to
+change on upgrade.
 
 ## 120. The query shim advertises an uppercase hex prefix it always rejects
 
@@ -4224,43 +4229,156 @@ reason entry 67 stays latent. The trigger is raising the log level to trace —
 what an operator does to debug the cache. Found while auditing 67.
 ---
 
+
 ## 135. An upstream can forge structure in the consensus response hash
 
-**Status:** open. **Severity: high.** Silent wrong answer, and an upstream
-controls the input. **Confirmed by direct probe**, not by reading the code.
+**Status:** fixed-in-fork (2026-08-19). **Severity: highest.** A hostile
+upstream defeats the check consensus exists to make. **Confirmed by direct
+probe**, not by reading the code.
 
 This is bug 118's defect class, in the other hash. `canonicalizeTo`
 (`common/json_rpc.go`) writes the canonical form of a response, and consensus
-compares upstreams by the SHA-256 of that byte stream. It writes the JSON
+compares upstreams by the SHA-256 of that byte stream. It wrote the JSON
 punctuation — `{`, `}`, `[`, `]`, `,`, `:` — around its members, so the
-structure looks delimited. It does not: a string value is written RAW, with no
-quotes and no escaping. A string that contains the punctuation therefore forges
+structure looked delimited. It was not: a string value went out RAW, with no
+quotes and no escaping. A string that carries the punctuation therefore forged
 structure that was never in the response.
 
-Two probes, both collided on 2026-08-19:
+Two probes, both re-confirmed on 2026-08-19:
 
     A = {"a":"1,\"b\":2"}     B = {"a":"1","b":"2"}
     C = {"a":["x","y"]}       D = {"a":["x,y"]}
 
-A and B canonicalize to the same bytes, and so do C and D. Consensus reports
-agreement between them.
+A and B canonicalized to the same bytes, and so did C and D. Consensus
+reported agreement between them. A whole receipt forges the same way: the
+one-field body `{"blockHash":"aa,\"status\":1"}` wrote the same bytes as the
+honest two-field `{"blockHash":"0xaa","status":"0x1"}`.
 
-The values in a response come from the upstream, so this is reachable by a
-misbehaving or hostile node rather than by a client. An upstream that wants to
-pass consensus while returning different data can pad one string field to make
-its canonical form match the honest answer. Consensus exists to catch exactly
-that upstream.
+**The worse pair, and the one that needs no punctuation at all.** The old form
+dropped the `0x` prefix along with the padding zeroes, and wrote a JSON number
+as its own digits. So a number agreed with the quantity that spells it:
 
-The cache hasher (bug 118) now frames every piece it writes. This hasher wants
-the same treatment: either quote and escape strings the way JSON does, or frame
-them by length. Marshalling through `encoding/json` — the choice
-`architecture/svm/json_rpc_cache.go` already made for the SVM cache key, and
-for this reason — would also do it.
+    {"result":291}    and    {"result":"0x291"}
 
-NOT fixed. It sits outside the three bugs this change was scoped to, and it
-deserves its own change with its own test.
+Both are well-formed answers to the SAME call, neither carries a `,` or a `"`,
+and they state different values — 291 against 657. Chains whose results carry
+JSON numbers rather than hex strings make this an everyday shape, so a forger
+needs no malformed field at all. The same prefix stripping made the quantity
+`"0xab"` agree with the plain string `"ab"`.
 
----
+The values in a response come from the upstream, so a misbehaving or hostile
+node reaches this, not a client. An upstream that wants to pass consensus while
+returning different data pads one string field until its canonical form matches
+the honest answer. Consensus exists to catch exactly that upstream.
+
+**The fix.** `canonicalizeTo` now writes the self-delimiting encoding that the
+cache key uses. A leaf writes a type tag, its byte length in decimal, a `:` and
+then its payload. An object writes its tag, the count of the members that
+survive the emptyish filter, and a `:`; each member name is framed as a leaf of
+its own. An array opens with one tag and closes with another. No JSON
+punctuation is written at all, because the frames already say where every piece
+stops.
+
+An array streams rather than counting, and that is deliberate. It cannot know
+how many elements survive the filter without holding every one of them at once,
+and a top-level array — a block trace, a page of logs — is the largest value
+eRPC hashes. Counting it would double the peak memory of every consensus hash.
+
+**Why the encoding is injective.** A leaf header is a tag byte, decimal digits
+and a `:`. A digit is never a `:`, so a reader always finds the end of the
+count, and the count then says exactly how many bytes follow. A reader
+therefore consumes a payload by length and never scans it, which is why the
+array's closing tag is safe: it is only ever read where a tag is expected, and
+no payload byte can be mistaken for it. The whole stream decodes into one tree
+of tagged values, and a decodable stream cannot map two different values onto
+one byte string.
+
+The tags carry the second half of the argument: a string, a quantity, a JSON
+literal, a member name, an array and an object each take their own tag, so a
+string can never be read as the structure or the number its bytes spell.
+
+A separator byte would not do the job here, and the reason is sharper than it
+was for the cache key. A response body IS upstream-controlled data, so any byte
+picked as a separator is a byte the attacker puts inside a string.
+
+**What still agrees, on purpose.** Framing removes the collisions; it does not
+touch the deliberate identifications the canonical form is for. A padded
+quantity still agrees with a bare one — `"0x0005208"` and `"0x5208"` reach the
+hash as the hex tag over the digits `5208` — because vendors disagree on
+padding and a fleet split on that would dispute every block. An emptyish member
+is still dropped, so an upstream that omits a zero field still agrees with one
+that sends it. Member order still does not count, and array order still does.
+
+`removeLeadingZeroes` is gone, replaced by `hexQuantityDigits`, which answers
+two questions at once: is this a `0x` quantity, and what are its digits without
+the padding. The caller tags a quantity differently from a plain string, so the
+normalization no longer erases the difference between them. The old function's
+second branch — the one that trimmed a quoted `"0x0…` and left a dangling
+closing quote — is deleted with it. Nothing reached that branch: `SonicCfg`
+unmarshals into `nil`, `bool`, `float64`, `string`, `[]interface{}` and
+`map[string]interface{}`, and none of those marshal to a quoted quantity.
+
+**One behaviour changed beyond the framing**, and entry 145 records it on its
+own: an array whose every element is emptyish now writes nothing at every
+depth, exactly like an object whose every member is emptyish.
+
+**The tests.** `TestCanonicalHash_SeparatesResponsesAnUpstreamCanForge`
+(`common/json_rpc_hashing_test.go`) holds eight pairs that hashed the same
+before: the two recorded probes, the one-field receipt forge, the number
+against the quantity that spells it, the quantity against the plain string of
+its digits, a log entry and a nested object against the strings that spell
+them, and a boolean against its own spelling.
+`TestCanonicalizeTo_EncodesEveryStructureDistinctly` states the rule those
+pairs sample — it encodes 25 values, including nested arrays against flat ones
+and strings that spell a whole frame, and fails if any two produce the same
+bytes.
+`TestCanonicalHashWithIgnoredFields_FramesTheBodyItHashes` puts a forged pair
+through the ignore-list path, which removes fields and then hashes what is
+left; without it that path could stay forgeable after the plain one was fixed.
+`TestHexQuantityDigits` replaces `TestRemoveLeadingZeroes` and pins the
+normalizer directly, including the inputs it must refuse.
+`TestCanonicalHash_AnArrayOfNothingHashesLikeNothingAtEveryDepth` pins the
+depth rule that entry 145 records.
+
+**Mutation result (2026-08-19).** Eight mutations, each reverted after its run.
+With `canonicalizeTo` put back to raw strings and JSON punctuation, all eight
+pairs fail, and so do the distinctness test, the ignore-list test and the three
+golden digests in `TestJsonRpcResponse_Hash`. Seven narrower mutations each
+fail exactly the case that names them:
+
+- a quantity tagged as a string — the `"0xab"`/`"ab"` pair, and distinctness;
+- a JSON literal tagged as a quantity — the `291`/`"0x291"` pair, and distinctness;
+- leaves written unframed — the three scalar pairs, and distinctness;
+- the array's open and close tags removed — distinctness;
+- the array opened before the first surviving element —
+  `TestCanonicalHash_AnArrayOfNothingHashesLikeNothingAtEveryDepth` and
+  `TestCanonicalizeTo_ReportsThatItWroteNothing`;
+- the padding zeroes left in place — `TestHexQuantityDigits` and
+  `TestCanonicalHash_NormalizesLeadingZeroesInHex`;
+- the uppercase `0X` prefix no longer recognised — `TestHexQuantityDigits`.
+
+With the fix restored, `common` and `consensus` pass, and so does
+`make test-fast`.
+
+**Upgrade cost: none.** Unlike the cache key, nothing reads this hash back. It
+decides one consensus round and then goes: `consensus/analysis.go` hashes each
+participant's response to group the participants, and `consensus/executor.go`
+puts the winner's digest into the misbehaviour snapshot. `JsonRpcResponse`
+memoizes it in a `sync.Map` that `Free` clears. No connector holds it, no cache
+key derives from it, and no two processes ever compare one, so a rolling
+upgrade needs no migration and produces no miss storm.
+
+Two visible things change, and both are diagnostic. The digest in the consensus
+analysis log is a new value for the same response, so a dashboard that groups
+by that string sees its old values stop. The misbehaviour export
+(`consensus/export.go`), where an operator has configured a destination, writes
+the new digest into its JSONL records — records written before the upgrade
+carry the old digest for the same body, and nothing joins the two.
+
+**`ignoreFields` is unaffected** (entry 14). Field removal runs before
+canonicalization and is untouched, so a broader path still subsumes its own
+extension. The framing sits under the removal, which is why the ignore-list
+path gets its own forgery test rather than trusting the plain one.
 
 ## 136. `ParseBlockParameter` lets `blockTag` overwrite `blockNumber` in silence
 
@@ -4326,6 +4444,8 @@ The honest statement is the one to keep: a client that needs a block number
 above 2^53 must send it as a hex string, which JSON-RPC has always allowed and
 which loses nothing. The same limit applies to any JSON number eRPC reads,
 not just this one.
+
+
 ## 140. The stress harness builds a server config eRPC refuses, and the refusal kills the test binary
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity: high for the test suite.** It hid the whole
@@ -4536,3 +4656,71 @@ removes the race and makes the timeout verdict stand:
 
 That changes what eRPC does when an eval overruns, so it needs a test that
 pins the new behaviour before it lands.
+
+
+## 145. `canonicalizeTo` wrote bytes it then reported as unwritten
+
+**Status:** fixed-in-fork (2026-08-19). **Severity: low.** It changed one hash,
+at one depth. Found while fixing entry 135.
+
+The array branch wrote `[` before it knew whether any element would survive the
+emptyish filter. When none did, it wrote `]`, returned `false`, and left `[]`
+in the writer. Every nested caller renders a child into a borrowed buffer and
+throws the buffer away when the child reports `false`, so the stray brackets
+vanished — except at the top, where `CanonicalHash` hashes the writer directly
+and ignores the flag.
+
+So a result of `[null]` hashed as `[]` while a MEMBER holding `[null]` hashed
+as absent. One rule at depth 1 and another at depth 0, from the same branch.
+
+The array branch now writes its opening tag only when the first surviving
+element is ready, so an all-emptyish array writes nothing at any depth, exactly
+like an all-emptyish object. Pinned by
+`TestCanonicalHash_AnArrayOfNothingHashesLikeNothingAtEveryDepth`, which
+compares a top-level `[null]` against `[]` and against `{}`, and keeps one
+surviving element as the control. `TestCanonicalizeTo_ReportsThatItWroteNothing`
+already asserted the flag and still does.
+
+## 146. The bug log carried three unresolved merge-conflict markers
+
+**Status:** fixed here (2026-08-19). This file is the fork's own, so there is
+nothing to send upstream. **Severity: low**, and confined to this file. Found
+while opening entry 135.
+
+`valve/upstream-bug-log.md` held `<<<<<<< HEAD`, `=======` and `>>>>>>>`
+markers from two worktree branches, committed as text. Entry 135 itself sat
+inside one of the conflict sides, so a reader could not tell which half of the
+file was current.
+
+Two of the three conflicts were nested in each other, and their three sides
+held DISJOINT entries: 125-134, then 135-138, then 140-144. All three sides are
+correct, so the resolution keeps every entry and renumbers nothing. The
+remaining conflict was one paragraph of entry 118 written twice, once before
+its fix landed and once after; the "fixed-in-fork" version is the true one and
+it stays.
+
+Nothing in the tree reads this file, so the markers cost only a reader's
+confidence. They are worth naming because the same accident in a `.go` or
+`.yaml` file would not compile, and this one merged in silence.
+
+## 147. A dead branch in `removeLeadingZeroes` produced an unbalanced string
+
+**Status:** fixed-in-fork (2026-08-19). **Severity: low.** Unreachable. Found
+while fixing entry 135.
+
+`removeLeadingZeroes` had a second branch for a quantity that arrives already
+quoted: on `"0x0a"` it trimmed from index 3 and returned `a"` — the closing
+quote kept, the opening quote and the prefix gone. Its own test asserted that
+output under the name "quoted hex keeps the trailing quote".
+
+The branch could not run. Only `canonicalizeTo` called the function, and its
+three call sites pass a Go `string`, a `[]byte`, or the output of
+`SonicCfg.Marshal` for a value that is neither. `SonicCfg` unmarshals a
+response into `nil`, `bool`, `float64`, `string`, `[]interface{}` or
+`map[string]interface{}`, and no `bool` or `float64` marshals to a quoted
+quantity.
+
+The replacement, `hexQuantityDigits`, drops the branch: an input that is not a
+bare `0x` quantity comes back with `ok` false and reaches the hash whole. That
+is the weaker rule — it commits to nothing about what a quoted value means —
+and `TestHexQuantityDigits` pins it with the quoted case asserting `false`.
