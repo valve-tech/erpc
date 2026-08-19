@@ -497,8 +497,13 @@ func GenerateValidationReport(ctx context.Context, cfg *common.Config) *Validati
 		}
 		if allUnknownChain && len(items) > 1 {
 			for _, it := range items {
-				if it.genesisTried && it.genesisErr != nil {
+				if !it.genesisTried || it.genesisHash != "" {
+					continue
+				}
+				if it.genesisErr != nil {
 					appendWarn(fmt.Sprintf("project=%s upstream=%s chain=%s could not fetch genesis block (chain ID also unknown, skipping comparison): %s", prj, it.upstreamId, chainLabel, common.ErrorFingerprint(it.genesisErr)))
+				} else {
+					appendWarn(fmt.Sprintf("project=%s upstream=%s chain=%s could not fetch genesis block (chain ID also unknown, skipping comparison): returned no block hash", prj, it.upstreamId, chainLabel))
 				}
 			}
 			continue
@@ -539,13 +544,21 @@ func GenerateValidationReport(ctx context.Context, cfg *common.Config) *Validati
 			}
 		}
 
-		// Report items that failed to fetch genesis
+		// Report items that failed to fetch genesis. An upstream that answered
+		// the call but returned no hash produces no error either, so gating this
+		// on genesisErr would drop it from the report — and from the operator's
+		// view it would then look like it took part in the comparison below.
 		for _, it := range items {
 			if it.genesisSkipped || it.genesisHash != "" {
 				continue
 			}
-			if it.genesisTried && it.genesisErr != nil {
+			if !it.genesisTried {
+				continue
+			}
+			if it.genesisErr != nil {
 				appendWarn(fmt.Sprintf("project=%s upstream=%s chain=%s could not fetch genesis block: %s", prj, it.upstreamId, chainLabel, common.ErrorFingerprint(it.genesisErr)))
+			} else {
+				appendWarn(fmt.Sprintf("project=%s upstream=%s chain=%s could not fetch genesis block: returned no block hash", prj, it.upstreamId, chainLabel))
 			}
 		}
 

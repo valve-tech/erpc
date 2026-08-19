@@ -3182,3 +3182,165 @@ Two separate things are wrong, and they need separate fixes:
 The same test also reads `attempts` (`util/initializer_test.go:452, 469`)
 without synchronisation while retry goroutines increment it. That one is a
 test defect, not a product defect, and it is not what the detector flagged.
+
+## 110. `/healthcheck` answers HTTP 200 when eRPC cannot serve at all
+
+**Status: FIXED in the fork** (`erpc/healthcheck.go`).
+**Severity: high.** A load balancer keeps a dead instance in rotation.
+
+Two branches of `handleHealthCheck` report failure through a plain
+`errors.New`:
+
+    if s.erpc == nil { ... errors.New("eRPC is not initialized") ... }
+    if len(projects) == 0 { ... errors.New("no projects found") ... }
+
+`handleErrorResponse` picks the HTTP status from the error CODE. A plain error
+carries none, so it falls through the whole switch and keeps the default,
+`http.StatusOK`. The body is a JSON-RPC error object, and the status line says
+200.
+
+I confirmed it before the fix:
+
+    code=200 body={"jsonrpc":"2.0","id":null,
+      "error":{"code":-32603,"message":"no projects found","data":{}}}
+
+Every other failure in the same handler answers with a failing code: draining
+answers 503, an unhealthy fleet answers 502, an unknown project answers 404.
+Only the two worst cases — the process holds no eRPC, or it loaded no project
+— answer 200. A load balancer or a Kubernetes probe reads the status code, so
+it keeps sending traffic to an instance that can serve nothing.
+
+Fix: write `503 Service Unavailable` before the error body, which is the idiom
+the simple-mode failure in the same function already uses. Tests:
+`TestHealthCheck_ReportsWhenNoProjectIsLoaded` and
+`TestHealthCheck_ReportsWhenErpcNeverInitialized`.
+
+## 111. The genesis fork check silently drops a node that answers with no hash
+
+**Status: FIXED in the fork** (`erpc/config_analyzer.go`).
+**Severity: medium.** `erpc validate` reports a fork check that never ran.
+
+`GenerateValidationReport` compares genesis hashes across a project's
+upstreams. It reported an upstream that produced no hash only when the fetch
+also produced an error:
+
+    if it.genesisTried && it.genesisErr != nil {
+        appendWarn("... could not fetch genesis block: %s", ...)
+    }
+
+A node that answers `eth_getBlockByNumber("0x0")` with a block whose `hash`
+field is empty returns `("", nil)` from `fetchBlockHashByNumber`. There is no
+error, so `genesisErr` stays nil, and the upstream matches neither the "has a
+hash" branch nor the warning. It vanishes.
+
+With one upstream the group still warns, through the separate "no upstream
+returned genesis block" path. With two or more, where one node answers and one
+does not, the report is clean. The operator reads a passing fork check that
+compared a single node against itself.
+
+Fix: warn whenever an upstream tried and produced no hash, and name the reason
+— an error fingerprint when there is one, "returned no block hash" otherwise.
+The same silence existed in the unknown-chain variant of the loop, so both are
+fixed. Test: `TestValidate_NamesTheOneUpstreamThatHidesGenesis`.
+
+## 112. `network_retry_attempt_total` cannot fire without a network retry policy
+
+**Status:** open, inherited. This is the mechanism behind 93, not a second bug.
+
+The counter is wired at exactly one site, `erpc/network_executor.go:312`,
+inside `executeWithRetries`. Two conditions gate it, and each one silences it
+on its own.
+
+First, the loop bound:
+
+    maxAttempts := 1
+    if e.cfg != nil && e.cfg.Retry != nil && e.cfg.Retry.MaxAttempts > 0 {
+        maxAttempts = e.cfg.Retry.MaxAttempts
+    }
+
+A project whose network failsafe block declares no `retry` key leaves
+`e.cfg.Retry` nil, so `maxAttempts` is 1. The emit site sits behind
+`attempt+1 < maxAttempts`, which is false on the only pass. The counter is
+then unreachable by construction, whatever the upstreams do.
+
+Second, even with `maxAttempts > 1` the counter only fires when the NETWORK
+executor decides to retry. Failover between upstreams inside one network
+attempt happens below this loop and never reaches the increment. That is the
+case entry 93 measured: eight real failovers, zero samples.
+
+So the metric counts network-scope retry decisions, not failovers. The name
+says otherwise. An operator who alerts on it sees nothing through an outage,
+and sees nothing at all if their config omits the retry key.
+
+**Fix:** as 93 — count transport-driven rotation, or say in the Help text what
+the counter excludes. Add the `maxAttempts == 1` case to that text: today a
+config with no `retry` key publishes a permanently empty series.
+
+## 113. Chain-id verification counts upstreams it never checked
+
+**Status:** open, inherited (`erpc/healthcheck.go`, `checkEvmChainId`).
+**Severity: low.** It misreads as failures on a mixed-architecture project.
+
+`checkEvmChainId` skips any upstream that is not EVM:
+
+    if upsConfig.Type != common.UpstreamTypeEvm || upsConfig.Evm == nil {
+        continue
+    }
+
+Its result messages then divide by `len(upstreams)`, which still counts the
+skipped ones:
+
+    "all %d / %d upstreams verified"          successTotal, len(upstreams)
+    "%d / %d upstreams passed (%d failed)"    successTotal, len(upstreams), ...
+
+A project with one EVM upstream and two SVM upstreams, polled with
+`eval=all:evm:eth_chainId`, reports "all 1 / 3 upstreams verified" and status
+OK. The operator reads two silent failures where there are none. The verdict
+is right; only the count is wrong.
+
+**Fix:** count the upstreams the probe actually ran against. The eligible set
+is already known at the top of the loop.
+
+## 114. Two chain-id branches cannot run, and one map contract is unstated
+
+**Status:** open, inherited. Recorded as dead weight, not as a live fault.
+
+While covering the chain-identity paths I found three commitments that today's
+data does not support.
+
+First, `checkEvmChainId` guards against an unparsable chain id:
+
+    actualChainId, err := strconv.ParseInt(upChainId, 0, 64)
+    if err != nil { ... "invalid chain id format" ... }
+
+`EvmGetChainId` already normalises the wire value and returns
+`strconv.FormatUint(dec, 10)`. Its output is always a decimal string that
+`ParseInt` accepts, so the branch cannot run. `GenerateValidationReport`
+carries the same guard, and there it IS reachable: it parses into the platform
+int, so a chain id above 2^63-1 fails. Only the health-check copy is dead.
+
+Second, `GenerateValidationReport` warns on an empty chain-id answer:
+
+    } else if chainStr == "" { ... "returned an empty chain ID" ... }
+
+`EvmGetChainId` never returns an empty string with a nil error. A node that
+answers `""` normalises to `"0"`, and the report says "returned chain ID 0"
+instead. The empty-string branch is reachable only when the fetch already
+failed, where the preceding error branch takes it first.
+
+Third, `checkEvmChainId` writes into the caller's map without checking it:
+
+    upstreamResult := upstreamsDetails[ups.Id()]
+    upstreamResult["expectedChainId"] = expectedChainId
+
+If the caller passes a map with no entry for an upstream id, `upstreamResult`
+is nil and the assignment panics. The panic happens in a goroutine with no
+recover, so it kills the process rather than failing the health check. Both
+call sites build the map from the same slice they pass, so nothing violates it
+today — but the function is package-level and the precondition is written
+nowhere.
+
+**Fix:** delete the two unreachable branches rather than test them, and either
+build the detail map inside `checkEvmChainId` or skip an upstream that has no
+entry. All three are unforced commitments the caller's shape is currently
+paying for.
