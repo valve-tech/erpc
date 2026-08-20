@@ -425,14 +425,14 @@ func TestStart_MissingConfig_ExitsWithStartFailedCode(t *testing.T) {
 	require.Equal(t, []int{util.ExitCodeERPCStartFailed}, run.exitCodes)
 }
 
-// Bug 99 pin. erpc.Init is library code, and when the HTTP server cannot
-// bind it does not return the error — a goroutine the caller never
-// started calls util.OsExit. An embedder loses its whole process.
+// Bug 99 pin. erpc.Init is library code. It used to call util.OsExit from a
+// goroutine the caller never started, so an embedder lost its whole process
+// when the HTTP server could not bind.
 //
-// This test pins that behaviour through the only seam that exists,
-// util.OsExit. When Init learns to return the error, this test must flip
-// to expect a returned error and no exit code.
-func TestStart_HttpServerCannotBind_LibraryGoroutineExitsTheProcess(t *testing.T) {
+// Init now sends the bind failure to cmd/erpc as ErrServerFailed, and the
+// BINARY decides to exit. This test pins that split: the exit code still
+// appears, but it comes from main, not from the library.
+func TestStart_HttpServerCannotBind_InitReturnsTheErrorAndTheBinaryExits(t *testing.T) {
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer busy.Close()
@@ -480,7 +480,7 @@ projects:
 	select {
 	case code := <-exits:
 		require.Equal(t, util.ExitCodeHttpServerFailed, code,
-			"bug 99: a library goroutine ends the process instead of returning the bind error")
+			"bug 99: main must exit with the http-server code after Init returns the bind error")
 	case <-time.After(60 * time.Second):
 		t.Fatal("timed out waiting for the http server bind failure")
 	}

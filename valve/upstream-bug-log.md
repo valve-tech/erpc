@@ -326,16 +326,8 @@ alone, so `WriteTo` writes no shared field under its read locks.
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity was:
 high.** Silent wrong answer. Pinned by
-`TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension`.
-
-`common/json_rpc.go:1075-1105` builds a path tree from the ignore list. When one
-path is a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]`
-— the builder finds `pathTree["logs"]` already set to `true`, fails the map type
-
-**Status: FIXED in the fork.** Upstream still carries it. **Severity: high.**
-Silent wrong answer. The entry below describes the mechanism exactly — a
-mutation test on 2026-08-19 restored the old builder and reproduced both
-symptoms.
+`TestRemoveFieldsByPaths_TheBroaderPathSubsumesItsOwnExtension`. A mutation
+test on 2026-08-19 restored the old builder and reproduced both symptoms.
 
 `common/json_rpc.go` builds a path tree from the ignore list. When one path is
 a prefix of another and comes first — `["logs", "logs.*.blockTimestamp"]` — the
@@ -3242,13 +3234,12 @@ is a wrong one.
 
 ## 99. A library package terminates the operator's process
 
-**Status:** open. Pinned by
-`cmd/erpc/cli_test.go:TestStart_HttpServerCannotBind_LibraryGoroutineExitsTheProcess`,
-which occupies the port and asserts the process exit.
-**Severity: medium for an embedder, high for a test run.**
-
-**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium for an embedder, high for a test
-run.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium
+for an embedder, high for a test run.** Pinned by
+`cmd/erpc/cli_test.go:TestStart_HttpServerCannotBind_InitReturnsTheErrorAndTheBinaryExits`,
+which occupies the port, then asserts the BINARY exits with
+`ExitCodeHttpServerFailed` — the library returns the error rather than
+ending the process itself.
 
 `erpc/init.go` called `util.OsExit(...)` at three sites from inside the `erpc`
 package. That package is a library: `cmd/erpc` is the binary, and `erpc.Init`
@@ -4004,15 +3995,6 @@ Pinned by `TestAvailbilityConfidenceUnmarshalYAML`, sub-test "does not
 round-trip stateProven".
 
 ## 118. Two different requests can share one cache key
-
-**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.**
-A client can receive another request's data. Confirmed independently by direct
-probe, not by reading the code, and re-confirmed in the status audit. Before the
-fix both requests below produced a byte-identical key:
-
-**Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.** A client can
-receive another request's data. **Confirmed independently by direct probe**,
-not by reading the code. Both requests below produced a byte-identical key:
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity: highest.** A client could
 receive another request's data. **Confirmed independently by direct probe**, not
@@ -5430,6 +5412,38 @@ re-confirmation sentence from the other side is kept.
 
 The markers meant three worktree agents merged into `main` without reading the
 result. A conflicted document still renders, which is why nobody noticed.
+
+**Follow-up, same day.** Removing the marker LINES did not finish the job. A
+`pre-commit` gate added afterwards found that three entries still carried more
+than one status paragraph, left stacked when the marker lines were stripped:
+
+- **14** — two copies, and the first was truncated mid-sentence where the
+  second spliced in. Kept the copy naming the pinning test, carried over the
+  mutation-test date from the other.
+- **99** — the two sides DISAGREED: one said `open`, one said `FIXED`. The
+  code decides. `erpc/init.go` has no `util.OsExit` call and `cmd/erpc`
+  maps `ErrServerFailed` to the exit code, so `FIXED` is correct. The `open`
+  side also named a test, `…_LibraryGoroutineExitsTheProcess`, whose name
+  still asserted the bug. That test passes today only because the BINARY
+  exits, which is the new, correct behaviour. Renamed to
+  `TestStart_HttpServerCannotBind_InitReturnsTheErrorAndTheBinaryExits`.
+- **118** — three copies of one paragraph. Kept the one carrying the
+  out-of-tree recomputation of the double SHA-256.
+
+This is the point of the entry. A marker check settles the SYNTAX, and the
+syntax was already clean at `63bd173`. It says nothing about two sides that
+merged without a marker and now disagree. Entry 99 is that case, and only
+reading `erpc/init.go` settled it.
+
+**Gate.** `.pre-commit-config.yaml` gained `check-merge-conflict` with
+`args: [--assume-in-merge]`, and a local `check-bug-log` hook that asserts
+unique entry ids and exactly one status per entry from a four-word
+vocabulary. `--assume-in-merge` is load-bearing: without it the hook checks
+only while `.git/MERGE_HEAD` exists, and these markers survived PAST the
+merge commit. Verified by staging a bare `=======` outside a merge — the
+hook passes without the flag and fails with it. All three checks were
+proven against deliberate mutants.
+
 
 ---
 

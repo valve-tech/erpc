@@ -4,7 +4,7 @@ repos:
   hooks:
   - id: gitleaks
 - repo: https://github.com/golangci/golangci-lint
-  rev: v1.52.2
+  rev: v2.13.0
   hooks:
   - id: golangci-lint
 - repo: https://github.com/jumanjihouse/pre-commit-hooks
@@ -18,5 +18,18 @@ repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v4.4.0
   hooks:
+  - id: check-merge-conflict
+    # Always check, not only while .git/MERGE_HEAD exists. The markers this
+    # was added for survived PAST the merge commit and were committed later,
+    # when git no longer considered the tree to be in a merge.
+    args: [--assume-in-merge]
   - id: end-of-file-fixer
   - id: trailing-whitespace
+- repo: local
+  hooks:
+  - id: check-bug-log
+    name: check the structure of the upstream bug log
+    entry: valve/check-bug-log.sh
+    language: script
+    files: ^valve/upstream-bug-log\.md$
+    pass_filenames: false
