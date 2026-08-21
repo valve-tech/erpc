@@ -1,0 +1,155 @@
+# Triage of the 79 open entries
+
+Date: 2026-08-21. Source: `upstream-bug-log.md`, 167 entries — 84 fixed, 79
+open, 4 not a bug.
+
+## What changed
+
+The fork no longer plans upstream pull requests. It tracks `erpc/erpc` by
+rebasing, so **every fix the fork carries is a patch it replays forever**. That
+changes the question each open entry has to answer. It is no longer "is this a
+bug?" — the entries already settled that, with a `file:line` and a reading of
+the source. It is now:
+
+> Does carrying this patch cost less than living with the defect?
+
+For a client-visible wrong answer, yes. For a dead branch that no input
+reaches, no — deleting it changes no behaviour and buys a rebase conflict in
+that file for as long as the fork exists.
+
+## Method, and what it does not cover
+
+Each entry carries a one-line severity summary written by the session that read
+the source. This triage groups the 79 by those summaries and by the shape of
+the defect. **It does not re-read all 79 sources.** Two entries were re-read,
+because a latent crash deserves a second look, and both moved bucket as a
+result. Treat a bucket as a proposal with a stated reason, not as a verdict.
+
+## The buckets
+
+| Bucket | Count | What to do |
+|---|---|---|
+| **Edge** | 10 | One defect, ten entries. One patch at the config edge. |
+| **Fix** | 43 | Carry a fork patch. Ranked below. |
+| **Close** | 18 | Dead or unreachable. Change no code. |
+| **Document** | 4 | True, and a patch would make it worse. |
+| **Watch** | 3 | Real, not actionable yet. |
+| **Duplicate** | 1 | Entry 71 restates 24. |
+
+## The headline: ten entries are one defect
+
+Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** all have one shape:
+
+> eRPC accepts a configuration input it does not understand, and proceeds
+> without a word.
+
+The surface differs each time. It drops keys the legacy schema never learned
+(53, 126). It ignores a one-character typo and leaves a control switched off
+(64, 121). It takes a wrong default because a value does not survive its own
+round trip (117). It silences every log line (125). It reads a file the
+operator did not name (127). It panics (25). It resolves an ambiguous auth
+block last-block-wins (18).
+
+Ten separate patches would be ten unforced commitments and ten rebase
+conflicts. One property at the config edge closes them: **eRPC must not
+discard an operator's stated intent in silence.** The repo's own razor asks
+for exactly this — wire facts are explicit validated commitments at the edge,
+and configuration is the edge.
+
+This is the single highest-value item in the list, and the cheapest to carry.
+Do it first.
+
+Two cautions, both from the entries themselves. Entry 53 and entry 64 each have
+a test that **asserts today's broken behaviour**; those tests change with the
+fix, and the change is the point. Entry 18 records that the current behaviour
+**may be intended** — settle that before treating it as a defect.
+
+## Close these 18: dead code, no behaviour
+
+**8, 12, 37, 40, 51, 54, 55, 60, 68, 75, 101, 106, 107, 114, 116, 137, 162, 164.**
+
+Every one is an unreachable branch, an uncalled function, work a later line
+overwrites, or an argument nothing reads. Their own summaries say so: "Severity:
+none today. Unexercised machinery." Entry 137 is already recorded as **not a
+live defect**, and 164 as **moot in the fork**.
+
+They are worth keeping as knowledge — each reads as an active guard, and the
+next reader deserves to know it is not. They are not worth a patch. The cost of
+deleting dead code in a fork is a permanent conflict in that file; the benefit
+is zero behaviour change.
+
+**Recommendation, not yet applied:** move these 18 from `open` to `not a bug`,
+which takes the open count from 79 to 61. This is left undone deliberately. It
+rewrites the headline number of a document other people read, so it should be
+a decision, not a side effect of a triage.
+
+## Document these 4, do not patch them
+
+**33, 93, 94, 112.**
+
+These are metric and status-code semantics that mislead a reader. A patch would
+change what a counter means. Downstream code already reads these counters and
+codes around exactly these traps — `upstream="n/a"` covering three different
+events (94) is a documented trap in the fork's own operational notes. Changing
+the meaning under a consumer that has already adapted is a regression, not a
+fix. Entry 112 is the mechanism behind 93, not a second defect.
+
+Write the semantics down where the consumer reads them. Leave the counters
+alone.
+
+## Watch these 3
+
+- **10** — an upstream test that fails about one run in three under load. Chased
+  and not reproduced: with the old deadline restored and all eight cores
+  saturated it still passed. The hypothesis is recorded in the entry.
+- **H1** — aliased memory returned on one path and copied on the other. Its own
+  status says it "is still only a hazard". Nothing observed reaches it.
+- **138** — a JSON block number above 2^53 arrives already wrong. Not eRPC's to
+  fix alone.
+
+## The 43 to fix, ranked
+
+Ranked by what a client or an operator loses, not by how hard each is.
+
+**1 — a client gets a wrong or broken answer (11).**
+7, 24, 29, 39, 48, 74, 76, 77, 86, 87, 136.
+A corrupt cache entry answered as HTTP 200 (86), a truncated request body
+answered 200 and blamed on the server (29), `"0x"` normalised to the zero hash
+(7), a released response that reads exactly like a nil one (76, 77), a listing
+that never hands out its next-page token so the caller believes it saw
+everything (24).
+
+**2 — a crash or a leak (5).**
+9, 26, 45, 58, 109.
+Entries 9 and 58 are one-line nil dereferences, and both are cheap: 9's two
+sibling constructors already carry the guard it lacks, and 58 only has to check
+its error before it uses the client. Entry 26 is a real send-on-closed panic
+that **cannot be pinned by a test** — a panic in a background goroutine kills
+the test binary. Entry 109's second half is still open.
+
+**3 — a control is silently not applied (7).**
+31, 44, 49, 59, 73, 97, 128.
+The gRPC surface ignores every `queryShim` limit, so a cost control covers half
+the traffic (73). The WebSocket read deadline is never armed, so half-dead
+clients are never reaped (31).
+
+**4 — the fork's own code (4).**
+6, 92, 100, 150.
+These carry **no rebase debt at all** — the fork owns the file. Entry 6 is
+rising in severity because the fork's own polyglot work surfaced it. Entry 92
+is fork code by its own status line. Take these whenever convenient.
+
+**5 — diagnostics, admin surfaces and small defects (16).**
+5, 11, 15, 16, 17, 21, 34, 52, 61, 65, 90, 113, 143, 154, 161, 166.
+Real, contained, individually small. Entry 34 is five defects in one entry.
+Entry 52's first bullet is already fixed and only its second is open. Entry 143
+is low alone and high next to 99.
+
+## Suggested order
+
+1. **The config edge (10 entries, one patch).** Best value, lowest carry cost.
+2. **The fork's own code (4 entries).** No rebase debt.
+3. **Rank 1 and rank 2 (16 entries).** Wrong answers and crashes.
+4. **Decide on the 18 closures.** One decision, and the open list drops by a
+   quarter.
+5. Ranks 3 to 5 as capacity allows.
