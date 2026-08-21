@@ -160,6 +160,16 @@ export type PolicyEvalContext = {
   readonly previousOrder: readonly string[];
   readonly lastSwitchAt: number | null;
   readonly tickCount: number;
+
+  /**
+   * The network's `failover.onDefaultsExhausted`. When true the operator
+   * asked for a per-request escape to the `tier:fallback` upstreams, so
+   * the policy must rank that tier last instead of dropping it — see the
+   * bundled default policy's `preferTag(..., { keepRest })` +
+   * `demoteTag('tier:fallback')` pair. A policy that never reads this
+   * field silently ignores the key, and the engine warns at startup.
+   */
+  readonly failoverOnDefaultsExhausted: boolean;
 };
 
 /** Back-compat alias kept for users who already typed against the old name. */
@@ -229,6 +239,14 @@ export type KeepHealthyOptions = {
 export type PreferOptions = {
   minHealthy?: number;
   fallback?: TagPattern;
+  /**
+   * Rank instead of filter. The preferred subset still comes first, but
+   * the rest is appended rather than dropped — so the request path can
+   * still sweep into it when the preferred subset fails. Pair it with a
+   * trailing `demoteTag(...)` so later ranking steps (`sortByScore`,
+   * `stickyPrimary`) cannot interleave the two groups again.
+   */
+  keepRest?: boolean;
 };
 
 /** Options for `stickyPrimary`. */
@@ -428,6 +446,14 @@ export interface PolicyEvalUpstreamArray
   excludeId(id: Pattern): PolicyEvalUpstreamArray;
   byTag(pat: TagPattern): PolicyEvalUpstreamArray;
   excludeTag(pat: TagPattern, opts?: { probe?: boolean }): PolicyEvalUpstreamArray;
+  /**
+   * Soft counterpart of `excludeTag`: move every matching upstream to
+   * the END of the list instead of dropping it. Relative order inside
+   * each group survives. Put it after the ranking steps — `sortByScore`
+   * and `stickyPrimary` rank on health alone and would otherwise
+   * interleave the groups again.
+   */
+  demoteTag(pat: TagPattern): PolicyEvalUpstreamArray;
   byVendor(v: Pattern): PolicyEvalUpstreamArray;
   excludeVendor(v: Pattern): PolicyEvalUpstreamArray;
   byType(t: Pattern): PolicyEvalUpstreamArray;

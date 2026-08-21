@@ -56,7 +56,7 @@ func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.
 	if err != nil {
 		return nil, err
 	}
-	upsCfgs, err := p.vendor.GenerateConfigs(ctx, logger, upsCfg, p.config.Settings)
+	upsCfgs, err := common.GenerateVendorConfigs(ctx, p.vendor, logger, upsCfg, p.config.Settings)
 	if err != nil {
 		return nil, err
 	}

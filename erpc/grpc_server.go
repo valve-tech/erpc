@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type GrpcServer struct {
@@ -158,7 +160,33 @@ func (gs *GrpcServer) Start(logger *zerolog.Logger) error {
 	return gs.server.Serve(lis)
 }
 
-func (gs *GrpcServer) extractRequestInput(ctx context.Context, method string) (*RequestInput, error) {
+// BDS lets a client pin the chain in the request body as well as in the
+// metadata. These are the two field names it uses; every request message that
+// declares them is read through the descriptor below, so a message that gains
+// them later is covered with no code change here.
+const (
+	bdsChainIdField          = "chainId"
+	bdsChainGenesisHashField = "chainGenesisHash"
+)
+
+// pinnedChain reports the chain a client pinned in the request body: the chain
+// id rendered the way the router spells it, and whether a genesis hash is set.
+func pinnedChain(req proto.Message) (chainId string, hasGenesisHash bool) {
+	if req == nil {
+		return "", false
+	}
+	msg := req.ProtoReflect()
+	fields := msg.Descriptor().Fields()
+	if fd := fields.ByName(bdsChainIdField); fd != nil && fd.Kind() == protoreflect.Uint64Kind && msg.Has(fd) {
+		chainId = strconv.FormatUint(msg.Get(fd).Uint(), 10)
+	}
+	if fd := fields.ByName(bdsChainGenesisHashField); fd != nil && fd.Kind() == protoreflect.BytesKind && msg.Has(fd) {
+		hasGenesisHash = len(msg.Get(fd).Bytes()) > 0
+	}
+	return chainId, hasGenesisHash
+}
+
+func (gs *GrpcServer) extractRequestInput(ctx context.Context, method string, req proto.Message) (*RequestInput, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return nil, status.Error(codes.InvalidArgument, "missing metadata")
@@ -168,6 +196,24 @@ func (gs *GrpcServer) extractRequestInput(ctx context.Context, method string) (*
 		return nil, status.Error(codes.InvalidArgument, "x-erpc-project metadata required")
 	}
 	chainID := firstMD(md, "x-erpc-chain-id")
+	pinnedChainID, pinnedGenesisHash := pinnedChain(req)
+	// eRPC selects a network by chain id alone and holds no genesis hash for
+	// an EVM network, so it cannot honour chainGenesisHash. It refuses the
+	// request by name: a client that pins a fork must learn eRPC ignored the
+	// pin, rather than read data from whichever fork the chain id resolves to.
+	if pinnedGenesisHash {
+		return nil, status.Errorf(codes.Unimplemented,
+			"%s is set, and this server cannot honour it: eRPC selects a network by chain id alone. Remove %s.",
+			bdsChainGenesisHashField, bdsChainGenesisHashField)
+	}
+	if pinnedChainID != "" {
+		if chainID == "" {
+			chainID = pinnedChainID
+		} else if chainID != pinnedChainID {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"chainId %s does not match x-erpc-chain-id %s", pinnedChainID, chainID)
+		}
+	}
 	if chainID == "" {
 		return nil, status.Error(codes.InvalidArgument, "x-erpc-chain-id metadata required")
 	}
@@ -189,7 +235,7 @@ func (gs *GrpcServer) extractRequestInput(ctx context.Context, method string) (*
 }
 
 func (gs *GrpcServer) ChainId(ctx context.Context, req *evm.ChainIdRequest) (*evm.ChainIdResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_chainId")
+	input, err := gs.extractRequestInput(ctx, "eth_chainId", req)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +259,7 @@ func (gs *GrpcServer) ChainId(ctx context.Context, req *evm.ChainIdRequest) (*ev
 }
 
 func (gs *GrpcServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByNumberRequest) (*evm.GetBlockResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getBlockByNumber")
+	input, err := gs.extractRequestInput(ctx, "eth_getBlockByNumber", req)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +291,7 @@ func (gs *GrpcServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByN
 }
 
 func (gs *GrpcServer) GetBlockByHash(ctx context.Context, req *evm.GetBlockByHashRequest) (*evm.GetBlockResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getBlockByHash")
+	input, err := gs.extractRequestInput(ctx, "eth_getBlockByHash", req)
 	if err != nil {
 		return nil, err
 	}
@@ -277,11 +323,21 @@ func (gs *GrpcServer) GetBlockByHash(ctx context.Context, req *evm.GetBlockByHas
 }
 
 func (gs *GrpcServer) GetLogs(ctx context.Context, req *evm.GetLogsRequest) (*evm.GetLogsResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getLogs")
+	input, err := gs.extractRequestInput(ctx, "eth_getLogs", req)
 	if err != nil {
 		return nil, err
 	}
 	payload := map[string]interface{}{}
+	// BDS declares blockHash as the alternative to the fromBlock/toBlock range,
+	// and eth_getLogs says the same. Sending both is a contradiction, so the
+	// server names it instead of silently serving one half.
+	if len(req.BlockHash) > 0 {
+		if req.FromBlock != nil || req.ToBlock != nil {
+			return nil, status.Error(codes.InvalidArgument,
+				"blockHash is an alternative to fromBlock/toBlock: set the hash or the range, not both")
+		}
+		payload["blockHash"] = evm.BytesToHex(req.BlockHash)
+	}
 	if req.FromBlock != nil {
 		payload["fromBlock"] = fmt.Sprintf("0x%x", *req.FromBlock)
 	}
@@ -340,7 +396,7 @@ func (gs *GrpcServer) GetLogs(ctx context.Context, req *evm.GetLogsRequest) (*ev
 }
 
 func (gs *GrpcServer) GetTransactionByHash(ctx context.Context, req *evm.GetTransactionByHashRequest) (*evm.GetTransactionByHashResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getTransactionByHash")
+	input, err := gs.extractRequestInput(ctx, "eth_getTransactionByHash", req)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +423,7 @@ func (gs *GrpcServer) GetTransactionByHash(ctx context.Context, req *evm.GetTran
 }
 
 func (gs *GrpcServer) GetTransactionReceipt(ctx context.Context, req *evm.GetTransactionReceiptRequest) (*evm.GetTransactionReceiptResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getTransactionReceipt")
+	input, err := gs.extractRequestInput(ctx, "eth_getTransactionReceipt", req)
 	if err != nil {
 		return nil, err
 	}
@@ -394,11 +450,17 @@ func (gs *GrpcServer) GetTransactionReceipt(ctx context.Context, req *evm.GetTra
 }
 
 func (gs *GrpcServer) GetBlockReceipts(ctx context.Context, req *evm.GetBlockReceiptsRequest) (*evm.GetBlockReceiptsResponse, error) {
-	input, err := gs.extractRequestInput(ctx, "eth_getBlockReceipts")
+	input, err := gs.extractRequestInput(ctx, "eth_getBlockReceipts", req)
 	if err != nil {
 		return nil, err
 	}
 	var blockParam interface{}
+	// BDS declares blockNumber and blockHash mutually exclusive. Preferring one
+	// silently would answer for a block the client did not ask for.
+	if len(req.BlockHash) > 0 && req.BlockNumber != nil {
+		return nil, status.Error(codes.InvalidArgument,
+			"blockNumber and blockHash are mutually exclusive: set one, not both")
+	}
 	if len(req.BlockHash) > 0 {
 		blockParam = evm.BytesToHex(req.BlockHash)
 	} else if req.BlockNumber != nil {
@@ -430,7 +492,7 @@ func (gs *GrpcServer) GetBlockReceipts(ctx context.Context, req *evm.GetBlockRec
 }
 
 func (gs *GrpcServer) QueryBlocks(req *evm.QueryBlocksRequest, stream evm.QueryService_QueryBlocksServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_queryBlocks")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_queryBlocks", req)
 	if err != nil {
 		return err
 	}
@@ -440,7 +502,7 @@ func (gs *GrpcServer) QueryBlocks(req *evm.QueryBlocksRequest, stream evm.QueryS
 }
 
 func (gs *GrpcServer) QueryTransactions(req *evm.QueryTransactionsRequest, stream evm.QueryService_QueryTransactionsServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTransactions")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTransactions", req)
 	if err != nil {
 		return err
 	}
@@ -450,7 +512,7 @@ func (gs *GrpcServer) QueryTransactions(req *evm.QueryTransactionsRequest, strea
 }
 
 func (gs *GrpcServer) QueryLogs(req *evm.QueryLogsRequest, stream evm.QueryService_QueryLogsServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_queryLogs")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_queryLogs", req)
 	if err != nil {
 		return err
 	}
@@ -460,7 +522,7 @@ func (gs *GrpcServer) QueryLogs(req *evm.QueryLogsRequest, stream evm.QueryServi
 }
 
 func (gs *GrpcServer) QueryTraces(req *evm.QueryTracesRequest, stream evm.QueryService_QueryTracesServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTraces")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTraces", req)
 	if err != nil {
 		return err
 	}
@@ -470,7 +532,7 @@ func (gs *GrpcServer) QueryTraces(req *evm.QueryTracesRequest, stream evm.QueryS
 }
 
 func (gs *GrpcServer) QueryTransfers(req *evm.QueryTransfersRequest, stream evm.QueryService_QueryTransfersServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTransfers")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_queryTransfers", req)
 	if err != nil {
 		return err
 	}
@@ -480,7 +542,7 @@ func (gs *GrpcServer) QueryTransfers(req *evm.QueryTransfersRequest, stream evm.
 }
 
 func (gs *GrpcServer) StreamBlocks(req *evm.StreamBlocksRequest, stream evm.StreamService_StreamBlocksServer) error {
-	input, err := gs.extractRequestInput(stream.Context(), "eth_getBlockByNumber")
+	input, err := gs.extractRequestInput(stream.Context(), "eth_getBlockByNumber", req)
 	if err != nil {
 		return err
 	}
@@ -563,7 +625,7 @@ func (gs *GrpcServer) grpcClientIP(ctx context.Context, md metadata.MD) string {
 			continue
 		}
 		if v := firstMD(md, hdr); v != "" {
-			ips := parseXForwardedFor(v)
+			ips := parseForwardedChain(v)
 			if ip := trimRightTrustedAndPick(ips, gs.isTrustedForwarder); ip != nil {
 				return ip.String()
 			}

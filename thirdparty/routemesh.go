@@ -113,7 +113,7 @@ func (v *RoutemeshVendor) GenerateConfigs(ctx context.Context, logger *zerolog.L
 		if !ok || apiKey == "" {
 			return nil, fmt.Errorf("apiKey is required in routemesh settings")
 		}
-		chainID := upstream.Evm.ChainId
+		chainID := upstream.EvmChainId()
 		if chainID == 0 {
 			return nil, fmt.Errorf("routemesh vendor requires upstream.evm.chainId to be defined")
 		}

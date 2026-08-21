@@ -13,5 +13,6 @@ func SetTracerProviderForTest(tp *sdktrace.TracerProvider) {
 	tracer = otel.Tracer(instrumentationName)
 	IsTracingEnabled = true
 	IsTracingDetailed = false
+	tracingDetailed.Store(false)
 	initOnce.Do(func() {})
 }

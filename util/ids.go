@@ -30,40 +30,22 @@ func IsValidIdentifier(s string) bool {
 	return validIdentifierRegex.MatchString(s)
 }
 
+// IsValidNetworkId reports whether s is a well-formed "<family>:<body>"
+// network ID.
+//
+// The family owns the body's shape, so this function only splits the two apart
+// and asks: a chain family registers its own rule (network_id_shape.go) and
+// evm/svm keep theirs as the builtin fallback. Adding a chain therefore needs
+// no edit here.
 func IsValidNetworkId(s string) bool {
-	if strings.HasPrefix(s, "evm:") {
-		_, err := strconv.Atoi(s[4:])
-		return err == nil
+	family, body, found := strings.Cut(s, ":")
+	if !found {
+		return false
 	}
-	if strings.HasPrefix(s, "svm:") {
-		// Two accepted shapes: "svm:<cluster>" (implicit solana, back-compat)
-		// and "svm:<chain>:<cluster>" (explicit chain prefix). Validate each
-		// segment as an identifier so "svm::" or trailing-colon nonsense is
-		// rejected.
-		rest := s[4:]
-		if rest == "" {
-			return false
-		}
-		for _, segment := range strings.Split(rest, ":") {
-			if segment == "" {
-				return false
-			}
-			for _, r := range segment {
-				if !(r == '-' || r == '_' || r == '.' ||
-					(r >= 'a' && r <= 'z') ||
-					(r >= 'A' && r <= 'Z') ||
-					(r >= '0' && r <= '9')) {
-					return false
-				}
-			}
-		}
-		// Reject more than 2 segments — no use case for svm:a:b:c today.
-		if strings.Count(rest, ":") > 1 {
-			return false
-		}
-		return true
+	if valid, known := networkIdShapeVerdict(family, body); known {
+		return valid
 	}
-	return false
+	return builtinNetworkIdShape(family, body)
 }
 
 var counters = make(map[string]int)

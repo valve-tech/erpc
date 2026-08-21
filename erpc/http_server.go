@@ -23,8 +23,10 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/indexer"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
+	"github.com/gorilla/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
@@ -53,6 +55,8 @@ type HttpServer struct {
 	trustedForwarderIPs     map[string]struct{}
 	trustedIPHeaders        []string
 	resolvedResponseHeaders map[string]string
+	subscriptionManager     *SubscriptionManager
+	activeWsConns           sync.Map // connId -> *WsConnection
 }
 
 func NewHttpServer(
@@ -61,6 +65,7 @@ func NewHttpServer(
 	cfg *common.ServerConfig,
 	healthCheckCfg *common.HealthCheckConfig,
 	adminCfg *common.AdminConfig,
+	indexerCfg *common.IndexerConfig,
 	erpc *ERPC,
 ) (*HttpServer, error) {
 	reqMaxTimeout := 150 * time.Second
@@ -85,15 +90,25 @@ func NewHttpServer(
 
 	gzipPool := util.NewGzipReaderPool()
 
+	subMgrLogger := logger.With().Str("component", "subscriptions").Logger()
+	indexerLogger := logger.With().Str("component", "indexer").Logger()
+	indexerOpts := indexer.Options{}
+	if indexerCfg != nil {
+		indexerOpts.CanonicalChainDepth = indexerCfg.CanonicalChainDepth
+		indexerOpts.DedupWindowSize = indexerCfg.DedupWindowSize
+	}
+	idx := indexer.New(&indexerLogger, indexerOpts)
+
 	srv := &HttpServer{
-		logger:         logger,
-		appCtx:         ctx,
-		serverCfg:      cfg,
-		healthCheckCfg: healthCheckCfg,
-		adminCfg:       adminCfg,
-		erpc:           erpc,
-		draining:       &draining,
-		gzipPool:       gzipPool,
+		logger:              logger,
+		appCtx:              ctx,
+		serverCfg:           cfg,
+		healthCheckCfg:      healthCheckCfg,
+		adminCfg:            adminCfg,
+		erpc:                erpc,
+		draining:            &draining,
+		gzipPool:            gzipPool,
+		subscriptionManager: NewSubscriptionManager(&subMgrLogger, idx),
 	}
 
 	if cfg != nil {
@@ -369,6 +384,12 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			}
 		}
 
+		// WebSocket upgrade: handle before body reading since WS upgrades don't have a JSON body
+		if websocket.IsWebSocketUpgrade(r) {
+			s.handleWebSocket(httpCtx, w, r, &lg, project, architecture, chainId)
+			return
+		}
+
 		// Handle gzipped request bodies
 		var bodyReader io.Reader = r.Body
 		if r.Header.Get("Content-Encoding") == "gzip" {
@@ -462,7 +483,15 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 		for i, reqBody := range requests {
 			wg.Add(1)
-			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
+			// architecture and chainId are passed in rather than captured. A batch
+			// resolves them per entry — each request object may name its own
+			// "networkId" — so the resolution below assigns to them. Captured,
+			// that assignment would be a write to state shared by every entry's
+			// goroutine: the first entry to resolve would publish its network to
+			// the others, which then took the "already resolved" branch and were
+			// forwarded to the wrong chain. A copy per goroutine keeps each
+			// entry's resolution its own, and takes the race with it.
+			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string, architecture, chainId string) {
 				defer func() {
 					defer wg.Done()
 					if rec := recover(); rec != nil {
@@ -554,7 +583,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				if !shouldHandleMethod {
 					jsonrpcVersion := "2.0"
 					var reqId interface{}
-					if jrr, err := nq.JsonRpcRequest(); err != nil {
+					if jrr, err := nq.JsonRpcRequest(); err == nil {
 						jsonrpcVersion = jrr.JSONRPC
 						reqId = jrr.ID
 					}
@@ -736,7 +765,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 				responses[index] = resp
 				common.EndRequestSpan(requestCtx, resp, nil)
-			}(i, reqBody, headers, queryArgs)
+			}(i, reqBody, headers, queryArgs, architecture, chainId)
 		}
 
 		wg.Wait()
@@ -745,14 +774,19 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		defer writeResponseSpan.End()
 
 		if err := httpCtx.Err(); err != nil {
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				cause := context.Cause(httpCtx)
-				if cause != nil {
-					err = cause
-				}
-				s.logger.Trace().Err(err).Msg("request premature context error")
-				writeFatalError(httpCtx, http.StatusInternalServerError, err)
+			// httpCtx.Err() answers exactly context.Canceled or
+			// context.DeadlineExceeded, so filtering for a third error skipped
+			// every request. The reason lives in the cause instead — the
+			// timeout handler attaches ErrHandlerTimeout, the network executor
+			// attaches ErrDynamicTimeoutExceeded — so read it unconditionally.
+			// This log line is all an operator gets: eRPC deliberately writes
+			// nothing once the request is over (see
+			// TestRequestHandler_WritesNothingWhenTheRequestContextIsAlreadyDone),
+			// and the outer TimeoutHandler already owns the response body.
+			if cause := context.Cause(httpCtx); cause != nil {
+				err = cause
 			}
+			s.logger.Debug().Err(err).Msg("request context ended before the response was written")
 			// Ensure we do not retain responses when the request context is done
 			for _, resp := range responses {
 				if v, ok := resp.(*common.NormalizedResponse); ok && v != nil {
@@ -840,9 +874,17 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 				}
 				w.WriteHeader(statusCode)
 
-				msg, err := common.SonicCfg.Marshal(err.Error())
-				if err != nil {
-					msg, _ = common.SonicCfg.Marshal(err.Error())
+				// Name the marshal result something other than `err`. A `:=`
+				// here rebinds `err` to the encoder's own outcome, which is nil
+				// on success — and both the body below and the span status
+				// afterwards would then report a healthy request for one that
+				// died. See entry 130 in valve/upstream-bug-log.md.
+				msg, marshalErr := common.SonicCfg.Marshal(err.Error())
+				if marshalErr != nil {
+					// Retrying the same call with the same input cannot
+					// succeed, so fall back to a literal that is valid JSON by
+					// construction. The fault itself still reaches the span.
+					msg = []byte(`"internal server error"`)
 				}
 				body := fmt.Sprintf(`{"jsonrpc":"2.0","error":{"code":-32603,"message":%s}}`, msg)
 
@@ -1062,10 +1104,20 @@ func (s *HttpServer) parseUrlPath(
 	}
 
 	if (chainId != "" || architecture != "") && !common.IsValidArchitecture(architecture) {
-		return "", "", "", false, false, common.NewErrInvalidUrlPath("architecture is not valid (must be 'evm' or 'svm')", ps)
+		// List what this build actually serves. A hardcoded "evm or svm" goes
+		// stale the moment a chain family is added, and it points the operator
+		// at the wrong problem.
+		return "", "", "", false, false, common.NewErrInvalidUrlPath(
+			fmt.Sprintf("architecture is not valid (must be one of: %v)", common.RegisteredChainFamilies()), ps)
 	}
 
-	if !isPost && !isOptions {
+	// Anything non-POST that is not an upgrade is treated as a healthcheck, so
+	// misjudging an upgrade here does not surface as an error — it answers 200
+	// with a health body and the upgrade never happens. Use gorilla's own
+	// predicate, the same one the dispatcher below uses to route to
+	// handleWebSocket, so the two cannot disagree: Upgrade and Connection are
+	// case-insensitive tokens (RFC 6455) and a raw == misses "WebSocket".
+	if !isPost && !isOptions && !websocket.IsWebSocketUpgrade(r) {
 		isHealthCheck = true
 	}
 
@@ -2015,6 +2067,11 @@ func (s *HttpServer) createTLSConfig() (*tls.Config, error) {
 func (s *HttpServer) Shutdown(logger *zerolog.Logger) error {
 	logger.Info().Msg("stopping http servers...")
 
+	// Close all active WebSocket connections first with GoingAway status.
+	// This sends a close frame to clients so they know to reconnect,
+	// and cleans up all subscriptions before the HTTP server stops.
+	s.shutdownWebSockets(logger)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -2056,6 +2113,48 @@ func (s *HttpServer) Shutdown(logger *zerolog.Logger) error {
 	}
 
 	return lastErr
+}
+
+// shutdownWebSockets closes all active WebSocket connections with a GoingAway
+// close frame and waits for subscription cleanup to complete.
+func (s *HttpServer) shutdownWebSockets(logger *zerolog.Logger) {
+	count := 0
+	s.activeWsConns.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+
+	if count == 0 {
+		return
+	}
+
+	logger.Info().Int("connections", count).Msg("closing active WebSocket connections...")
+
+	var wg sync.WaitGroup
+	s.activeWsConns.Range(func(key, value interface{}) bool {
+		wsc := value.(*WsConnection)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			wsc.CloseWithGoingAway()
+		}()
+		s.activeWsConns.Delete(key)
+		return true
+	})
+
+	// Wait for all connections to close with a timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logger.Info().Int("connections", count).Msg("all WebSocket connections closed")
+	case <-time.After(10 * time.Second):
+		logger.Warn().Int("connections", count).Msg("timed out waiting for WebSocket connections to close")
+	}
 }
 
 // conditionalGzipWriter wraps ResponseWriter and decides whether to compress
@@ -2187,6 +2286,22 @@ func gzipHandler(next http.Handler) http.Handler {
 	var gzPool = util.NewGzipWriterPool()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// WebSocket upgrades need the raw connection via Hijack(), and
+		// conditionalGzipWriter cannot provide it — gorilla asserts
+		// http.Hijacker directly, so wrapping the writer turns the upgrade
+		// into a 500. Step aside for the same reason TimeoutHandler does.
+		// There is nothing to compress either way: the 101 carries no body,
+		// and the frames after it are outside net/http's writer entirely.
+		//
+		// This is deliberately the same predicate the request handler uses to
+		// dispatch to handleWebSocket. Testing the bypass any other way lets
+		// the two disagree, and a request the dispatcher calls an upgrade but
+		// this one does not is exactly the 500 being fixed.
+		if websocket.IsWebSocketUpgrade(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// The response representation depends on Accept-Encoding, so caches
 		// must be told regardless of whether this response ends up compressed.
 		w.Header().Set("Vary", "Accept-Encoding")
@@ -2230,7 +2345,7 @@ func (s *HttpServer) resolveRealClientIP(r *http.Request) string {
 			continue
 		}
 		if v := strings.TrimSpace(r.Header.Get(hdr)); v != "" {
-			ips := parseXForwardedFor(v)
+			ips := parseForwardedChain(v)
 			if ip := trimRightTrustedAndPick(ips, s.isTrustedForwarder); ip != nil {
 				return ip.String()
 			}
@@ -2269,13 +2384,28 @@ func parseRemoteIP(remoteAddr string) net.IP {
 	return net.ParseIP(host)
 }
 
-func parseXForwardedFor(xff string) []net.IP {
-	parts := strings.Split(xff, ",")
-	ips := make([]net.IP, 0, len(parts))
-	for _, p := range parts {
-		v := strings.TrimSpace(p)
+// parseForwardedChain reads the ordered list of addresses out of ONE forwarding
+// header, whichever of the two wire syntaxes it uses.
+//
+// Every configured header goes through here, so the parser reads the value it
+// is given rather than assuming a syntax from the header's name. An element is
+// either a bare address (`X-Forwarded-For`, `X-Real-IP`) or a set of RFC 7239
+// parameters carrying `for=` (`Forwarded`). Anything that names no address —
+// RFC 7239 also allows obfuscated identifiers such as `for=_hidden` — is
+// dropped, so the caller falls back to the peer instead of inventing a client.
+//
+// Two parsers used to live here, one per syntax, and nothing ever called the
+// RFC 7239 one. See entries 30 and 133 in valve/upstream-bug-log.md.
+func parseForwardedChain(value string) []net.IP {
+	elements := strings.Split(value, ",")
+	ips := make([]net.IP, 0, len(elements))
+	for _, element := range elements {
+		v := forwardedElementAddr(element)
+		if v == "" {
+			continue
+		}
 		v = stripAddrDecorations(v)
-		// Some implementations might include host:port; strip port if present
+		// Some implementations include host:port; strip the port if present.
 		if h, _, err := net.SplitHostPort(v); err == nil {
 			v = h
 		}
@@ -2286,31 +2416,20 @@ func parseXForwardedFor(xff string) []net.IP {
 	return ips
 }
 
-// parseForwardedFor parses RFC 7239 Forwarded header and extracts the sequence of for= IPs
-func parseForwardedFor(fwd string) []net.IP {
-	// Split elements by comma, then params by ';', pick for= value
-	items := strings.Split(fwd, ",")
-	ips := make([]net.IP, 0, len(items))
-	for _, it := range items {
-		params := strings.Split(it, ";")
-		for _, p := range params {
-			p = strings.TrimSpace(p)
-			if len(p) >= 4 && strings.HasPrefix(strings.ToLower(p), "for=") {
-				v := strings.TrimSpace(p[4:])
-				// Remove optional quotes
-				v = strings.Trim(v, "\"")
-				v = stripAddrDecorations(v)
-				// Strip optional :port if present
-				if h, _, err := net.SplitHostPort(v); err == nil {
-					v = h
-				}
-				if ip := net.ParseIP(v); ip != nil {
-					ips = append(ips, ip)
-				}
-			}
+// forwardedElementAddr returns the address one element claims: the `for=`
+// parameter when the element carries RFC 7239 parameters, otherwise the element
+// itself.
+func forwardedElementAddr(element string) string {
+	if !strings.Contains(element, "=") {
+		return strings.TrimSpace(element)
+	}
+	for _, param := range strings.Split(element, ";") {
+		param = strings.TrimSpace(param)
+		if len(param) > 4 && strings.EqualFold(param[:4], "for=") {
+			return strings.Trim(strings.TrimSpace(param[4:]), `"`)
 		}
 	}
-	return ips
+	return ""
 }
 
 // trimRightTrustedAndPick removes trailing trusted proxy IPs and returns the nearest untrusted IP (client)

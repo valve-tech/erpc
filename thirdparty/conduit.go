@@ -191,7 +191,9 @@ func (v *ConduitVendor) GetVendorSpecificErrorIfAny(req *common.NormalizedReques
 					details,
 				),
 			)
-		} else if code >= -32000 && code <= -32099 {
+		} else if code >= -32099 && code <= -32000 {
+			// JSON-RPC 2.0 reserves -32099..-32000 for implementation-defined
+			// server errors, so a sibling upstream is worth trying.
 			return common.NewErrEndpointServerSideException(
 				common.NewErrJsonRpcExceptionInternal(
 					code,

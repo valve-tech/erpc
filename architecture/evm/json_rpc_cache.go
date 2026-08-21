@@ -666,7 +666,11 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 		attribute.String("network.id", ntwId),
 	)
 
-	blockRef, blockNumber, err := ExtractBlockReferenceFromRequest(ctx, req)
+	// For the SET path we resolve moving tags ("latest", "finalized", "safe")
+	// to the response's concrete block number so each tip advance gets its own
+	// cache key — see ResolveCacheBlockRef. The request's EvmBlockRef is NOT
+	// mutated; the original tag is still visible to downstream callers.
+	blockRef, blockNumber, err := ResolveCacheBlockRef(ctx, req, resp)
 	if err != nil {
 		common.SetTraceSpanError(span, err)
 		return err
@@ -727,13 +731,21 @@ func (c *EvmJsonRpcCache) Set(ctx context.Context, req *common.NormalizedRequest
 	}
 
 	if lg.GetLevel() <= zerolog.TraceLevel {
+		// zerolog writes a RawJSON value verbatim, so an empty one leaves a
+		// dangling key and corrupts the whole record. A response eRPC could not
+		// read, or one whose bytes live in a result writer, both arrive here
+		// with nothing. See entry 160 in valve/upstream-bug-log.md.
+		result := rpcResp.GetResultBytes()
+		if len(result) == 0 {
+			result = []byte("null")
+		}
 		lg.Trace().
 			Str("blockRef", blockRef).
 			Str("primaryKey", pk).
 			Str("rangeKey", rk).
 			Int64("blockNumber", blockNumber).
 			Interface("policies", policies).
-			RawJSON("result", rpcResp.GetResultBytes()).
+			RawJSON("result", result).
 			Str("finalityState", finState.String()).
 			Msg("caching the response")
 	} else {
@@ -1085,7 +1097,12 @@ func (c *EvmJsonRpcCache) doGet(ctx context.Context, connector data.Connector, r
 	rpcReq.RLockWithTrace(ctx)
 	defer rpcReq.RUnlock()
 
-	blockRef, _, err := ExtractBlockReferenceFromRequest(ctx, req)
+	// For the GET path we resolve moving tags ("latest", "finalized", "safe")
+	// to the network's currently-known tip block number so the lookup key
+	// tracks chain progression — see ResolveCacheBlockRef. A burst of
+	// concurrent "latest" queries landing on the same tip will still coalesce
+	// onto one cache entry; across tip advances each block gets its own key.
+	blockRef, _, err := ResolveCacheBlockRef(ctx, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1169,6 +1186,10 @@ func shouldCacheResponse(
 		return false, nil
 	}
 
+	// NormalizedResponse.JsonRpcResponse() answers (nil, nil) for a nil or a
+	// released response, so both arguments can arrive nil together.
+	// ResultLength decides that case itself — see GetResultBytes in
+	// common/json_rpc.go — so no caller needs its own guard.
 	size := rpcResp.ResultLength()
 	// Check if the response size is within the limits
 	if !policy.MatchesSizeLimits(size) {
@@ -1201,7 +1222,10 @@ func shouldCacheResponse(
 			}
 		}
 	}
-	result := rpcResp.GetResultBytes()
+	var result []byte
+	if rpcResp != nil {
+		result = rpcResp.GetResultBytes()
+	}
 	// Check if we should cache empty results
 	isEmpty := resp == nil || rpcResp == nil || result == nil || resp.IsObjectNull() || resp.IsResultEmptyish()
 	// Never cache an empty result for a not-yet-produced (future) block: the block

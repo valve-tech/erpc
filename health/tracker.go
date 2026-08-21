@@ -551,18 +551,7 @@ func (t *Tracker) rotateMetricsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.upsMetrics.Range(func(key, value any) bool {
-				if tm, ok := value.(*TrackedMetrics); ok {
-					tm.Rotate()
-				}
-				return true
-			})
-			t.ntwMetrics.Range(func(key, value any) bool {
-				if tm, ok := value.(*TrackedMetrics); ok {
-					tm.Rotate()
-				}
-				return true
-			})
+			t.rotateOnce()
 
 			// Idle eviction: every `sweepEveryRotations` ticks (roughly
 			// every `windowSize`), walk both maps and drop entries that
@@ -575,6 +564,34 @@ func (t *Tracker) rotateMetricsLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// rotateOnce advances every tracked metric's rolling window by exactly one
+// sub-bucket. It is the whole of a rotation tick's work, minus the idle sweep
+// that rides a coarser cadence.
+//
+// Split out of rotateMetricsLoop so a test can perform an EXACT number of
+// rotations in its own goroutine — `rollingBuckets` calls clear a sample, by
+// construction. The tests used to sleep `windowSize + 10ms` and trust the loop's
+// goroutine to have woken up ten times inside that margin. Under
+// `make test-fast`, where several `go test` processes compete for scheduler
+// slots, that bet loses. Widening the margin only moves the losing point.
+//
+// Bootstrap and the ticker still own the real cadence, and
+// TestTracker/BootstrapDrivesRotation covers that wiring.
+func (t *Tracker) rotateOnce() {
+	t.upsMetrics.Range(func(key, value any) bool {
+		if tm, ok := value.(*TrackedMetrics); ok {
+			tm.Rotate()
+		}
+		return true
+	})
+	t.ntwMetrics.Range(func(key, value any) bool {
+		if tm, ok := value.(*TrackedMetrics); ok {
+			tm.Rotate()
+		}
+		return true
+	})
 }
 
 // sweepEveryRotations sets how often (in rotation ticks) the idle

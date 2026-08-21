@@ -51,8 +51,16 @@ func (r *Runtime) Evaluate(script string) (sobek.Value, error) {
 	return r.vm.RunString(script)
 }
 
+// Exports returns the script's `exports` global, or nil when the script
+// declares none. A file that forgets `export default` leaves that global
+// absent or null, and sobek's ToObject answers a null with a TypeError that
+// unwinds into Go as a panic. The caller reports the mistake instead.
 func (r *Runtime) Exports() *sobek.Object {
-	return r.vm.GlobalObject().Get("exports").ToObject(r.vm)
+	v := r.vm.GlobalObject().Get("exports")
+	if v == nil || sobek.IsUndefined(v) || sobek.IsNull(v) {
+		return nil
+	}
+	return v.ToObject(r.vm)
 }
 
 func (r *Runtime) ToValue(v interface{}) sobek.Value {
