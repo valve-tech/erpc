@@ -3,6 +3,19 @@
 Date: 2026-08-21. Source: `upstream-bug-log.md`, 167 entries — 84 fixed, 79
 open, 4 not a bug.
 
+## Progress since this triage was written
+
+**2026-08-21.** Entries **53** and **64** are fixed, and they went together:
+both were the same hand-listed legacy struct, and the fix deleted all three
+copies rather than completing them. That drops the open count to 77 and empties
+the first row of the mechanism table below. Entry 53 carries the account.
+
+The drift was worse than the entry recorded. `UpstreamConfig`'s copy dropped
+two fields when the entry was written and **four** by the time it was fixed —
+`chain` and `chainProbeInterval` arrived with a rebase and nobody updated the
+copy. That is the argument for deleting a parallel structure instead of topping
+it up, measured rather than asserted.
+
 ## What changed
 
 The fork no longer plans upstream pull requests. It tracks `erpc/erpc` by

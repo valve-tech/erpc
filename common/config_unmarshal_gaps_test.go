@@ -127,40 +127,44 @@ func TestNetworkDefaults_UnmarshalYAML_BothShapesFailReturnsTheRealError(t *test
 		"the operator must see the type mismatch they actually wrote")
 }
 
-// For a key that only the CURRENT schema declares, the operator gets the wrong
-// message: the old-format attempt decodes the same node into the unexported
-// `oldNetworkDefaults` shadow, and that attempt's unknown-field complaint is
-// what escapes. The `return originalErr` at common/config.go:812 never reaches
-// the operator.
+// For a key that only the CURRENT schema declares, the operator now gets the
+// real type mismatch. There is no second decode to mask it: the legacy single
+// `failsafe:` object was the only reason NetworkDefaults kept a hand-listed
+// shadow struct, and FailsafeConfigList takes that shape itself.
 //
-// This test PINS the defect. An operator who mistypes a valid key is told the
-// key does not exist, and is shown an internal type name they cannot find in
-// any documentation.
-func TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow(t *testing.T) {
-	for _, tc := range []struct{ name, doc, wantKey string }{
-		{"multiplexing", "multiplexing: yes-please\n", "multiplexing"},
-		{"failover", "failover: 42\n", "failover"},
+// This replaces TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow,
+// which pinned the defect: an operator who mistyped a valid key was told the
+// key did not exist, and was shown `common.oldNetworkDefaults`, an unexported
+// type declared inside a function body that appears in no documentation and in
+// no config they can edit.
+func TestNetworkDefaults_UnmarshalYAML_ReportsTheRealTypeMismatchForACurrentOnlyKey(t *testing.T) {
+	for _, tc := range []struct{ name, doc, wantMismatch string }{
+		{"multiplexing", "multiplexing: yes-please\n", "cannot unmarshal !!str `yes-please` into bool"},
+		{"failover", "failover: 42\n", "cannot unmarshal !!int `42` into common.FailoverConfig"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var nd NetworkDefaults
 			err := decodeYAMLStrict(tc.doc, &nd)
 
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "field "+tc.wantKey+" not found in type common.oldNetworkDefaults",
-				"today the legacy shadow's complaint is what the operator sees")
-			assert.NotContains(t, err.Error(), "cannot unmarshal",
-				"the real type mismatch is lost")
+			assert.Contains(t, err.Error(), tc.wantMismatch,
+				"the operator must see the type mismatch they actually wrote")
+			assert.NotContains(t, err.Error(), "oldNetworkDefaults",
+				"no internal shadow type may appear in an operator-facing error")
+			assert.NotContains(t, err.Error(), "not found in type",
+				"the key exists; saying otherwise sends the operator hunting for a typo")
 		})
 	}
 }
 
-// NetworkConfig carries the same two-shape decoder and the same defect.
-func TestNetworkConfig_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow(t *testing.T) {
+// NetworkConfig carried the same two-shape decoder, and loses it the same way.
+func TestNetworkConfig_UnmarshalYAML_ReportsTheRealTypeMismatchForACurrentOnlyKey(t *testing.T) {
 	var nc NetworkConfig
 	err := decodeYAMLStrict("architecture: evm\nmultiplexing: yes-please\n", &nc)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "field multiplexing not found in type common.oldNetworkConfig")
+	assert.Contains(t, err.Error(), "cannot unmarshal !!str `yes-please` into bool")
+	assert.NotContains(t, err.Error(), "oldNetworkConfig")
 }
 
 // ---------------------------------------------------------------------------
