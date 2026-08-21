@@ -24,7 +24,7 @@ rebase risk register, not a pull-request backlog.
 Every entry below was checked against the code on 2026-08-19, not inferred. The
 audit corrected the `file:line` citations that had drifted.
 
-**Reading this file.** Three things about its shape are deliberate, and each
+**Reading this file.** Four things about its shape are deliberate, and each
 one has misled a reader at least once.
 
 - **Entry ids have gaps, and one gap is real work.** 78, 79, 84, 89, 102, 103,
@@ -40,11 +40,20 @@ one has misled a reader at least once.
   existed.
 - **Ids are not in order.** Sessions appended wherever they were working. The
   file is searched, not scrolled, so the order was left alone rather than
-  churning 159 entries for tidiness.
+  renumbering every entry for tidiness.
 - **Section headers are weaker evidence than Status lines.** Headers drifted as
   later sessions appended under whichever one was last. Two of them said things
   that had stopped being true. The per-entry Status line is gated by
   `valve/check-bug-log.sh`; the headers are not. Trust the Status line.
+- **A test named here may be one this tree no longer has, on purpose.** Six
+  entries name a deleted or renamed test in order to say what replaced it —
+  read the sentence, not the name. `valve/check-test-citations.sh` lists every
+  name the tree cannot resolve, with the line it sits on, so the six read as
+  what they are. Run it after a rebase, which is when a rename happens. It is a
+  report and not a commit hook: on 2026-08-21 it checked 173 names, found 167
+  live and 6 absent, and every one of the 6 was correct prose. A hook with that
+  record gets bypassed, and the bypass would take the conflict-marker check with
+  it.
 
 ---
 
