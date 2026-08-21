@@ -45,7 +45,10 @@ func newClientWithPoolSize(t *testing.T, poolSize int) *GenericGrpcBdsClient {
 	t.Cleanup(cancel)
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, poolSize)
 	require.NoError(t, err)
-	return client.(*GenericGrpcBdsClient)
+	c := client.(*GenericGrpcBdsClient)
+	// Join the pool maintainer before the test returns; see newTestClient.
+	t.Cleanup(c.pool.Shutdown)
+	return c
 }
 
 // TestNewBdsPool_HonorsConfiguredSize verifies a configured poolSize maps 1:1

@@ -150,8 +150,7 @@ func setupLowerOnlyRaceNetwork(t *testing.T, ctx context.Context, fixtures []low
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", upCfgs, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Network has NO enforceBlockAvailability override and NO served-tip config:
 	// enforcement is opted into solely by the per-upstream lower bound, exactly
@@ -332,8 +331,7 @@ func setupDirectAvailabilityNetwork(t *testing.T, ctx context.Context, upEvm *co
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	if ntwCfg == nil {
 		ntwCfg = &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
@@ -660,8 +658,7 @@ projects:
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "my-chain", upCfgs, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: chainID}}
 	network, err := NewNetwork(ctx, &log.Logger, "my-chain", ntwCfg, rlr, upr, mt, nil)

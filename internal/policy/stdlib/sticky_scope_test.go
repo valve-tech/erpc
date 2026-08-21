@@ -25,7 +25,7 @@ func makeMethodSlotEngine(t *testing.T, eval string) (*policy.Engine, *health.Tr
 	tracker := health.NewTracker(&logger, "p1", time.Minute)
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: common.Duration(0), // frozen, manual ticks
-		EvalTimeout:  common.Duration(50 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 		EvalFunc:     eval,
 		EvalScope:    common.EvalScopeNetworkMethod,
 	}

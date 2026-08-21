@@ -115,3 +115,82 @@ func TestProjectTraceFields(t *testing.T) {
 	require.Nil(t, trace.BlockHash)
 	require.Zero(t, trace.GasUsed)
 }
+
+// A field selection is a promise about what the answer contains. Keeping a
+// field the client did not ask for leaks data across a projection boundary;
+// dropping one it did ask for makes the row look empty rather than filtered.
+// ProjectTransferFields decides nine fields one at a time, so a single test
+// with one field selected would leave eight decisions unmade.
+
+// fullTransfer is a native transfer with every projectable field populated, so
+// a field the projection fails to clear is visible.
+func fullTransfer() *evm.NativeTransfer {
+	ts := uint64(1700000000)
+	return &evm.NativeTransfer{
+		From:             []byte{0x1},
+		To:               []byte{0x2},
+		Value:            "0x10",
+		TransactionHash:  []byte{0x3},
+		TransactionIndex: 7,
+		BlockNumber:      42,
+		BlockHash:        []byte{0x4},
+		TraceAddress:     []uint32{0, 1},
+		BlockTimestamp:   &ts,
+	}
+}
+
+func TestProjectTransferFields_ClearsEveryFieldTheSelectionOmits(t *testing.T) {
+	transfer := fullTransfer()
+
+	ProjectTransferFields(transfer, &evm.TransferFieldSelection{From: true, Value: true})
+
+	require.Equal(t, []byte{0x1}, transfer.From)
+	require.Equal(t, "0x10", transfer.Value)
+	require.Nil(t, transfer.To)
+	require.Nil(t, transfer.TransactionHash)
+	require.Zero(t, transfer.TransactionIndex)
+	require.Zero(t, transfer.BlockNumber)
+	require.Nil(t, transfer.BlockHash)
+	require.Nil(t, transfer.TraceAddress)
+	require.Nil(t, transfer.BlockTimestamp)
+}
+
+func TestProjectTransferFields_KeepsEveryFieldTheSelectionNames(t *testing.T) {
+	transfer := fullTransfer()
+	want := fullTransfer()
+
+	ProjectTransferFields(transfer, &evm.TransferFieldSelection{
+		From: true, To: true, Value: true, TransactionHash: true,
+		TransactionIndex: true, BlockNumber: true, BlockHash: true,
+		TraceAddress: true, BlockTimestamp: true,
+	})
+
+	require.Equal(t, want.From, transfer.From)
+	require.Equal(t, want.To, transfer.To)
+	require.Equal(t, want.Value, transfer.Value)
+	require.Equal(t, want.TransactionHash, transfer.TransactionHash)
+	require.Equal(t, want.TransactionIndex, transfer.TransactionIndex)
+	require.Equal(t, want.BlockNumber, transfer.BlockNumber)
+	require.Equal(t, want.BlockHash, transfer.BlockHash)
+	require.Equal(t, want.TraceAddress, transfer.TraceAddress)
+	require.Equal(t, *want.BlockTimestamp, *transfer.BlockTimestamp)
+}
+
+// TestProjectTransferFields_LeavesTheRowAloneWithoutASelection pins the
+// no-selection case. eth_queryTransfers sends no selection when the client
+// asked for none, and the shim calls the projection anyway — so "no selection"
+// has to mean "every field", not "no field".
+func TestProjectTransferFields_LeavesTheRowAloneWithoutASelection(t *testing.T) {
+	transfer := fullTransfer()
+
+	ProjectTransferFields(transfer, nil)
+
+	require.Equal(t, []byte{0x1}, transfer.From)
+	require.Equal(t, "0x10", transfer.Value)
+	require.Equal(t, uint64(42), transfer.BlockNumber)
+	require.Equal(t, []uint32{0, 1}, transfer.TraceAddress)
+
+	require.NotPanics(t, func() {
+		ProjectTransferFields(nil, &evm.TransferFieldSelection{From: true})
+	}, "a nil row is skipped rather than dereferenced")
+}

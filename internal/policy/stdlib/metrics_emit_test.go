@@ -23,7 +23,7 @@ func TestMetrics_EmitsScoreGaugeForRanked(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("fast", "slow")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -58,7 +58,7 @@ func TestMetrics_ExclusionTotalEmitsLeafSlugs(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("erroring-X", "clean-X")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -103,7 +103,7 @@ func TestMetrics_ShadowExcludeIf_ObservesButDoesNotDrop(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("shadow-erroring", "clean")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -153,7 +153,7 @@ func TestMetrics_ExcludedSecondsGaugeTransitions(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("flaky", "steady")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -189,7 +189,7 @@ func TestMetrics_ReadmitCountsTransition(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("returner", "anchor")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -234,7 +234,7 @@ func TestMetrics_StickyHoldCounterIncrementsOnActiveHold(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("a-prim2", "b-chal2")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -273,7 +273,7 @@ func TestMetrics_NetworkLabelUsesAlias(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("u1")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	// networkID is the canonical "evm:8453"; alias is "base" — the
 	// alias is what should land on every emitted metric.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -144,56 +145,133 @@ func loadSamples(filename string) ([]RequestResponseSample, error) {
 	return samples, nil
 }
 
-func executeStressTest(config StressTestConfig) (*StressTestResult, error) {
-	// Create fake servers
-	fakeServers := CreateFakeServers(config.ServerConfigs)
+// libraryExitCode reports the code the erpc library asked the process to exit
+// with, or -1 when it never asked.
+//
+// erpc.Init starts its HTTP, gRPC and metrics servers in goroutines that call
+// util.OsExit when a listener fails (upstream bug 99), which ends the whole
+// process from inside a library. The test binary replaces this function with a
+// recorder and neuters the exit; test/cmd, which never starts eRPC, keeps the
+// default and keeps normal os.Exit behaviour.
+var libraryExitCode = func() int64 { return -1 }
 
-	// Start all fake servers
-	var wg sync.WaitGroup
-	for _, server := range fakeServers {
-		wg.Add(1)
-		go startFakeServer(&wg, server)
-	}
+// stressHarness holds one booted harness: the fake upstreams and one eRPC
+// instance in front of them. Close stops both.
+type stressHarness struct {
+	config      StressTestConfig
+	fakeServers []*FakeServer
+	baseUrl     string
+	cancel      context.CancelFunc
+	initErr     chan error
+	wg          sync.WaitGroup
+	closeOnce   sync.Once
+}
 
-	fs := afero.NewOsFs()
-
-	// Prepare eRPC configuration
+// bootStressHarness starts the fake upstreams and eRPC, then waits until eRPC
+// accepts connections on its service port.
+//
+// It returns an error for every failure the caller can act on. The old version
+// started eRPC in a goroutine, ignored the result and slept one second, so an
+// eRPC that never came up looked the same as one that did.
+func bootStressHarness(ctx context.Context, config StressTestConfig) (*stressHarness, error) {
 	erpcConfig, localBaseUrl, err := prepareERPCConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
-	// Initialize eRPC
+	runCtx, cancel := context.WithCancel(ctx)
+	h := &stressHarness{
+		config:      config,
+		fakeServers: CreateFakeServers(config.ServerConfigs),
+		baseUrl:     localBaseUrl,
+		cancel:      cancel,
+		initErr:     make(chan error, 1),
+	}
+	if len(h.fakeServers) != len(config.ServerConfigs) {
+		cancel()
+		return nil, fmt.Errorf("only %d of %d fake servers were created", len(h.fakeServers), len(config.ServerConfigs))
+	}
+
+	for _, server := range h.fakeServers {
+		h.wg.Add(1)
+		go startFakeServer(&h.wg, server)
+	}
+
 	go func() {
-		err = initializeERPC(erpcConfig)
-		if err != nil {
-			log.Error().Err(err).Msg("Error initializing eRPC")
-		}
+		// erpc.Init blocks until the context is cancelled, so a nil error here
+		// means a clean shutdown, not a successful boot.
+		h.initErr <- erpc.Init(runCtx, erpcConfig, log.With().Logger())
 	}()
 
-	// Wait for servers to start
-	time.Sleep(1 * time.Second)
+	if err := h.waitReady(15 * time.Second); err != nil {
+		h.Close()
+		return nil, err
+	}
+	return h, nil
+}
 
-	// Run stress test
-	err = runK6StressTest(fs, localBaseUrl, config)
+// waitReady polls the eRPC service port until it accepts a connection.
+func (h *stressHarness) waitReady(timeout time.Duration) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", h.config.ServicePort)
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case err := <-h.initErr:
+			return fmt.Errorf("eRPC exited before it served on %s: %w", addr, err)
+		default:
+		}
+		if code := libraryExitCode(); code != -1 {
+			return fmt.Errorf("the erpc library called util.OsExit(%d) instead of serving on %s — see valve/upstream-bug-log.md bug 99; run with LOG_LEVEL=error to see the reason", code, addr)
+		}
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("eRPC did not listen on %s within %s: %w", addr, timeout, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// Close stops eRPC and every fake upstream. It is safe to call twice.
+func (h *stressHarness) Close() {
+	h.closeOnce.Do(func() {
+		h.cancel()
+		for _, server := range h.fakeServers {
+			if err := server.Stop(); err != nil {
+				log.Error().Err(err).Int("port", server.Port).Msg("Error stopping server")
+			}
+		}
+		h.wg.Wait()
+		select {
+		case err := <-h.initErr:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Error().Err(err).Msg("eRPC returned an error on shutdown")
+			}
+		case <-time.After(10 * time.Second):
+			log.Warn().Msg("eRPC did not return within 10s of shutdown")
+		}
+	})
+}
+
+func executeStressTest(config StressTestConfig) (*StressTestResult, error) {
+	h, err := bootStressHarness(context.Background(), config)
 	if err != nil {
 		return nil, err
 	}
+	defer h.Close()
 
-	// Stop all servers
-	for _, server := range fakeServers {
-		if err := server.Stop(); err != nil {
-			log.Error().Err(err).Int("port", server.Port).Msg("Error stopping server")
-		}
+	if err := runK6StressTest(afero.NewOsFs(), h.baseUrl, config); err != nil {
+		return nil, err
 	}
-
-	// Wait for all servers to finish
-	wg.Wait()
 
 	// Wait for 5 seconds to ensure all metrics are collected
 	time.Sleep(5 * time.Second)
 
-	// Fetch prometheus metrics used for assertions
+	// Fetch prometheus metrics used for assertions. eRPC must still be up here,
+	// because the metrics endpoint dies with it.
 	return fetchPrometheusMetrics(config.MetricsPort)
 }
 
@@ -241,6 +319,11 @@ func prepareERPCConfig(config StressTestConfig) (*common.Config, string, error) 
 	mergedConfig := &common.Config{
 		LogLevel: "ERROR",
 		Server: &common.ServerConfig{
+			// ListenV4 must be true. HttpServer.Start rejects a config that
+			// enables neither listener, and erpc.Init answers that rejection by
+			// ending the process (see bug 99), so omitting it killed the whole
+			// test binary with no output.
+			ListenV4:   util.BoolPtr(true),
 			HttpHostV4: util.StringPtr("0.0.0.0"),
 			HttpHostV6: util.StringPtr("[::]"),
 			HttpPortV4: util.IntPtr(config.ServicePort),
@@ -274,11 +357,6 @@ func prepareERPCConfig(config StressTestConfig) (*common.Config, string, error) 
 // 	}
 // 	return upstreamsCfg
 // }
-
-func initializeERPC(cfg *common.Config) error {
-	logger := log.With().Logger()
-	return erpc.Init(context.Background(), cfg, logger)
-}
 
 func runK6StressTest(fs afero.Fs, baseUrl string, config StressTestConfig) error {
 	// Load all samples

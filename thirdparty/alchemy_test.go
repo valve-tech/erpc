@@ -256,3 +256,50 @@ func TestAlchemyVendor_Code3_MissingDataIsRetryable(t *testing.T) {
 	assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointExecutionException), "expected execution exception, got %v", err)
 	assert.False(t, common.IsRetryableTowardNetwork(err))
 }
+
+// Alchemy documents three application-defined code bands on one table row:
+// -32599..-32099, -32699..-32603 and -32768..-32701.
+// Ref: https://www.alchemy.com/docs/reference/error-reference
+// eRPC treats them as client-side faults that it must not retry across the
+// network, because every sibling upstream returns the same answer.
+func TestAlchemyVendor_ApplicationDefinedBands_AreClientSideAndStopAtTheNetwork(t *testing.T) {
+	v := CreateAlchemyVendor()
+
+	// Both endpoints of each documented band, plus a code inside each one.
+	for _, code := range []int{
+		-32599, -32501, -32500, -32100, -32099,
+		-32699, -32650, -32603,
+		-32768, -32730, -32701,
+	} {
+		jrr, err := common.NewJsonRpcResponse(1, nil,
+			common.NewErrJsonRpcExceptionExternal(code, "application-defined failure", ""))
+		require.NoError(t, err)
+
+		classified := v.GetVendorSpecificErrorIfAny(nil, &http.Response{StatusCode: 400}, jrr, map[string]interface{}{})
+
+		require.Error(t, classified, "code %d must be classified", code)
+		assert.True(t, common.HasErrorCode(classified, common.ErrCodeEndpointClientSideException),
+			"code %d must be a client-side exception, got %v", code, classified)
+		assert.False(t, common.IsRetryableTowardNetwork(classified),
+			"code %d is deterministic, so eRPC must not spend the rest of the network on it", code)
+	}
+}
+
+// The codes that Alchemy documents on their own rows sit outside the three
+// application-defined bands, so the vendor leaves them to the generic
+// normaliser. This pins the gap, so that widening a band stays deliberate.
+func TestAlchemyVendor_CodesOutsideTheDocumentedBands_FallThroughToTheGenericNormaliser(t *testing.T) {
+	v := CreateAlchemyVendor()
+
+	// -32700 parse error, -32601 method not found, -32602 invalid params and
+	// the -32098..-32000 server band all sit outside the documented bands.
+	for _, code := range []int{-32700, -32601, -32602, -32000, -32050, -32098} {
+		jrr, err := common.NewJsonRpcResponse(1, nil,
+			common.NewErrJsonRpcExceptionExternal(code, "standard failure", ""))
+		require.NoError(t, err)
+
+		classified := v.GetVendorSpecificErrorIfAny(nil, &http.Response{StatusCode: 400}, jrr, map[string]interface{}{})
+
+		assert.NoError(t, classified, "code %d is outside every documented band", code)
+	}
+}
