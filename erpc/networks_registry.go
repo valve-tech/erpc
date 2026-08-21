@@ -204,6 +204,22 @@ func (nr *NetworksRegistry) Bootstrap(appCtx context.Context) {
 	}()
 }
 
+// BootstrapAndWait registers the statically-defined networks on the caller's
+// own goroutine and returns once every task has settled. Bootstrap runs the
+// same work fire-and-forget, so a caller that must observe a prepared network
+// has nothing to wait on. See UpstreamsRegistry.BootstrapAndWait.
+func (nr *NetworksRegistry) BootstrapAndWait(appCtx context.Context) error {
+	nr.project.cfgMu.RLock()
+	nl := nr.project.Config.Networks
+	nr.project.cfgMu.RUnlock()
+
+	tasks := []*util.BootstrapTask{}
+	for _, nwCfg := range nl {
+		tasks = append(tasks, nr.buildNetworkBootstrapTask(nwCfg.NetworkId()))
+	}
+	return nr.initializer.ExecuteTasks(appCtx, tasks...)
+}
+
 func (nr *NetworksRegistry) GetNetwork(ctx context.Context, networkId string) (*Network, error) {
 	// If network already prepared, return it
 	if pn, ok := nr.preparedNetworks.Load(networkId); ok {
@@ -391,7 +407,15 @@ func (nr *NetworksRegistry) resolveNetworkConfig(networkId string) (*common.Netw
 			}
 			nwCfg.Svm = &common.SvmNetworkConfig{Chain: chain, Cluster: cluster}
 		default:
-			return nil, common.NewErrInvalidEvmChainId(networkId)
+			// Any other architecture keeps its network name in `chain:`, and
+			// the family says whether the name is real. An unregistered
+			// architecture, or a body the family rejects, must not produce a
+			// config — that would build a network no upstream can match.
+			family, known := common.LookupChainFamily(nwCfg.Architecture)
+			if !known || !family.ValidateNetworkId(s[1]) {
+				return nil, common.NewErrInvalidEvmChainId(networkId)
+			}
+			nwCfg.Chain = s[1]
 		}
 		if err := nwCfg.SetDefaults(prj.Config.Upstreams, prj.Config.NetworkDefaults); err != nil {
 			return nil, fmt.Errorf("failed to set defaults for network config: %w", err)

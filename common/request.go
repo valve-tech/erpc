@@ -1429,13 +1429,27 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 		return
 	}
 
+	// An emptyish result is only a "try another upstream" signal for methods
+	// where empty means absence. For value reads (eth_call, eth_getBalance,
+	// eth_getCode, eth_getStorageAt, eth_getTransactionCount) and range
+	// queries (eth_getLogs, trace_filter) a zero/empty answer IS the answer,
+	// and rotating on it re-asks every other upstream for the same zero.
+	acceptsEmpty := false
+	if method, mErr := r.Method(); mErr == nil {
+		var netCfg *NetworkConfig
+		if nw := r.Network(); nw != nil {
+			netCfg = nw.Config()
+		}
+		acceptsEmpty = IsEmptyResultAccepted(netCfg, method)
+	}
+
 	// Store errors/empty-results for reporting (error messages, metrics).
 	// Used by ErrUpstreamsExhausted, the "wrong empty" metric, and error
 	// state labels. Also used as a within-round gate in NextUpstream for
 	// permanent errors (method ignored, execution exception).
 	if err != nil {
 		r.ErrorsByUpstream.Store(upstream, err)
-	} else if resp != nil && resp.IsResultEmptyish(ctx) {
+	} else if !acceptsEmpty && resp != nil && resp.IsResultEmptyish(ctx) {
 		jr, jrErr := resp.JsonRpcResponse(ctx)
 		if jr == nil {
 			r.ErrorsByUpstream.Store(upstream, NewErrEndpointMissingData(fmt.Errorf("upstream responded emptyish but cannot extract json-rpc response: %v", jrErr), upstream))
@@ -1452,7 +1466,7 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 	// Permanent errors (method ignored, execution exception with response)
 	// stay consumed. The ErrorsByUpstream gate in NextUpstream provides
 	// additional within-round protection for those.
-	isEmptyResult := hasResponse && err == nil && resp != nil && resp.IsResultEmptyish(ctx)
+	isEmptyResult := !acceptsEmpty && hasResponse && err == nil && resp != nil && resp.IsResultEmptyish(ctx)
 	canReUse := !hasResponse || (err != nil && IsRetryableTowardsUpstream(err)) || isEmptyResult
 	if canReUse {
 		r.ConsumedUpstreams.Delete(upstream)

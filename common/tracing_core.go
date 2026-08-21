@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-logr/zerologr"
 	"github.com/rs/zerolog"
@@ -36,8 +37,22 @@ const (
 )
 
 var (
-	IsTracingEnabled  bool
+	IsTracingEnabled bool
+
+	// IsTracingDetailed is the plain-bool view of the detailed-tracing flag.
+	// It stays for the packages that already read it directly. A plain read
+	// races with any concurrent write, so a test that must flip the flag while
+	// other goroutines run has to use SetTracingDetailed and TracingDetailed
+	// instead.
+	//
+	// Deprecated: read TracingDetailed(), write SetTracingDetailed().
 	IsTracingDetailed bool
+
+	// tracingDetailed carries the same flag in a form that a test can write
+	// while other goroutines read it. InitializeTracing and
+	// SetTracerProviderForTest write both this and IsTracingDetailed, so a
+	// process that only configures tracing at startup sees one value in both.
+	tracingDetailed atomic.Bool
 
 	tracerProvider *sdktrace.TracerProvider
 	tracer         trace.Tracer
@@ -47,6 +62,24 @@ var (
 	forceTraceMatchers []*ForceTraceMatcher
 )
 
+// TracingDetailed reports whether detailed tracing is on. It is safe to call
+// while another goroutine calls SetTracingDetailed, so a hot path that a test
+// wants to switch on and off must read the flag through this function.
+func TracingDetailed() bool {
+	return tracingDetailed.Load()
+}
+
+// SetTracingDetailed turns detailed tracing on or off and returns the previous
+// value, so the caller can restore it. It is safe to call while other
+// goroutines call TracingDetailed.
+//
+// It does NOT update the deprecated IsTracingDetailed variable, because writing
+// a plain bool is exactly the race this function exists to avoid. Code that
+// must follow a mid-flight change has to read TracingDetailed().
+func SetTracingDetailed(detailed bool) bool {
+	return tracingDetailed.Swap(detailed)
+}
+
 func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *TracingConfig) error {
 	var err error
 
@@ -55,6 +88,7 @@ func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *Tracing
 			logger.Info().Msg("OpenTelemetry tracing is disabled")
 			IsTracingEnabled = false
 			IsTracingDetailed = false
+			tracingDetailed.Store(false)
 			return
 		}
 
@@ -129,6 +163,7 @@ func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *Tracing
 		tracer = otel.Tracer(instrumentationName)
 		IsTracingEnabled = true
 		IsTracingDetailed = cfg.Detailed
+		tracingDetailed.Store(cfg.Detailed)
 
 		// Store force-trace matchers
 		forceTraceMatchers = cfg.ForceTraceMatchers

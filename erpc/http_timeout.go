@@ -14,6 +14,7 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
+	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 )
 
@@ -34,6 +35,19 @@ type timeoutHandler struct {
 }
 
 func (h *timeoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// WebSocket upgrades need direct access to the underlying connection via Hijack().
+	// The timeout writer buffers responses and doesn't implement http.Hijacker,
+	// so we bypass the timeout handler entirely for WS connections.
+	// WS connections are long-lived and use their own ping/pong for liveness.
+	//
+	// gorilla's own predicate, matching parseUrlPath and the dispatcher: those
+	// three have to agree on what an upgrade is, or one of them wraps a writer
+	// that the upgrade then cannot hijack.
+	if websocket.IsWebSocketUpgrade(r) {
+		h.handler.ServeHTTP(w, r)
+		return
+	}
+
 	ctx, cancelCtx := context.WithTimeoutCause(r.Context(), h.dt, ErrHandlerTimeout)
 	defer func() {
 		cancelCtx()

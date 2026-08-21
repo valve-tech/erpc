@@ -274,7 +274,17 @@ func NewUpstream(
 	pup.initRateLimitAutoTuner()
 
 	if vn != nil {
-		cfgs, err := vn.GenerateConfigs(appCtx, &lg, cfg, nil)
+		// The vendor gets its OWN logger value, not &lg.
+		//
+		// A vendor may hand this pointer to a goroutine that outlives the call:
+		// Alchemy's GenerateConfigs starts an async credit-unit refresh which
+		// keeps the logger and writes from it later. Line ~299 below then
+		// rewrites `lg` in place to add the vendorName field, so the background
+		// goroutine reads the struct while this one writes it. `go test -race`
+		// reports that as four separate races on adjacent Logger fields, at
+		// bootstrap, on any config with an Alchemy upstream.
+		vlg := lg
+		cfgs, err := common.GenerateVendorConfigs(appCtx, vn, &vlg, cfg, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -406,6 +416,18 @@ func (u *Upstream) Config() *common.UpstreamConfig {
 		return nil
 	}
 	return u.config
+}
+
+func (u *Upstream) IsDown() bool {
+	if u == nil {
+		return true
+	}
+	for _, fe := range u.failsafeExecutors {
+		if br := fe.Breaker(); br != nil && br.State() == failsafe.StateOpen {
+			return true
+		}
+	}
+	return false
 }
 
 func (u *Upstream) MetricsTracker() *health.Tracker {
@@ -622,7 +644,7 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 	// Send the request based on client type
 	//
 	switch clientType {
-	case clients.ClientTypeHttpJsonRpc, clients.ClientTypeGrpcBds:
+	case clients.ClientTypeHttpJsonRpc, clients.ClientTypeGrpcBds, clients.ClientTypeWsJsonRpc:
 		tryForward := func(
 			ctx context.Context,
 			isHedge bool,
@@ -1387,7 +1409,7 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 		// the client and networkId are in place, so it can go through the
 		// upstream's normal Forward path.
 	} else {
-		return fmt.Errorf("upstream type not supported: %s", cfg.Type)
+		return u.detectChainFamilyFeatures(ctx, cfg)
 	}
 
 	return nil

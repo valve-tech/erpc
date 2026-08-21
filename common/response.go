@@ -620,6 +620,18 @@ func CopyResponseForRequest(ctx context.Context, resp *NormalizedResponse, req *
 		return nil, nil
 	}
 
+	// Parse BEFORE taking the read lock. JsonRpcResponse takes the WRITE lock on
+	// this same non-reentrant RWMutex, so parsing while holding the read lock
+	// blocks the goroutine against itself and never releases the read lock —
+	// every later reader of this response then blocks too. Parsing is idempotent
+	// (parseOnce) and the already-parsed case returns on an atomic load, so the
+	// multiplexed fan-out this function serves pays nothing extra here.
+	if resp.jsonRpcResponse.Load() == nil {
+		if _, err := resp.JsonRpcResponse(ctx); err != nil {
+			return nil, fmt.Errorf("failed to parse original response: %w", err)
+		}
+	}
+
 	resp.RLockWithTrace(ctx)
 	defer resp.RUnlock()
 
@@ -633,20 +645,10 @@ func CopyResponseForRequest(ctx context.Context, resp *NormalizedResponse, req *
 	r.SetEvmBlockRef(resp.EvmBlockRef())
 	r.SetEvmBlockNumber(resp.EvmBlockNumber())
 
-	// Try to load the already–parsed JsonRpcResponse from the original response.
+	// Re-read under the read lock rather than reusing the value parsed above: the
+	// lock is what keeps Release() from freeing the parsed response while Clone
+	// reads it, so the pointer that gets cloned must be the one the lock covers.
 	ejrr := resp.jsonRpcResponse.Load()
-	// If the original response has not yet been parsed (common with multiplexed
-	// requests), parse it now so that we can clone a *complete* JsonRpcResponse.
-	if ejrr == nil {
-		parsedJrr, err := resp.JsonRpcResponse(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse original response: %w", err)
-		}
-		// Use the parsed response directly instead of loading from atomic pointer
-		// This avoids race conditions where the parsing might have failed
-		ejrr = parsedJrr
-	}
-
 	if ejrr == nil {
 		return nil, fmt.Errorf("cannot copy original response since jsonRpcResponse is nil")
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/erpc/erpc/common"
-	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/upstream"
 	"github.com/rs/zerolog"
 )
@@ -113,14 +112,18 @@ func (r *AuthRegistry) Authenticate(ctx context.Context, req *common.NormalizedR
 	return nil, common.NewErrAuthUnauthorized("n/a", errors.Join(errs...).Error())
 }
 
-// FindDatabaseConnector finds a database connector by ID from the strategies
-func (r *AuthRegistry) FindDatabaseConnector(connectorId string) (data.Connector, error) {
+// FindDatabaseStrategy finds a database strategy by its connector ID.
+//
+// It returns the strategy rather than the connector alone, because an admin
+// write has to reach both halves of the strategy: the store, and the caches in
+// front of it. A revoke that only reaches the store leaves the key working
+// until the cached decision expires.
+func (r *AuthRegistry) FindDatabaseStrategy(connectorId string) (*DatabaseStrategy, error) {
 	for _, az := range r.strategies {
 		if az.cfg.Database != nil {
 			if az.cfg.Database.Connector != nil && az.cfg.Database.Connector.Id == connectorId {
-				// Access the connector from the DatabaseStrategy
 				if dbStrategy, ok := az.strategy.(*DatabaseStrategy); ok {
-					return dbStrategy.GetConnector(), nil
+					return dbStrategy, nil
 				}
 			}
 		}

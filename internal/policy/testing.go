@@ -243,3 +243,21 @@ func LatestDecisionOutputForTest(e *Engine, networkID, method string) (order []s
 	defer slot.mu.Unlock()
 	return cloneStrings(slot.previousOrder), cloneStrings(slot.previousExcluded)
 }
+
+// RegisteredPolicyConfigForTest returns the SelectionPolicyConfig the engine
+// holds for a network, or nil when the network is not registered. Tests use it
+// to prove that two networks registered from one shared config each end up
+// with their own, so a second network's registration cannot rewrite the
+// first's flags. See entry 131 in valve/upstream-bug-log.md.
+func RegisteredPolicyConfigForTest(e *Engine, networkID string) *common.SelectionPolicyConfig {
+	if e == nil {
+		return nil
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	reg := e.networks[networkID]
+	if reg == nil {
+		return nil
+	}
+	return reg.cfg
+}
