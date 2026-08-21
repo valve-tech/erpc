@@ -27,10 +27,16 @@ audit corrected the `file:line` citations that had drifted.
 **Reading this file.** Three things about its shape are deliberate, and each
 one has misled a reader at least once.
 
-- **Entry ids have gaps.** 78, 79, 84, 89, 102, 103, 104, 119, 124, 129, 139
-  and 148-154 do not exist and never did. Parallel sessions reserved numbers
-  and did not all use them. Git history carries no heading for any of them, so
-  nothing was lost in a merge. Do not hunt for a missing entry.
+- **Entry ids have gaps, and one gap is real work.** 78, 79, 84, 89, 102, 103,
+  104, 119, 124, 129, 139, 148 and 149 do not exist and never did — parallel
+  sessions reserved numbers and did not all use them. `git log --all -S` finds
+  no heading for any of those.
+  **150 to 154 are different: they exist**, on the unmerged branch
+  `worktree-agent-a47de169d3033a216` (commit `8761576`, 2026-08-19), together
+  with a fuller fix for entry 46 than the one on `main`. An earlier version of
+  this note said all of 148-154 never existed. That was checked with `git log
+  -S` against `main` only, which walks HEAD and cannot see an unmerged branch.
+  Use `--all`.
 - **Ids are not in order.** Sessions appended wherever they were working. The
   file is searched, not scrolled, so the order was left alone rather than
   churning 159 entries for tidiness.

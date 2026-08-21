@@ -6,6 +6,37 @@ Thank you for considering contributing to eRPC! By contributing, you help improv
 
 Please be aware that by contributing to this project, you acknowledge that your contributions (including code, documentation, and other materials) may be incorporated into both the open-source and enterprise versions of the software. This allows us to provide enhanced features and support to enterprise users while maintaining the open-source project.
 
+## Set up the commit hooks first
+
+Run this once per clone, before your first commit:
+
+```sh
+pip install pre-commit   # or: brew install pre-commit
+pre-commit install
+```
+
+The hooks run in about four seconds with warm caches. They format, lint, and
+refuse a commit that carries an unresolved merge-conflict marker. That last
+check is why this section exists: three merges once put conflict markers into a
+tracked file and nobody noticed, because a conflicted document still renders.
+
+The marker check runs with `--assume-in-merge`. Without that flag it only looks
+while `.git/MERGE_HEAD` exists, and markers that survive past the merge commit
+go straight through.
+
+CI runs the same hooks over the whole tree, so a clone that skipped
+`pre-commit install` fails there instead.
+
+To install the hooks into every repository you clone from now on:
+
+```sh
+pre-commit init-templatedir ~/.git-template
+git config --global init.templateDir ~/.git-template
+```
+
+Do NOT set a global `core.hooksPath` for this. It overrides each repository's
+own hooks directory, so it disables the very hooks it looks like it installs.
+
 ## How to Contribute
 
 1. Fork the repository.
