@@ -5868,6 +5868,34 @@ same bug. The weak fix is for the assertion to distinguish "outside my range"
 from "I do not know my range yet", so a caller can fail open on the second.
 
 ---
+
+## 172. A fork test pinned the FIELD, not the property, and the rebase broke it
+
+**Status:** not a bug — upstream's change is correct and the fork's test was
+too specific. Recorded so nobody "fixes" the migration. **Severity: none for
+the product.**
+
+Found by the same rebase as 171. `TestProjectSetDefaults_UpstreamDefaultsReachEveryUpstream`
+(`common/defaults_whole_config_test.go`) failed with `expected: 900, actual: 0`.
+
+Upstream `e12b6b9c` migrates `maxAvailableRecentBlocks` into the new
+`blockAvailability` window and then deliberately stops carrying BOTH — see
+`maxRecentBlocksFor` in `common/defaults.go`, whose comment says why: the two
+are enforced as independent lower bounds, so keeping both would narrow the
+configured window to whichever is smaller. The 900-block window still reaches
+every upstream. It arrives as `Evm.BlockAvailability.Lower.LatestBlockMinus`.
+
+The fork's test asserted `Evm.MaxAvailableRecentBlocks == 900` — the field, not
+the property its own name states. It now asserts through a `requireRecentWindow`
+helper that accepts either carrier.
+
+**The lesson generalises past this entry.** A test that names a property and
+asserts an implementation detail passes for the wrong reason until someone
+changes the detail, and then fails for the wrong reason. Both halves cost a
+reader time. Compare 99, where a test name outlived the bug it asserted: the
+same defect, at the other end.
+
+---
 ## 170. `waitForTasks` calls `task.Error()` twice and dereferences the second
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity was:
