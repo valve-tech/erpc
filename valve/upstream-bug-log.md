@@ -329,7 +329,11 @@ The fix is `<= 5`, or dropping the heuristic for a public-suffix list.
 
 ## 12. Three unreachable defensive branches in `svmFetchGenesisHash`
 
-**Status:** open. **Severity: none today.** Unexercised machinery.
+**Status:** not a bug. **Severity: none today.** Unexercised machinery.
+Closed as not a bug on 2026-08-21: the code cannot change what an operator
+or a client sees, so there is nothing to repair. It stays here because it
+still reads as live code. Deleting it in the fork would cost a permanent
+rebase conflict and change nothing — see `valve/open-entry-triage.md`.
 
 `upstream/svm_upstream_ops.go:84-93` has three branches that cannot run: the
 `resp.JsonRpcResponse()` error path, `if jrr == nil`, and `if jrr.Error != nil`.
@@ -1051,7 +1055,11 @@ The map-returning vendors escape this only because they allocate with `make`.
 
 ## 40. `EnsureFresh` has no callers, and disagrees with the pattern it documents
 
-**Status:** open. **Severity: low.** Unexercised machinery.
+**Status:** not a bug. **Severity: low.** Unexercised machinery. Closed as
+not a bug on 2026-08-21: the code cannot change what an operator or a client
+sees, so there is nothing to repair. It stays here because it still reads as
+live code. Deleting it in the fork would cost a permanent rebase conflict
+and change nothing — see `valve/open-entry-triage.md`.
 
 `thirdparty/remote_cache.go:252`. `EnsureFresh` is documented as "the canonical
 hot-path call", but all eight vendors open-code `Lookup` +
@@ -1447,7 +1455,11 @@ nothing.
 
 ## 51. Three unreachable defensive branches in the WebSocket write path
 
-**Status:** open. **Severity: none.** Unexercised machinery.
+**Status:** not a bug. **Severity: none.** Unexercised machinery. Closed as
+not a bug on 2026-08-21: the code cannot change what an operator or a client
+sees, so there is nothing to repair. It stays here because it still reads as
+live code. Deleting it in the fork would cost a permanent rebase conflict
+and change nothing — see `valve/open-entry-triage.md`.
 
 `erpc/ws_server.go:573`, `:607` and `:640` each guard
 `wsc.conn.SetWriteDeadline(...)` and give up on an error. gorilla's
@@ -1559,7 +1571,12 @@ names the wrong client. Order the specific tests before the general ones.
 
 ## 55. Every failsafe defaulting error path in `common/defaults.go` is dead
 
-**Status:** open. **Severity: lowest.** No test, because no input reaches it.
+**Status:** not a bug. **Severity: lowest.** No test, because no input
+reaches it. Closed as not a bug on 2026-08-21: the code cannot change what
+an operator or a client sees, so there is nothing to repair. It stays here
+because it still reads as live code. Deleting it in the fork would cost a
+permanent rebase conflict and change nothing — see `valve/open-entry-
+triage.md`.
 
 `FailsafeConfig.SetDefaults` (`common/defaults.go:2613`) can never return a
 non-nil error. Every leaf it calls — `TimeoutPolicyConfig`,
@@ -1699,7 +1716,11 @@ which asserts today's split and fails once the three converge.
 
 ## 60. Seven vendor normalisers do work the caller overwrites two lines later
 
-**Status:** open. **Severity: low.** Dead work that reads as a feature.
+**Status:** not a bug. **Severity: low.** Dead work that reads as a feature.
+Closed as not a bug on 2026-08-21: the code cannot change what an operator
+or a client sees, so there is nothing to repair. It stays here because it
+still reads as live code. Deleting it in the fork would cost a permanent
+rebase conflict and change nothing — see `valve/open-entry-triage.md`.
 
 `thirdparty/ankr.go:125`, `blastapi.go:160`, `chainstack.go:423`,
 `erpc.go:155`, `goldsky.go:165`, `onfinality.go:102` and `tenderly.go:140`
@@ -2287,7 +2308,12 @@ rule.
 
 ## 75. Four dead methods on `networkExecutor`
 
-**Status:** open. **Severity: low.** Dead code, one of it a bypassed wrapper.
+**Status:** not a bug. **Severity: low.** Dead code, one of it a bypassed
+wrapper. Closed as not a bug on 2026-08-21: the code cannot change what an
+operator or a client sees, so there is nothing to repair. It stays here
+because it still reads as live code. Deleting it in the fork would cost a
+permanent rebase conflict and change nothing — see `valve/open-entry-
+triage.md`.
 
 `erpc/network_executor.go` declares `Timeout()` (`:112`), `HasHedge()`
 (`:134`), `HasRetry()` (`:142`) and `shouldRetry()` (`:374`). None of them has
@@ -2650,9 +2676,13 @@ if it ever did. Either the guard at 818 is missing or the guard inside
 
 ## 68. Four dead branches found while raising `architecture/evm` coverage
 
-**Status:** open. All four branches are still dead, and each still reads as an
-active guard. They stay upstream candidates: today's behaviour is correct, so
-the only cost is the false impression that a guard is live.
+**Status:** not a bug. All four branches are still dead, and each still
+reads as an active guard. They stay upstream candidates: today's behaviour
+is correct, so the only cost is the false impression that a guard is live.
+Closed as not a bug on 2026-08-21: the code cannot change what an operator
+or a client sees, so there is nothing to repair. It stays here because it
+still reads as live code. Deleting it in the fork would cost a permanent
+rebase conflict and change nothing — see `valve/open-entry-triage.md`.
 
 1. **`json_rpc_cache.go:565-586`** — the `CacheEmptyBehaviorIgnore` arm of the
    post-fan-out emptiness switch cannot run. Every winner is filtered by the
@@ -3561,7 +3591,11 @@ that large must send it as a hex string. See entry 138.
 
 ## 106. `ParseBlockHashHexToBytes` guards against its own guarantee
 
-**Status:** open. Minor. Dead code, not a live defect.
+**Status:** not a bug. Minor. Dead code, not a live defect. Closed as not a
+bug on 2026-08-21: the code cannot change what an operator or a client sees,
+so there is nothing to repair. It stays here because it still reads as live
+code. Deleting it in the fork would cost a permanent rebase conflict and
+change nothing — see `valve/open-entry-triage.md`.
 
 `util/json_rpc.go:72-78` checks two conditions that the line above rules out:
 
@@ -3583,7 +3617,11 @@ normalizer where the invariant is actually established.
 
 ## 107. The quantile tracker's NaN guard cannot fire, and would not help if it did
 
-**Status:** open. Minor. Dead code, verified by probe.
+**Status:** not a bug. Minor. Dead code, verified by probe. Closed as not a
+bug on 2026-08-21: the code cannot change what an operator or a client sees,
+so there is nothing to repair. It stays here because it still reads as live
+code. Deleting it in the fork would cost a permanent rebase conflict and
+change nothing — see `valve/open-entry-triage.md`.
 
 `health/quantile.go:159-167` guards the value coming out of the sketch:
 
@@ -3999,9 +4037,13 @@ next author to trip over.
 
 ## 101. `resolveBlockTag` takes an `upper` argument it never reads
 
-**Status:** open. Found while covering the tag branches in
+**Status:** not a bug. Found while covering the tag branches in
 `erpc/query_executor.go`. `resolveBlockTag` still takes `upper` at
-`erpc/query_executor.go:318`, and its body still never reads it.
+`erpc/query_executor.go:318`, and its body still never reads it. Closed as
+not a bug on 2026-08-21: the code cannot change what an operator or a client
+sees, so there is nothing to repair. It stays here because it still reads as
+live code. Deleting it in the fork would cost a permanent rebase conflict
+and change nothing — see `valve/open-entry-triage.md`.
 
     func (qe *EvmQueryExecutor) resolveBlockTag(ctx context.Context, block string, upper bool) (uint64, error)
 
@@ -4113,10 +4155,14 @@ reflection test lists all seven paths and all seven subtests fail.
 
 ## 116. `ErrUpstreamsExhausted.DeepestMessage` can never reach its single-cause branch
 
-**Status:** open. The single-cause branch is still unreachable.
-`TestUpstreamsExhaustedDeepestMessage`, sub-test "a single joined cause still
-reports the bucket summary, not the upstream's own message", asserts today's
-behaviour and passes.
+**Status:** not a bug. The single-cause branch is still unreachable.
+`TestUpstreamsExhaustedDeepestMessage`, sub-test "a single joined cause
+still reports the bucket summary, not the upstream's own message", asserts
+today's behaviour and passes. Closed as not a bug on 2026-08-21: the code
+cannot change what an operator or a client sees, so there is nothing to
+repair. It stays here because it still reads as live code. Deleting it in
+the fork would cost a permanent rebase conflict and change nothing — see
+`valve/open-entry-triage.md`.
 
 `common/errors.go:1255` reads:
 
@@ -4898,8 +4944,8 @@ through the same range check entry 105 added would handle it exactly.
 
 ## 137. The EVM cache key prefixes the method without hashing it
 
-**Status:** open, and NOT a live defect. Checked while fixing entry 118, and
-recorded so the argument does not have to be rebuilt.
+**Status:** not a bug, closed 2026-08-21. Checked while fixing entry 118,
+and recorded so the argument below does not have to be rebuilt.
 
 `CacheHash` returns `{method}:{sha256(params)}`. The method sits in the key as
 a plain prefix and never enters the hash, so in principle a method name
@@ -5743,8 +5789,12 @@ trace of the block.
 
 ## 162. The fallback-tier default selection policy assigns nil to nil
 
-**Status:** open. **Severity: low.** Dead code that reads like a live default.
-Found while auditing 131.
+**Status:** not a bug. **Severity: low.** Dead code that reads like a live
+default. Found while auditing 131. Closed as not a bug on 2026-08-21: the
+code cannot change what an operator or a client sees, so there is nothing to
+repair. It stays here because it still reads as live code. Deleting it in
+the fork would cost a permanent rebase conflict and change nothing — see
+`valve/open-entry-triage.md`.
 
 `common/defaults.go` — `NetworkConfig.SetDefaults` installs a default selection
 policy when any upstream carries `tier:fallback`:
@@ -5838,8 +5888,10 @@ proven against deliberate mutants.
 
 ## 164. Entry 96's shared-config premise is not reachable from any config path I traced
 
-**Status:** open as a question, moot in the fork. **Severity: none today.**
-Found while fixing 131.
+**Status:** not a bug — a question, and moot in the fork. **Severity: none
+today.** Found while fixing 131. Closed as not a bug on 2026-08-21. The
+question stands; the fork's own config path makes it moot. The entry stays
+as the record of what was traced.
 
 Entries 96 and 131 both rest on one claim: two networks can reach
 `Engine.RegisterNetwork` holding the SAME `*SelectionPolicyConfig`. I could not
