@@ -45,15 +45,17 @@ one has misled a reader at least once.
   later sessions appended under whichever one was last. Two of them said things
   that had stopped being true. The per-entry Status line is gated by
   `valve/check-bug-log.sh`; the headers are not. Trust the Status line.
-- **A test named here may be one this tree no longer has, on purpose.** Six
+- **A test named here may be one this tree no longer has, on purpose.** Several
   entries name a deleted or renamed test in order to say what replaced it —
   read the sentence, not the name. `valve/check-test-citations.sh` lists every
-  name the tree cannot resolve, with the line it sits on, so the six read as
-  what they are. Run it after a rebase, which is when a rename happens. It is a
-  report and not a commit hook: on 2026-08-21 it checked 173 names, found 167
-  live and 6 absent, and every one of the 6 was correct prose. A hook with that
-  record gets bypassed, and the bypass would take the conflict-marker check with
-  it.
+  name the tree cannot resolve, with the line it sits on, so those read as what
+  they are. Run it after a rebase, which is when a rename happens. It is a
+  report and not a commit hook: on its first run, 2026-08-21, it checked 173
+  names, found 167 live and 6 absent, and every one of the 6 was correct prose.
+  A hook with that record gets bypassed, and the bypass would take the
+  conflict-marker check with it. The count is not pinned here on purpose — a
+  correct rename ADDS a name, because the entry then names both the old test
+  and the new one.
 
 ---
 
@@ -1477,30 +1479,62 @@ second bullet is still open.
 
 ## 53. The legacy upstream `failsafe:` object drops every key added since
 
-**Status:** open. **Severity: medium.** A test asserts today's broken
-behaviour: `TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys`
-(`common/config_backcompat_unmarshal_test.go`).
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.**
+Fixed together with entry 64, which had the same cause. Pinned by
+`common/config_backcompat_unmarshal_test.go:TestUpstreamConfig_UnmarshalYAML_TheLegacyFailsafeObjectKeepsEveryOtherKey`,
+which replaces `TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys`.
+That test asserted the defect.
 
-`UpstreamConfig.UnmarshalYAML` (`common/config.go:1220`) decodes into a shadow
-struct. When that decode fails — which a legacy single-object `failsafe:`
-always causes — it falls back to `oldShadow` (`common/config.go:1247`) and
-copies field by field (`common/config.go:1274`).
+`UpstreamConfig.UnmarshalYAML` decoded into a shadow struct. When that decode
+failed — which a legacy single-object `failsafe:` always caused — it fell back
+to a hand-listed `oldShadow` and copied field by field.
 
-`oldShadow` has not grown with `UpstreamConfig`. It lacks
-`rateLimitCountMode` and `creditUnits`, so both are silently discarded for any
-upstream that still writes `failsafe:` as an object.
+`oldShadow` did not grow with `UpstreamConfig`. **The drift was measured twice,
+and it had grown between the two readings.** When this entry was first written
+it dropped `rateLimitCountMode` and `creditUnits`. By the time it was fixed on
+2026-08-21 it dropped **four** fields: `chain` and `chainProbeInterval` had
+arrived with a rebase, and nobody updated the copy. That is the argument
+against topping the list up.
 
-An operator who configured credit-based rate limiting gets flat per-request
-counting instead. No warning, no error — their budget simply drains at the
-wrong rate. Every upstream key added after the fallback was written inherits
-the same fate.
+An operator who configured credit-based rate limiting got flat per-request
+counting instead. No warning, no error — their budget drained at the wrong
+rate.
 
-`NetworkDefaults.UnmarshalYAML` (`common/config.go:900`) and
-`NetworkConfig.UnmarshalYAML` (`common/config.go:2501`) have the same
-hand-listed fallback but escape the bug by accident: they decode into the
-RECEIVER, so the failed strict pass leaves the newer keys populated and the
-legacy pass only overwrites what it names. Fix the upstream path the same way,
-or the two shapes keep diverging.
+**The fix deletes the structure rather than completing it.** `FailsafeConfig`
+is the only field whose SHAPE differs between the two schemas, so the decision
+belongs there. `FailsafeConfigList` (`common/config.go`) is a
+`[]*FailsafeConfig` with its own `UnmarshalYAML` that accepts a list or a
+single mapping, and the three types that carry a `failsafe:` key now use it.
+With the legacy shape handled where it varies, the fallback decode has no
+remaining purpose, so all three hand-listed copies are gone —
+`UpstreamConfig`'s `oldShadow`, `NetworkDefaults`'s `oldNetworkDefaults` and
+`NetworkConfig`'s `oldNetworkConfig`, 187 lines in total. There is one decode
+path now, and no parallel struct that can drift again.
+
+The test asserts a PROPERTY, not a field list: the two forms must produce equal
+configs apart from `failsafe` itself. A field list in the test would rot the
+same way `oldShadow` did.
+
+**Two details worth keeping.**
+
+The list type decides on the value's SHAPE, not on which decode failed. The
+first attempt chose by failure, and it broke a test that already existed: a
+list holding one bad field fails as a list, gets retried as a single policy,
+and reports "cannot unmarshal !!seq into common.FailsafeConfig" — which says
+nothing about the field the operator got wrong.
+
+The shape comes from a decode into `interface{}`, not a `yaml.Node`. A Node
+stays empty here, because this is yaml.v3's obsolete unmarshaler signature and
+it cannot fill one; that was verified by probe, not assumed. The modern
+signature does fill it, but its `Node.Decode` builds a decoder with
+`KnownFields` off, which would stop an unknown key inside a failsafe policy
+being reported at all. Losing that would re-open this entry's own class of
+defect.
+
+**Mutation result (2026-08-21).** With the pre-fix `common/config.go` restored
+and the new tests kept, all three fail: the upstream property test reports the
+configs unequal, and both message tests still see the shadow type's complaint.
+With the fix restored, all three pass and the whole `common` package is green.
 
 ## 54. Two agent-name branches are shadowed and can never run
 
@@ -1888,10 +1922,12 @@ undefined — fixes it, and the existing check at `:3390` then handles the rest.
 
 ## 64. A mistyped current-schema key is reported against the legacy shadow
 
-**Status:** open. **Severity: medium.** Both pinning tests still pass.
-`TestNetworkDefaults_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow` and
-`TestNetworkConfig_UnmarshalYAML_CurrentOnlyKeyReportsTheLegacyShadow`
-(`common/config_unmarshal_gaps_test.go`).
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium.**
+Fixed together with entry 53, which had the same cause. Pinned by
+`TestNetworkDefaults_UnmarshalYAML_ReportsTheRealTypeMismatchForACurrentOnlyKey`
+and `TestNetworkConfig_UnmarshalYAML_ReportsTheRealTypeMismatchForACurrentOnlyKey`
+(`common/config_unmarshal_gaps_test.go`), which replace the two
+`…_CurrentOnlyKeyReportsTheLegacyShadow` tests. Those asserted the defect.
 
 `NetworkDefaults.UnmarshalYAML` (`common/config.go:900`) and
 `NetworkConfig.UnmarshalYAML` (`common/config.go:2501`) decode the node into
@@ -1923,10 +1959,22 @@ against the decoder and surfaces from the outer `Decode` instead. A key that
 BOTH shapes declare (`rateLimitBudget`) reports correctly, which is why this
 was never noticed.
 
-The fix is to stop feeding unknown keys to the legacy shadow — decide from the
-document which shape it is, or add the current-only keys to the shadow. Entry
-53 above asks for the same structural change to the upstream path for a
-different symptom.
+**The fix removes the second decode entirely.** The legacy single-object
+`failsafe:` was the only reason either type kept a shadow struct, so once
+`FailsafeConfigList` accepts both shapes itself there is nothing left to fall
+back to. `NetworkDefaults.UnmarshalYAML` and `NetworkConfig.UnmarshalYAML` are
+deleted, and both types now take the plain decode. With no second attempt to
+record a complaint against the decoder, the real error is the one that reaches
+the operator. Entry 53 carries the full account of the change.
+
+The tests now assert three things for each mistyped key: the operator sees the
+real type mismatch, no internal shadow type name appears, and the error does
+not say "not found in type" — a key that exists must never be reported as
+missing, because that sends the operator hunting for a typo they did not make.
+
+**Mutation result (2026-08-21).** With the pre-fix `common/config.go` restored,
+both tests fail and report exactly the old message,
+`field multiplexing not found in type common.oldNetworkDefaults`.
 
 ## 65. A rate-limit rule logs nanoseconds under a key that says milliseconds
 
