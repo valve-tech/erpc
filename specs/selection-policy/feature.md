@@ -452,8 +452,10 @@ Convenience preference operators (the most common multi-tier patterns):
 ```ts
 .preferTag(pat: string, opts?: {
   minHealthy?: number = 1,
-  fallback?: string                        // tag pattern; if minHealthy not met, switch to fallback set
+  fallback?: string,                       // tag pattern; if minHealthy not met, switch to fallback set
+  keepRest?: boolean = false               // rank instead of filter: append the losers instead of dropping them
 })
+.demoteTag(pat: string)                    // move matching upstreams to the tail; drops nobody
 .preferVendor(name: string, opts?: same)
 .preferAttribute(
   keyFn: (u) => any,
@@ -464,6 +466,18 @@ Convenience preference operators (the most common multi-tier patterns):
 ```
 
 The default policy uses `preferTag('!tier:fallback', { fallback: 'tier:fallback' })` to express "primary tier = upstreams NOT tagged tier:fallback; if empty, fall through to tier:fallback".
+
+**Per-request escape.** `preferTag` is a hard filter, and the engine
+evaluates the policy per tick, not per request. So one healthy primary
+removes the whole fallback tier from the tick's list, and no request in
+that window can reach a fallback however hard it fails. `keepRest: true`
+turns the filter into a ranking — the fallback tier stays in the list and
+`demoteTag('tier:fallback')` pins it behind every primary, so the request
+loop sweeps into it after the primaries fail. The default policy drives
+`keepRest` from `ctx.failoverOnDefaultsExhausted`, which mirrors the
+network's `failover.onDefaultsExhausted`. It is off by default: hedge and
+consensus pick beyond the head of the list, so a reachable fallback tier
+can take paid traffic on an otherwise healthy request.
 
 Blast-radius interleave (used after sorting):
 
@@ -785,10 +799,14 @@ When `selectionPolicy.evalFunc` is omitted, the engine applies the production-ha
     .excludeIf(all(samplesAbove(10), throttleRateAbove(0.4)))
     .excludeIf(any(all(samplesAbove(20), latencyDeviationAbove(3)), latencyAbove(30_000)))
     .excludeIf(any(blockNumberLagAbove(16), blockSecondsLagAbove(30)))
-    .whenEmpty(() => upstreams)                                           // 3 — safety net
-    .preferTag('!tier:fallback', { minHealthy: 1, fallback: 'tier:fallback' })  // 4
+    // 3 — tier split. `keepRest` ranks the fallback tier last instead of
+    // dropping it (opt-in via failover.onDefaultsExhausted).
+    .preferTag('!tier:fallback', { minHealthy: 1, fallback: 'tier:fallback', keepRest: ctx.failoverOnDefaultsExhausted })
+    .whenEmpty(() => upstreams)                                           // 4 — safety net, AFTER the tier split
     .sortByScore(PREFER_FASTEST)                                          // 5 — rank survivors by p70 latency
+    .demoteTag('tier:fallback')                                           // 5b — tier order beats score
     .stickyPrimary({ hysteresis: 0.30, minSwitchInterval: '30s' })        // 6 — hold primary stable
+    .demoteTag('tier:fallback')                                           // 6b — tier order has the last word
     .readmitExcluded({                                                    // 7 — cautious re-admit
       reAdmitAfter:  '90s',
       maxConcurrent: 2,
@@ -808,13 +826,15 @@ When `selectionPolicy.evalFunc` is omitted, the engine applies the production-ha
 
    Filtering on these signals (rather than only ranking via `sortByScore`) is the key defence against the "slow or erroring upstream still wins by score" class of incident.
 
-3. **Safety net** — if step 2 wiped everything (network-wide outage), serve from the raw set rather than fail closed.
+3. **Tier** — `!tier:fallback` is the primary tier; `tier:fallback` is the second tier. Adding a fallback upstream is one config line. The `!` glob is the canonical eRPC convention. `keepRest` (driven by `failover.onDefaultsExhausted`) keeps the second tier in the list, ranked last by step 6b, so one request can escape into it; leave it off and the second tier only serves once the first tier is gone.
 
-4. **Tier** — `!tier:fallback` is the primary tier; `tier:fallback` is the second tier. Adding a fallback upstream is one config line. The `!` glob is the canonical eRPC convention.
+4. **Safety net** — if step 2 wiped everything (network-wide outage), serve from the raw set rather than fail closed. It runs AFTER the tier split on purpose. Before it, a tick where both tiers failed the health excludes restored the raw set, and `preferTag` then found the primaries present again and discarded the whole fallback tier — at the exact moment the fallback tier was most needed. `preferTag` never empties a non-empty list, so the ordering only changes the total-outage case.
 
 5. **Score** — `PREFER_FASTEST` weights (errorRate=4, respLatency=15, throttledRate=4, blockHeadLag=1, finalizationLag=0, misbehaviors=2). Ranks the survivors of step 2 by p70 latency, with the other dimensions as light tiebreakers.
 
 6. **Sticky primary** — keep the current primary unless a challenger's score is decisively better (≥30% margin) AND 30 s have passed since the last switch. The 0.30 hysteresis is wider than a naive flap-defender because the chain is best-first by score — without a meaningful margin the primary would oscillate every tick on noise.
+
+5b / 6b. **Demote the fallback tier** — steps 5 and 6 rank on health alone, so a fast fallback would climb over a healthy primary. `demoteTag('tier:fallback')` pins tier order. It runs twice on purpose: before step 6 so `stickyPrimary` tracks an actual primary (a fallback in the sticky slot leaves the primary tier with no anti-flap protection), and after step 6 because sticky can still hoist a fallback that the shared primary register holds from a tick on which every primary was excluded. It drops nobody, and both calls are no-ops whenever step 3 already removed the fallback tier.
 
 7. **Readmit excluded** — re-admit up to two excluded upstreams every 90 s at the **tail** of the order so they get a chance to prove they've recovered without taking primary traffic. Matches typical transient-blip recovery windows (rate-limit reset, regional networking dip). Placed at the end of the chain so subsequent sort/sticky steps can't reorder the probed upstreams off the tail.
 
