@@ -1167,9 +1167,9 @@ the length of the walk.
 **Corroborated independently — see 144**, which adds the proof that the discard
 is guaranteed rather than likely.
 
-**Status:** open. **Severity: high.** Verified under `-race`. An operator
-loses the "my policy is too slow" signal completely, and the existing
-`internal/policy/stdlib` suite flakes because of it.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Verified under `-race`. An operator lost the "my policy is too slow"
+signal completely, and the `internal/policy/stdlib` suite flaked because of it.
 
 `internal/policy/slot.go:224-244`. `tickOnce` runs the eval on its own
 goroutine and shares two plain variables with it:
@@ -1221,15 +1221,27 @@ fires and the race with it. The failures move around between runs — 8
 tests on one run, 1 on the next — which is the tell. `-count=1` usually
 passes.
 
-**Deliberately not pinned by a test**, on the same rule as entry 13: a test
-that asserts the correct behaviour fails today, and a test that asserts
-today's behaviour has to fire the timeout, which trips the race and fails
-the suite under `-race`. Fix first, then pin.
+**The fix.** The goroutine publishes an `evalOutcome{res, err}` on a buffered
+channel instead of writing the parent's variables. The parent picks the winner,
+and when the deadline fires the deadline wins. It still waits for the goroutine
+— sobek cannot be interrupted mid-call — but it now DISCARDS the late result
+rather than letting it overwrite `ErrEvalTimeout`.
 
-The fix is small: have the goroutine publish through a result struct sent on
-a channel, and let the parent choose between the timeout error and the
-result. That removes the shared variables and makes the timeout the winner
-when it fires.
+Pinned by `TestSlot_ASlowEvalReportsTheTimeoutInsteadOfItsLateResult`
+(`internal/policy/slot_eval_timeout_test.go`). The pin is deterministic and
+does not depend on machine load: the eval busy-waits 400 ms against a 50 ms
+deadline, so the timeout always fires first and the result always arrives late.
+What the test asserts is that the late result LOSES. Reverting the fix fails
+it. `go test ./internal/policy/... -race -count=2` is clean.
+
+`selection_eval_errors_total{kind="timeout"}` can now increment. `emitMetrics`
+classifies on `strings.Contains(d.Error, "timed out")`, and the error text
+reaches `Decision.Error` for the first time.
+
+**Noted, not fixed:** that classifier matches an error STRING. `Decision.Error`
+is a `string`, so `errors.Is(err, ErrEvalTimeout)` is not available to it. Any
+reword of the timeout message silently reclassifies the metric as `kind="throw"`.
+Recorded as its own weakness rather than widened into this fix.
 ## 47. A PostgreSQL listener connection is never released
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity was:
@@ -4930,9 +4942,10 @@ merely raced, it is GUARANTEED to be discarded. The goroutine assigns
 the timeout write always waits for an assignment that overwrites it.
 `ErrEvalTimeout` is written at one line and read at none.
 
-**Status:** open, production code, NOT fixed here — a concurrency change to
-the selection path needs its own pin and its own tests. **Severity: medium.**
-The eval timeout cannot fire, and `-race` reports the write.
+**Status: FIXED in the fork.** Upstream still carries it. Fixed as entry 46,
+which now carries the fix and the pin. **Severity was: medium** here and
+**high** in 46 — the two entries disagreed, and 46's rating is the right one,
+because the operator-visible effect is a timeout that can never be observed.
 
 `internal/policy/slot.go:225-244` — `Slot.tickOnce` runs the JS eval in a
 goroutine and guards it with a timeout:
