@@ -28,3 +28,6 @@ erpc.yml
 
 # goreleaser build output
 /dist/
+
+# compiled test binary from `make test-fast` (per worktree)
+.erpc.test

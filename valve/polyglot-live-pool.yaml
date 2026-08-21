@@ -1,0 +1,181 @@
+# Three chain families, one binary, one config, live public endpoints.
+#
+# This file is the test of the fork's central claim: a new chain family is a
+# configuration exercise, not new Go code. It serves Ethereum mainnet (evm),
+# Solana mainnet-beta (svm) and Bitcoin mainnet (btc) from the same process.
+#
+# Routes:
+#   POST /main/evm/1             -> Ethereum mainnet
+#   POST /main/svm/mainnet-beta  -> Solana mainnet-beta
+#   POST /main/btc/mainnet       -> Bitcoin mainnet
+#
+# Every endpoint below is public and keyless. Each one answered a live curl
+# before it entered this file, on 2026-08-17. No API key appears here, and none
+# is needed.
+#
+# Run:
+#   go build -o /tmp/erpc ./cmd/erpc
+#   /tmp/erpc valve/polyglot-live-pool.yaml
+
+logLevel: info
+
+server:
+  httpHostV4: "127.0.0.1"
+  httpPort: 4211
+
+metrics:
+  enabled: true
+  hostV4: "127.0.0.1"
+  port: 4212
+
+projects:
+  - id: main
+
+    networks:
+      # Ethereum mainnet. `evm` needs a chain id; that is the whole of what
+      # this architecture asks for.
+      - architecture: evm
+        evm:
+          chainId: 1
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 20s
+            retry:
+              maxAttempts: 3
+              delay: 100ms
+              backoffMaxDelay: 3s
+              backoffFactor: 0.3
+              jitter: 100ms
+
+      # Solana mainnet-beta. `svm` names a cluster instead of a number.
+      - architecture: svm
+        svm:
+          cluster: mainnet-beta
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 20s
+            retry:
+              maxAttempts: 3
+              delay: 150ms
+              backoffMaxDelay: 3s
+              backoffFactor: 0.3
+              jitter: 100ms
+
+      # Bitcoin mainnet. `btc` has no config block of its own, so it names the
+      # chain in the shared `chain:` field. That field is the fork's seam for
+      # any architecture that carries no per-family block.
+      - architecture: btc
+        chain: mainnet
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 20s
+            retry:
+              maxAttempts: 3
+              delay: 100ms
+              backoffMaxDelay: 3s
+              backoffFactor: 0.3
+              jitter: 100ms
+
+    upstreams:
+      # ---------------------------------------------------------------- EVM
+      # Three endpoints serve archival history. cloudflare-eth and 1rpc answer
+      # eth_chainId and eth_blockNumber but return -32603 for an old block, so
+      # they sit in the fallback tier. That is exactly what the tier is for.
+      - id: evm-publicnode
+        type: evm
+        endpoint: https://ethereum-rpc.publicnode.com
+        evm:
+          chainId: 1
+
+      - id: evm-drpc
+        type: evm
+        endpoint: https://eth.drpc.org
+        evm:
+          chainId: 1
+
+      - id: evm-quicknode-demo
+        type: evm
+        endpoint: https://docs-demo.quiknode.pro
+        evm:
+          chainId: 1
+
+      - id: evm-cloudflare
+        type: evm
+        endpoint: https://cloudflare-eth.com
+        evm:
+          chainId: 1
+        tags:
+          - tier:fallback
+
+      - id: evm-1rpc
+        type: evm
+        endpoint: https://1rpc.io/eth
+        evm:
+          chainId: 1
+        tags:
+          - tier:fallback
+
+      # ---------------------------------------------------------------- SVM
+      # Three keyless Solana endpoints. Most public Solana RPC now needs a key;
+      # these three answered getHealth and getGenesisHash without one.
+      - id: svm-solana-labs
+        type: svm
+        endpoint: https://api.mainnet-beta.solana.com
+        svm:
+          cluster: mainnet-beta
+
+      - id: svm-publicnode
+        type: svm
+        endpoint: https://solana-rpc.publicnode.com
+        svm:
+          cluster: mainnet-beta
+
+      - id: svm-quicknode-demo
+        type: svm
+        endpoint: https://docs-demo.solana-mainnet.quiknode.pro
+        svm:
+          cluster: mainnet-beta
+
+      # ---------------------------------------------------------------- BTC
+      # Copied from valve/btc-live-pool.yaml, which already runs. onfinality
+      # answers HTTP 429 under any load, so it stays in the fallback tier.
+      - id: btc-drpc
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin.drpc.org
+        chainProbeInterval: 10s
+
+      - id: btc-publicnode
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin-rpc.publicnode.com
+        chainProbeInterval: 10s
+
+      - id: btc-quicknode-demo
+        type: btc
+        chain: mainnet
+        endpoint: https://docs-demo.btc.quiknode.pro
+        chainProbeInterval: 10s
+
+      - id: btc-tatum
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin-mainnet.gateway.tatum.io/
+        chainProbeInterval: 10s
+
+      - id: btc-nownodes
+        type: btc
+        chain: mainnet
+        endpoint: https://public-btc.nownodes.io/
+        chainProbeInterval: 10s
+
+      - id: btc-onfinality
+        type: btc
+        chain: mainnet
+        endpoint: https://bitcoin.api.onfinality.io/public
+        chainProbeInterval: 30s
+        tags:
+          - tier:fallback

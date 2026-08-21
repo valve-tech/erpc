@@ -58,15 +58,26 @@ test:
 	@go test ./cmd/... -count 1 -parallel 1
 	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | awk '{print "./" $$1 "..."}') -covermode=atomic -v -race -count 1 -parallel 1 -timeout 30m -failfast=false
 
+# The compiled erpc test binary lives in the WORKTREE, not in /tmp.
+#
+# It used to be $(ERPC_TEST_BIN), one hardcoded path shared by every checkout on
+# the machine. Two worktrees running this target at once overwrite each other:
+# the second `go test -c` replaces the binary while the first target's six
+# shards are still executing from it, so a run can report on another
+# worktree's code. A green result then proves nothing about the tree you are
+# standing in. Keeping it under $(CURDIR) makes it unique per worktree and
+# still stable across repeat runs.
+ERPC_TEST_BIN := $(CURDIR)/.erpc.test
+
 .PHONY: test-fast
 test-fast:
 	@go clean -testcache
 	@go test ./cmd/... -count 1 -parallel 1 -v
 	@# Compile erpc test binary once
-	@go test -c -o /tmp/erpc.test ./erpc
+	@go test -c -o $(ERPC_TEST_BIN) ./erpc
 	@# Run erpc shards in parallel (each process has isolated gock state)
 	@# DSL shard (requires OpenAI API key, non-blocking)
-	@/tmp/erpc.test -test.v -test.timeout 5m -test.run "^TestConsensusPolicy_DSL" || true &
+	@$(ERPC_TEST_BIN) -test.v -test.timeout 5m -test.run "^TestConsensusPolicy_DSL" || true &
 	@# Named shards run in parallel (each process has isolated gock state)
 	@# Shard definitions are only for the known-slow test groups.
 	@# The catch-all shard picks up any new/unassigned tests: its skip list is
@@ -90,16 +101,16 @@ test-fast:
 	  SHARD_CONTAINER_CACHE="^TestEvmJsonRpcCache_(DynamoDB|Redis)$$"; \
 	  SKIP_ALL="$$SHARD_CONSENSUS|$$SHARD_NETWORK|$$SHARD_HTTPSERVER|$$SHARD_INTEGRITY|$$SHARD_CONTAINER_CACHE|^TestConsensusPolicy_DSL|^TestHttp_"; \
 	  pids=(); \
-	  /tmp/erpc.test -test.v -test.timeout 10m -test.run "$$SHARD_CONSENSUS" -test.parallel 4 & pids+=($$!); \
-	  /tmp/erpc.test -test.v -test.timeout 10m -test.run "$$SHARD_NETWORK" & pids+=($$!); \
-	  /tmp/erpc.test -test.v -test.timeout 10m -test.run "$$SHARD_HTTPSERVER" & pids+=($$!); \
-	  /tmp/erpc.test -test.v -test.timeout 10m -test.run "$$SHARD_INTEGRITY" & pids+=($$!); \
-	  /tmp/erpc.test -test.v -test.timeout 15m -test.run "$$SHARD_CONTAINER_CACHE" & pids+=($$!); \
-	  /tmp/erpc.test -test.v -test.timeout 10m -test.skip "$$SKIP_ALL" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_CONSENSUS" -test.parallel 4 & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_NETWORK" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_HTTPSERVER" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_INTEGRITY" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 15m -test.run "$$SHARD_CONTAINER_CACHE" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.skip "$$SKIP_ALL" & pids+=($$!); \
 	  fail=0; for pid in "$${pids[@]}"; do wait "$$pid" || fail=1; done; \
 	  exit $$fail'
 	@# TestHttp_ tests run after parallel shards (sensitive to system load, only ~5s)
-	@/tmp/erpc.test -test.v -test.timeout 5m -test.run "^TestHttp_"
+	@$(ERPC_TEST_BIN) -test.v -test.timeout 5m -test.run "^TestHttp_"
 	@# Run all other (non-erpc) packages normally
 	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | grep -v "erpc/" | awk '{print "./" $$1 "..."}') -count 1 -parallel 4 -v -timeout 30m -failfast=false
 

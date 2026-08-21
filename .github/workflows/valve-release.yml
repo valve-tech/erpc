@@ -1,0 +1,146 @@
+# Valve-owned release workflow.
+#
+# The upstream `release.yml` is disabled in this fork along with the other
+# fork-hostile inherited workflows: it gates on
+# `github.repository_owner == 'erpc'`, targets blacksmith runners we don't have,
+# and drives a release-PR/changelog flow that fights our tag convention.
+#
+# This produces exactly what valve consumes, and nothing else:
+#
+#   * linux/amd64  — the fleet. Byte-for-byte the same build the on-box
+#     `build-erpc-binary` deploy step performs today (CGO_ENABLED=0, the same
+#     -ldflags stamping common.ErpcVersion / common.ErpcCommitSha), so
+#     `erpc --version` keeps reporting the tag rather than "dev" and the
+#     published artifact is a drop-in for the compile-on-the-box path.
+#   * linux/arm64, darwin/arm64, darwin/amd64 — valve-node users, who run on
+#     hardware we don't choose. Today every client's ReleaseURL in
+#     valve-node-app is noReleaseURL, so setup ALWAYS falls back to BuildCmd
+#     and a user setting up a node compiles from source on their own machine.
+#
+# Go cross-compiles cleanly with CGO disabled, so all four targets build on one
+# amd64 runner — no QEMU, no native arm64 runner needed. (That is NOT true for
+# the Rust forks: reth and lighthouse-pulse need native runners per target,
+# because emulated Rust builds are pathologically slow. See
+# docs/superpowers/specs/2026-07-25-multiarch-release-pipeline.md in the
+# monorepo.)
+#
+# Triggered only by pushing a tag, or by hand. Never on push-to-main — a
+# release is a deliberate act.
+name: valve-release
+
+on:
+  push:
+    tags:
+      - 'valve-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. valve-ws-v1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      # Validate BEFORE the tag reaches `checkout`'s ref: or any run: block.
+      # workflow_dispatch input is attacker-controlled in the general case
+      # (here only by write-access users, but the cost of pinning it is zero),
+      # and an unvalidated value in `ref:` is a ref-injection primitive.
+      # Anchored allowlist: this fork's releases are always `valve-*`.
+      - name: Validate tag input
+        id: vars
+        env:
+          RAW_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # TWO checks, and both are load-bearing. A single
+          # `valve-[A-Za-z0-9._-]*` glob is NOT sufficient: the trailing `*` in
+          # a shell case pattern matches ANY characters, so `valve-ok;rm -rf /`
+          # sails through it. Require the prefix, then separately reject any
+          # character outside the allowed class anywhere in the string.
+          case "$RAW_TAG" in
+            valve-?*) ;;
+            *) echo "::error::refusing tag '$RAW_TAG' — must start with 'valve-'"; exit 1 ;;
+          esac
+          case "$RAW_TAG" in
+            *[!A-Za-z0-9._-]*)
+              echo "::error::refusing tag '$RAW_TAG' — contains characters outside [A-Za-z0-9._-]"
+              exit 1 ;;
+          esac
+          printf 'tag=%s\n' "$RAW_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          # Safe: validated against the allowlist above.
+          ref: ${{ steps.vars.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+
+      - name: Resolve commit
+        id: sha
+        run: printf 'sha=%s\n' "$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build all targets
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Keep these ldflags identical to the on-box build in the monorepo's
+          # `build-erpc-binary` step. If they drift, the published binary and
+          # the compiled-on-box binary stop being interchangeable.
+          LDFLAGS="-w -s -X github.com/erpc/erpc/common.ErpcVersion=${TAG} -X github.com/erpc/erpc/common.ErpcCommitSha=${SHA}"
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
+            GOOS="${target%/*}"; GOARCH="${target#*/}"
+            out="dist/erpc-${GOOS}-${GOARCH}"
+            echo "==> ${out}"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath -ldflags="$LDFLAGS" -o "$out" ./cmd/erpc
+          done
+          ls -la dist/
+
+      - name: Smoke-test the native binary
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Only linux/amd64 is executable on this runner. It is also the one
+          # the fleet runs, so a --version that reports the tag proves the
+          # ldflags stamping survived; "dev" here means the stamp path broke.
+          # TAG goes through env, not `${{ }}` interpolation into the script.
+          chmod +x dist/erpc-linux-amd64
+          OUT=$(./dist/erpc-linux-amd64 --version)
+          echo "$OUT"
+          printf '%s' "$OUT" | grep -qF -- "$TAG" \
+            || { echo "::error::--version did not report the tag; ldflags stamping is broken"; exit 1; }
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist && sha256sum erpc-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          files: |
+            dist/erpc-*
+            dist/SHA256SUMS
+          body: |
+            Valve build of the eRPC fork at `${{ steps.vars.outputs.tag }}` (`${{ steps.vars.outputs.sha }}`).
+
+            Static `CGO_ENABLED=0` binaries. `linux/amd64` matches the build the
+            valve deploy performs on-box, so it is a drop-in for that path.
+
+            Verify:
+            ```
+            sha256sum -c SHA256SUMS --ignore-missing
+            ```

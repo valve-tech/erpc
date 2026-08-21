@@ -37,6 +37,30 @@ jobs:
       - name: Test with the Go CLI
         run: make test-fast
 
+  # The pre-commit hooks are the local gate. This job is the backstop for a
+  # clone where nobody ran `pre-commit install`, and for anyone who reaches for
+  # `--no-verify`. A gate that only runs on the machines that chose to install
+  # it is not a gate.
+  pre-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25.x'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Run every hook over the whole tree
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
   security:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
