@@ -8,7 +8,7 @@ Next.js documentation site, and it changes on most merges.
 | Document | What it is |
 |---|---|
 | [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 167 entries: 84 fixed in the fork, 79 open, 4 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
-| [open-entry-triage.md](open-entry-triage.md) | What to do with the log's 79 open entries, now that the fork rebases instead of sending pull requests. Ten of them are one defect at the config edge; eighteen are dead code worth closing rather than patching. |
+| [open-entry-triage.md](open-entry-triage.md) | What to do with the log's 79 open entries, now that the fork rebases instead of sending pull requests. Ten of them obey one rule at ten different sites; eighteen are dead code worth closing rather than patching. |
 | [polyglot-feasibility.md](polyglot-feasibility.md) | Can the fork serve non-EVM chains from configuration rather than new Go code? Verdict and evidence. |
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |
 | [merge-review.md](merge-review.md) | Review of that merge. Carries a correction: the first pass recorded the `erpc` package as green when the run had been truncated by Go's default 600s timeout. |
