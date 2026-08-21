@@ -25,6 +25,8 @@ func TestProject_Forward(t *testing.T) {
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
+		const maxCount = 3
+
 		rateLimitersRegistry, err := upstream.NewRateLimitersRegistry(context.Background(),
 			&common.RateLimiterConfig{
 				Store: &common.RateLimitStoreConfig{
@@ -36,7 +38,7 @@ func TestProject_Forward(t *testing.T) {
 						Rules: []*common.RateLimitRuleConfig{
 							{
 								Method:   "*",
-								MaxCount: 3,
+								MaxCount: maxCount,
 								Period:   common.RateLimitPeriodMinute,
 							},
 						},
@@ -101,32 +103,53 @@ func TestProject_Forward(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		prj, err := prjReg.GetProject("prjA")
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// Align to the start of the next minute to avoid rate limit window rollover flakiness
-		now := time.Now()
-		time.Sleep(time.Until(now.Truncate(time.Minute).Add(time.Minute)))
+		// The budget above allows maxCount requests per wall-clock minute, and the
+		// window boundary is the real minute boundary. A burst that straddles the
+		// boundary therefore splits across two counters.
+		//
+		// Instead of sleeping up to a minute to align with the boundary, we send
+		// 2*maxCount+1 requests. The burst takes milliseconds, so it crosses at
+		// most one boundary and splits into at most two windows. By the pigeonhole
+		// principle one of those windows receives at least maxCount+1 requests, so
+		// the budget must reject at least one request. The elapsed check below
+		// asserts the premise: the burst is far shorter than the window.
+		//
+		// upstream.TestRateLimiterBudget_WindowRolloverDuringBurst proves both
+		// halves of this against the real limiter with a fake clock.
+		const burst = 2*maxCount + 1
 
-		var lastErr error
 		var lastResp *common.NormalizedResponse
+		var rateLimitErr error
+		rateLimited := 0
 
-		for i := 0; i < 5; i++ {
+		start := time.Now()
+		for i := 0; i < burst; i++ {
 			fakeReq := common.NewNormalizedRequest([]byte(`{"method": "eth_chainId","params":[]}`))
-			lastResp, lastErr = prj.Forward(ctx, "evm:123", fakeReq)
+			var err error
+			lastResp, err = prj.Forward(ctx, "evm:123", fakeReq)
+			var e *common.ErrProjectRateLimitRuleExceeded
+			if err != nil && errors.As(err, &e) {
+				rateLimited++
+				rateLimitErr = err
+			}
+		}
+		elapsed := time.Since(start)
+
+		if elapsed >= time.Minute {
+			t.Fatalf("burst of %d requests took %v, which can span more than one rate limit window", burst, elapsed)
+		}
+		if rateLimited == 0 {
+			t.Errorf("Expected at least one %v across %d requests, got none", "ErrProjectRateLimitRuleExceeded", burst)
 		}
 
-		var e *common.ErrProjectRateLimitRuleExceeded
-		if lastErr == nil || !errors.As(lastErr, &e) {
-			t.Errorf("Expected %v, got %v", "ErrProjectRateLimitRuleExceeded", lastErr)
-		}
-
-		log.Logger.Info().Msgf("Last Resp: %+v", lastResp)
+		log.Logger.Info().Msgf("Rate limited %d of %d requests, last error: %v, last resp: %+v", rateLimited, burst, rateLimitErr, lastResp)
 	})
 }
 func TestProject_TimeoutScenarios(t *testing.T) {
@@ -214,8 +237,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		// Mock an upstream request that will definitely exceed 50 ms.
 		gock.New("http://rpc1.localhost").
@@ -323,8 +345,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		// Mock a delay that exceeds the 50ms network timeout
 		gock.New("http://rpc2.localhost").
@@ -446,8 +467,7 @@ func TestProject_LazyLoadNetworkDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create ProjectsRegistry: %v", err)
 		}
-		reg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = reg.BootstrapAndWait(ctx)
 
 		// Get the project. Next, we'll forward a request to "evm:9999".
 		prj, err := reg.GetProject("test_lazy_load")
@@ -563,8 +583,7 @@ func TestProject_NetworkAlias(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		prjReg.Bootstrap(ctx)
-		time.Sleep(100 * time.Millisecond)
+		_ = prjReg.BootstrapAndWait(ctx)
 
 		prj, err := prjReg.GetProject("prjA")
 		if err != nil {

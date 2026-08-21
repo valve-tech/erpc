@@ -93,6 +93,8 @@ func TestGrpcBdsClient_HardTimeoutFreesGoroutineWithinCap(t *testing.T) {
 
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
+	// Join the pool maintainer before the test returns; see newTestClient.
+	t.Cleanup(client.(*GenericGrpcBdsClient).pool.Shutdown)
 
 	// Use a tight caller-supplied deadline so the test runs fast — the
 	// bounded-wait kicks in at min(caller-deadline, bdsHardCallTimeout),
@@ -154,6 +156,7 @@ func TestGrpcBdsClient_WatchdogReplacesWedgedConn(t *testing.T) {
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
+	t.Cleanup(gen.pool.Shutdown)
 
 	// Pin to a single pool slot for determinism (single-threaded mutation).
 	gen.pool.conns = gen.pool.conns[:1]
@@ -197,6 +200,7 @@ func TestGrpcBdsClient_WatchdogIgnoresCallerDeadline(t *testing.T) {
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
+	t.Cleanup(gen.pool.Shutdown)
 	gen.pool.conns = gen.pool.conns[:1]
 	originalConn := gen.pool.Pick().conn
 
@@ -241,6 +245,7 @@ func TestGrpcBdsClient_WatchdogIgnoresCallerDynamicTimeoutCause(t *testing.T) {
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
+	t.Cleanup(gen.pool.Shutdown)
 	gen.pool.conns = gen.pool.conns[:1]
 	originalConn := gen.pool.Pick().conn
 

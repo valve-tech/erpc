@@ -1,6 +1,7 @@
 package policy_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -91,7 +92,7 @@ func TestEngine_OverrideOrderForTest(t *testing.T) {
 
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: common.Duration(0), // frozen: only manual ticks
-		EvalTimeout:  common.Duration(10 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 	}
 	require.NoError(t, cfg.SetDefaults())
 
@@ -141,7 +142,7 @@ func TestEngine_SweepIdleSlots(t *testing.T) {
 		// (it's separate from the ticker), so the wildcard slot's
 		// cache is populated for the GetOrdered fallback to hit.
 		EvalInterval:         common.Duration(0),
-		EvalTimeout:          common.Duration(500 * time.Millisecond),
+		EvalTimeout:          testEvalTimeout,
 		EvalScope:            common.EvalScopeNetworkMethod, // lazy per-method slots
 		EvalFunc:             `(ups, _ctx) => ups`,          // trivial pass-through
 		DisableTickerForTest: true,
@@ -198,4 +199,67 @@ func TestEngine_SweepIdleSlots(t *testing.T) {
 	// touch it — the wildcard cache should still hold both upstreams.
 	require.Equal(t, 2, wildcardCacheLen,
 		"wildcard cache should still hold both upstreams after the sweep (got %d)", wildcardCacheLen)
+}
+
+// registerAndCaptureLogs registers one network on `evalFunc` with the
+// given `failover.onDefaultsExhausted` state and returns everything the
+// engine logged while doing it.
+func registerAndCaptureLogs(t *testing.T, evalFunc string, failoverOn bool) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	tracker := health.NewTracker(&logger, "p1", time.Minute)
+
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout}
+	if evalFunc != "" {
+		cfg.EvalFunc = evalFunc
+	}
+	require.NoError(t, cfg.SetDefaults())
+	cfg.FailoverOnDefaultsExhausted = failoverOn
+
+	engine := policy.NewEngine(ctx, &logger, "p1", tracker, nil, nil)
+	defer engine.Stop()
+	ups := []common.Upstream{&fakeUpstream{id: "rpc1", tier: "main"}}
+	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
+	return buf.String()
+}
+
+// TestEngine_WarnsWhenCustomPolicyIgnoresFailover — a custom evalFunc
+// that never reads `ctx.failoverOnDefaultsExhausted` silently ignores the
+// operator's `failover.onDefaultsExhausted`. The engine must say so; a
+// config key that quietly does nothing is worse than one that does not
+// exist.
+func TestEngine_WarnsWhenCustomPolicyIgnoresFailover(t *testing.T) {
+	logs := registerAndCaptureLogs(t, "(ups, _ctx) => ups", true)
+	require.Contains(t, logs, "failoverOnDefaultsExhausted",
+		"the engine must warn that the custom policy ignores the failover key")
+}
+
+// TestEngine_NoFailoverWarningWhenPolicyReadsIt — a custom evalFunc that
+// DOES read the ctx field handles the key itself, so there is nothing to
+// warn about.
+func TestEngine_NoFailoverWarningWhenPolicyReadsIt(t *testing.T) {
+	logs := registerAndCaptureLogs(t,
+		"(ups, ctx) => ctx.failoverOnDefaultsExhausted ? ups : ups.byTag('!tier:fallback')", true)
+	require.NotContains(t, logs, "will not escalate",
+		"a policy that reads the ctx field must not be warned about")
+}
+
+// TestEngine_NoFailoverWarningForDefaultPolicy — the bundled default
+// policy reads the ctx field, so the operator gets no warning.
+func TestEngine_NoFailoverWarningForDefaultPolicy(t *testing.T) {
+	logs := registerAndCaptureLogs(t, "", true)
+	require.NotContains(t, logs, "will not escalate",
+		"the bundled default policy handles the key; no warning is due")
+}
+
+// TestEngine_NoFailoverWarningWhenKeyIsOff — no warning when the
+// operator never asked for the escape.
+func TestEngine_NoFailoverWarningWhenKeyIsOff(t *testing.T) {
+	logs := registerAndCaptureLogs(t, "(ups, _ctx) => ups", false)
+	require.NotContains(t, logs, "will not escalate",
+		"nothing to warn about when failover.onDefaultsExhausted is unset")
 }

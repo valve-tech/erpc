@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/blockchain-data-standards/manifesto/evm"
+	"github.com/blockchain-data-standards/manifesto/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,30 @@ type happyRPCServer struct {
 	// recent call. Used by header-propagation tests.
 	mu           sync.Mutex
 	lastMetadata metadata.MD
+
+	// methods records every gRPC method name the server served, in order.
+	// The dispatch tests assert on it: a SendRequest arm wired to the wrong
+	// handler reaches the server as a different method name.
+	methods []string
+
+	// lastChainIdParam is the optional chainId assertion carried by the last
+	// GetTransactionByHash request. nil means the client asserted nothing.
+	lastChainIdParam *uint64
+}
+
+// record notes that gRPC method `name` was served. Safe for concurrent calls.
+func (s *happyRPCServer) record(name string) {
+	s.calls.Add(1)
+	s.mu.Lock()
+	s.methods = append(s.methods, name)
+	s.mu.Unlock()
+}
+
+// methodsSeen returns a copy of the served-method log.
+func (s *happyRPCServer) methodsSeen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.methods...)
 }
 
 func (s *happyRPCServer) recordMetadata(ctx context.Context) {
@@ -59,13 +84,13 @@ func (s *happyRPCServer) snapshotMetadata() metadata.MD {
 }
 
 func (s *happyRPCServer) ChainId(ctx context.Context, _ *evm.ChainIdRequest) (*evm.ChainIdResponse, error) {
-	s.calls.Add(1)
+	s.record("ChainId")
 	s.recordMetadata(ctx)
 	return &evm.ChainIdResponse{ChainId: s.chainID}, nil
 }
 
 func (s *happyRPCServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByNumberRequest) (*evm.GetBlockResponse, error) {
-	s.calls.Add(1)
+	s.record("GetBlockByNumber")
 	s.recordMetadata(ctx)
 	return &evm.GetBlockResponse{
 		Block: &evm.BlockHeader{
@@ -75,6 +100,12 @@ func (s *happyRPCServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlock
 	}, nil
 }
 
+// startHappyServer starts a BDS server that answers EVERY method the client's
+// dispatch switch can reach: the seven unary evm.RPCQueryService RPCs, the five
+// streaming evm.QueryService RPCs, and svm.RPCQueryService.GetBlock. Registering
+// the whole surface is what lets a test drive SendRequest end to end for any
+// method instead of calling a handler directly — a mis-wired dispatch arm then
+// shows up as the WRONG gRPC method arriving at the server.
 func startHappyServer(t *testing.T, chainID, blockNumber uint64) (string, *happyRPCServer, func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -82,6 +113,8 @@ func startHappyServer(t *testing.T, chainID, blockNumber uint64) (string, *happy
 	srv := grpc.NewServer()
 	happy := &happyRPCServer{chainID: chainID, blockNumber: blockNumber}
 	evm.RegisterRPCQueryServiceServer(srv, happy)
+	evm.RegisterQueryServiceServer(srv, &happyQueryServer{seen: happy})
+	svm.RegisterRPCQueryServiceServer(srv, &happySvmServer{seen: happy})
 	go func() {
 		_ = srv.Serve(lis)
 	}()
@@ -123,7 +156,13 @@ func newTestClient(t *testing.T, addr string) *GenericGrpcBdsClient {
 	t.Cleanup(cancel)
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
-	return client.(*GenericGrpcBdsClient)
+	c := client.(*GenericGrpcBdsClient)
+	// Join the pool's maintainer before the test returns. Cancelling appCtx
+	// alone only schedules the shutdown on another goroutine, which leaves a
+	// maintainer running into the NEXT test — and the maintainer reads the
+	// package-level timer vars that the maintain tests compress.
+	t.Cleanup(c.pool.Shutdown)
+	return c
 }
 
 // ───────────────────────────── Happy paths ─────────────────────────────

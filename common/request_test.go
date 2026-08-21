@@ -205,9 +205,19 @@ func TestUpstreamSelection_MultipleExhaustionsNoWastedAttempts(t *testing.T) {
 // which returned empty results can be re-selected on a subsequent retry round.
 // BUG (before fix): EmptyResponses gate in NextUpstream permanently blocks
 // upstreams that returned empty, preventing useful retries.
+//
+// Uses eth_getBlockByNumber, a point-lookup method where an empty/null result
+// means "not found yet, try elsewhere" — NOT eth_call. Since the
+// accepted-empty fix in MarkUpstreamCompleted (request.go), an emptyish
+// eth_call result is treated as the final answer and correctly stays
+// consumed instead of rotating; that behaviour is covered by
+// TestMarkUpstreamCompleted_AcceptedEmptyDoesNotFreeUpstream in
+// request_empty_rotation_test.go. This test still needs a method whose empty
+// result genuinely signals missing data so the reselection mechanism itself
+// can be exercised.
 func TestUpstreamSelection_EmptyResponses_DontBlockReselection(t *testing.T) {
 	ctx := context.Background()
-	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber"}`))
 
 	up1 := newMockUpstream("rpc1")
 	up2 := newMockUpstream("rpc2")

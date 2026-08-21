@@ -179,7 +179,7 @@ func TestProbeVerdictsEdge_EmptyNarrowSlotDoesNotFallBackToWildcard(t *testing.T
 	})
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: 0,
-		EvalTimeout:  common.Duration(100 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 		EvalScope:    common.EvalScopeNetworkMethod,
 		EvalFunc:     eval,
 	}
