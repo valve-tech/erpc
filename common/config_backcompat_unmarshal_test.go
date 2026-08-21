@@ -272,47 +272,59 @@ endpiont: http://a.example
 	require.Contains(t, err.Error(), "endpiont")
 }
 
-// KNOWN DEFECT, pinned so a fix shows up as a test change.
+// The legacy single-object `failsafe:` must not cost the operator any other
+// key. This replaces TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys,
+// which pinned the defect.
 //
-// UpstreamConfig.UnmarshalYAML falls back to a hand-listed `oldShadow` struct
-// when the canonical decode fails — which is exactly what a legacy single-object
-// `failsafe:` causes. That list (common/config.go:1123) has not grown with the
-// struct, so `rateLimitCountMode` and `creditUnits` are not copied across
-// (common/config.go:1150). The operator writes credit-based accounting, gets
-// flat per-request counting, and sees no warning; their budget then drains at
-// the wrong rate. Any upstream key added after the fallback was written has the
-// same fate.
-func TestUpstreamConfig_UnmarshalYAML_LegacyFailsafeObjectDropsNewerKeys(t *testing.T) {
+// UpstreamConfig.UnmarshalYAML used to fall back to a hand-listed `oldShadow`
+// struct whenever the canonical decode failed, which a legacy object-form
+// `failsafe:` always caused. The list never grew with the struct. It dropped
+// rateLimitCountMode and creditUnits when the defect was recorded, and by the
+// time it was fixed it had drifted further and dropped chain and
+// chainProbeInterval too. An operator writing credit-based accounting got flat
+// per-request counting, no warning, and a budget draining at the wrong rate.
+//
+// The assertion is a PROPERTY, not a field list: the two forms must agree on
+// everything except failsafe itself. Naming fields here would rot the same way
+// oldShadow did. It cannot rot now — FailsafeConfigList takes both shapes, so
+// there is only one decode and no parallel struct left to drift.
+func TestUpstreamConfig_UnmarshalYAML_TheLegacyFailsafeObjectKeepsEveryOtherKey(t *testing.T) {
+	// Every key the drifting shadow dropped, plus the ones it did copy.
 	const body = `
 id: u1
 endpoint: http://a.example
 rateLimitCountMode: credit
 creditUnits:
   eth_call: 5
+chain: mainnet
+chainProbeInterval: 30s
+ignoreMethods:
+  - eth_coinbase
 `
-	// Control: with the current list-form failsafe both keys arrive.
-	var ok UpstreamConfig
+	var listForm UpstreamConfig
 	require.NoError(t, yaml.Unmarshal([]byte(body+`
 failsafe:
   - matchMethod: "*"
     retry:
       maxAttempts: 3
-`), &ok))
-	require.Equal(t, RateLimitCountModeCredit, ok.RateLimitCountMode)
-	require.Equal(t, map[string]int64{"eth_call": 5}, ok.CreditUnits)
+`), &listForm))
 
-	// The same file with the legacy object-form failsafe loses both.
-	var lost UpstreamConfig
+	var objectForm UpstreamConfig
 	require.NoError(t, yaml.Unmarshal([]byte(body+`
 failsafe:
   retry:
     maxAttempts: 3
-`), &lost))
-	require.Len(t, lost.Failsafe, 1, "the legacy failsafe itself does arrive")
-	require.Equal(t, RateLimitCountMode(""), lost.RateLimitCountMode,
-		"defect: credit accounting is silently dropped")
-	require.Nil(t, lost.CreditUnits,
-		"defect: the per-method credit table is silently dropped")
+`), &objectForm))
+
+	require.Len(t, objectForm.Failsafe, 1, "the legacy failsafe itself still arrives")
+	require.Equal(t, "*", objectForm.Failsafe[0].MatchMethod,
+		"a single policy carried no matchMethod and applied to everything")
+
+	// Compare everything else. The failsafe field is the one the two forms are
+	// allowed to write differently, so it is the one thing excluded.
+	listForm.Failsafe, objectForm.Failsafe = nil, nil
+	require.Equal(t, listForm, objectForm,
+		"the legacy failsafe shape must cost the operator no other key")
 }
 
 // ---------------------------------------------------------------------------
