@@ -397,6 +397,28 @@ projects:
 	}
 }
 
+// requireRecentWindow asserts that an upstream's recent-block window is the
+// given number of blocks behind the head, whichever field carries it. A config
+// may state it as the legacy `maxAvailableRecentBlocks` or as an explicit
+// `blockAvailability` window; SetDefaults migrates the first into the second.
+func requireRecentWindow(t *testing.T, u *UpstreamConfig, blocks int64) {
+	t.Helper()
+	require.NotNil(t, u.Evm, "upstream %q has no evm block", u.Id)
+	if u.Evm.MaxAvailableRecentBlocks == blocks {
+		return
+	}
+	require.NotNil(t, u.Evm.BlockAvailability,
+		"upstream %q carries the window in neither field", u.Id)
+	require.NotNil(t, u.Evm.BlockAvailability.Lower,
+		"upstream %q has a window with no lower bound", u.Id)
+	// NotNil before the dereference: a nil here is a test CRASH, not a failure,
+	// and a crash reports nothing about the other assertions in this file.
+	require.NotNil(t, u.Evm.BlockAvailability.Lower.LatestBlockMinus,
+		"upstream %q has a lower bound that is not a latest-minus window", u.Id)
+	require.Equal(t, blocks, *u.Evm.BlockAvailability.Lower.LatestBlockMinus,
+		"upstream %q must inherit the %d-block window", u.Id, blocks)
+}
+
 func TestProjectSetDefaults_UpstreamDefaultsReachEveryUpstream(t *testing.T) {
 	// upstreamDefaults is a template an operator writes once. Every field that
 	// fails to reach a bare upstream is a policy they believe is running and
@@ -435,13 +457,19 @@ projects:
 	require.Len(t, bare.Failsafe, 1)
 	require.Equal(t, 4, bare.Failsafe[0].Retry.MaxAttempts)
 	require.Equal(t, Duration(7*time.Second), bare.Evm.StatePollerInterval)
-	require.Equal(t, int64(900), bare.Evm.MaxAvailableRecentBlocks)
+	// The 900-block window reaches the upstream through BlockAvailability, not
+	// through MaxAvailableRecentBlocks. Upstream migrates the legacy field into
+	// the window and then deliberately stops carrying both, because the two are
+	// enforced as independent lower bounds and keeping both would narrow the
+	// configured window to whichever is smaller (common/defaults.go,
+	// maxRecentBlocksFor). This test is about defaults REACHING an upstream, so
+	// it asserts the bound, not the field that used to hold it.
+	requireRecentWindow(t, bare, 900)
 
 	require.Equal(t, "private", own.RateLimitBudget, "an upstream's own value must win")
 	require.Equal(t, []string{"tier:fallback"}, own.Tags, "tags are inherited all-or-nothing")
 	require.Equal(t, Duration(11*time.Second), own.Evm.StatePollerInterval)
-	require.Equal(t, int64(900), own.Evm.MaxAvailableRecentBlocks,
-		"a partial evm block still fills its empty fields from the defaults")
+	requireRecentWindow(t, own, 900)
 
 	// A budget implies auto-tuning, which is what actually spends it.
 	require.NotNil(t, bare.RateLimitAutoTune)
