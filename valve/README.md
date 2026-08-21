@@ -7,12 +7,37 @@ Next.js documentation site, and it changes on most merges.
 
 | Document | What it is |
 |---|---|
-| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 35 bugs in upstream-inherited code, 1 in the fork's own code, plus the fixes the fork already carries that upstream still needs. Every entry cites `file:line` and was verified in source. |
+| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 167 entries: 84 fixed in the fork, 79 open, 4 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
 | [polyglot-feasibility.md](polyglot-feasibility.md) | Can the fork serve non-EVM chains from configuration rather than new Go code? Verdict and evidence. |
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |
 | [merge-review.md](merge-review.md) | Review of that merge. Carries a correction: the first pass recorded the `erpc` package as green when the run had been truncated by Go's default 600s timeout. |
 | [fallback-escape-decision.md](fallback-escape-decision.md) | Why the per-request fallback escape belongs in the selection policy, not in Go. |
 | [polyglot-live-run.md](polyglot-live-run.md) | One binary serving EVM, SVM and BTC at once against live public endpoints. Tests the "a chain is configuration, not Go" claim end to end. Config: [polyglot-live-pool.yaml](polyglot-live-pool.yaml). |
+
+## Checking the log
+
+Two scripts. Both take the log's path and default to it.
+
+`check-bug-log.sh` runs on every commit that touches the log. It refuses a
+duplicate entry id, an entry whose status line count is not exactly one, a
+status spelled outside the key's four words, and an entry filed under a section
+header that claims a different id range. A merge that keeps both sides of a
+hunk is what it catches: two status paragraphs under one heading, disagreeing.
+
+`check-test-citations.sh` is a report you run by hand, and the right time is
+**after a rebase** — that is when upstream renames a test and a citation rots in
+silence. It lists every test the log names that the tree does not have, with the
+line each name sits on:
+
+```sh
+valve/check-test-citations.sh
+```
+
+It is deliberately NOT a commit hook. Its first run reported six names, and all
+six were correct prose — each sat in a sentence saying the test was deleted or
+replaced. A hook that fails six times on the day it lands gets `--no-verify`,
+and the bypass takes the conflict-marker check with it. Read the six lines, and
+add a hook only if a citation is ever found genuinely rotted.
 
 ## Running the tests
 
