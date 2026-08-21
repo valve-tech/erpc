@@ -5,6 +5,11 @@ open, 4 not a bug.
 
 ## Progress since this triage was written
 
+**2026-08-21, later.** The closures are applied: 14 entries moved to `not a
+bug`, and 4 of the proposed 18 were rejected on review because they had live
+effects the one-line summaries did not show. The log now reads **86 fixed, 63
+open, 18 not a bug**.
+
 **2026-08-21.** Entries **53** and **64** are fixed, and they went together:
 both were the same hand-listed legacy struct, and the fix deleted all three
 copies rather than completing them. That drops the open count to 77 and empties
@@ -43,8 +48,8 @@ result. Treat a bucket as a proposal with a stated reason, not as a verdict.
 | Bucket | Count | What to do |
 |---|---|---|
 | **Edge** | 10 | One defect, ten entries. One patch at the config edge. |
-| **Fix** | 43 | Carry a fork patch. Ranked below. |
-| **Close** | 18 | Dead or unreachable. Change no code. |
+| **Fix** | 47 | Carry a fork patch. Ranked below. |
+| **Close** | 14 | Dead or unreachable. Change no code. |
 | **Document** | 4 | True, and a patch would make it worse. |
 | **Watch** | 3 | Real, not actionable yet. |
 | **Duplicate** | 1 | Entry 71 restates 24. |
@@ -93,24 +98,43 @@ a test that **asserts today's broken behaviour**; those tests change with the
 fix, and the change is the point. Entry 18 records that the current behaviour
 **may be intended** — settle that before treating it as a defect.
 
-## Close these 18: dead code, no behaviour
+## Closed: 14 entries of dead code — applied 2026-08-21
 
-**8, 12, 37, 40, 51, 54, 55, 60, 68, 75, 101, 106, 107, 114, 116, 137, 162, 164.**
+**12, 40, 51, 55, 60, 68, 75, 101, 106, 107, 116, 137, 162, 164** now carry
+`**Status:** not a bug`, which takes the open count from 77 to 63.
 
 Every one is an unreachable branch, an uncalled function, work a later line
 overwrites, or an argument nothing reads. Their own summaries say so: "Severity:
-none today. Unexercised machinery." Entry 137 is already recorded as **not a
-live defect**, and 164 as **moot in the fork**.
+none today. Unexercised machinery."
 
-They are worth keeping as knowledge — each reads as an active guard, and the
-next reader deserves to know it is not. They are not worth a patch. The cost of
-deleting dead code in a fork is a permanent conflict in that file; the benefit
-is zero behaviour change.
+They stay in the log as knowledge — each still reads as an active guard, and the
+next reader deserves to know it is not one. They are not worth a patch. Deleting
+dead code in a fork costs a permanent conflict in that file and changes no
+behaviour.
 
-**Recommendation, not yet applied:** move these 18 from `open` to `not a bug`,
-which takes the open count from 79 to 61. This is left undone deliberately. It
-rewrites the headline number of a document other people read, so it should be
-a decision, not a side effect of a triage.
+### Four failed review, and stayed open
+
+This bucket was proposed as **18**. Reading each entry before flipping it —
+rather than trusting the one-line summary the bucket was built from — rejected
+four. That is a 22% error rate in summary-based triage, and the reason this
+document said to treat a bucket as a proposal.
+
+- **8** — not dead. `AnalyseConfig` has no caller in this repo but it is
+  **exported**, and the entry carries a pinned test. A healthy upstream on the
+  correct chain fails validation with `invalid hex string: 123`. The same file
+  already gets it right on its other path, so the fix is one line. Moved to
+  rank 3.
+- **37** — the code runs. It invents an id like `-8` from a process-global
+  counter, and that id reaches a config dump. Cosmetic, not absent. Moved to
+  rank 5.
+- **54** — the BRANCHES are dead; the effect is not. QuickNode traffic is filed
+  under `nodejs` and Edge under `chrome`, so a per-client breakdown names the
+  wrong client. Wrong data, with a clear right answer: order the specific tests
+  before the general ones. Moved to rank 5.
+- **114** — its own status corrects its title. Two of three items are dead
+  weight; the first is not. `EvmGetChainId` formats a uint64 as decimal, so a
+  node reporting a chain id at or above 2^63 makes `strconv.ParseInt` fail with
+  a range error. The entry calls that branch "rare, not dead". Moved to rank 3.
 
 ## Document these 4, do not patch them
 
@@ -156,8 +180,8 @@ its error before it uses the client. Entry 26 is a real send-on-closed panic
 that **cannot be pinned by a test** — a panic in a background goroutine kills
 the test binary. Entry 109's second half is still open.
 
-**3 — a control is silently not applied (7).**
-31, 44, 49, 59, 73, 97, 128.
+**3 — a control is silently not applied, or gives a wrong verdict (9).**
+8, 31, 44, 49, 59, 73, 97, 114, 128.
 The gRPC surface ignores every `queryShim` limit, so a cost control covers half
 the traffic (73). The WebSocket read deadline is never armed, so half-dead
 clients are never reaped (31).
@@ -168,8 +192,8 @@ These carry **no rebase debt at all** — the fork owns the file. Entry 6 is
 rising in severity because the fork's own polyglot work surfaced it. Entry 92
 is fork code by its own status line. Take these whenever convenient.
 
-**5 — diagnostics, admin surfaces and small defects (16).**
-5, 11, 15, 16, 17, 21, 34, 52, 61, 65, 90, 113, 143, 154, 161, 166.
+**5 — diagnostics, admin surfaces and small defects (18).**
+5, 11, 15, 16, 17, 21, 34, 37, 52, 54, 61, 65, 90, 113, 143, 154, 161, 166.
 Real, contained, individually small. Entry 34 is five defects in one entry.
 Entry 52's first bullet is already fixed and only its second is open. Entry 143
 is low alone and high next to 99.
@@ -179,6 +203,5 @@ is low alone and high next to 99.
 1. **The config edge (10 entries, one patch).** Best value, lowest carry cost.
 2. **The fork's own code (4 entries).** No rebase debt.
 3. **Rank 1 and rank 2 (16 entries).** Wrong answers and crashes.
-4. **Decide on the 18 closures.** One decision, and the open list drops by a
-   quarter.
+4. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.
 5. Ranks 3 to 5 as capacity allows.
