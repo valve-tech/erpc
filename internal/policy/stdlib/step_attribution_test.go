@@ -43,7 +43,7 @@ func TestStepAttribution_ByTag_DropsAttributeToByTag(t *testing.T) {
 		{id: "m1", vendor: "v1", tags: []string{"tier:main"}},
 		{id: "f1", vendor: "v2", tags: []string{"tier:fallback"}},
 	})
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -68,7 +68,7 @@ func TestStepAttribution_ExcludeIf_DropsAttributeToExcludeIf(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("erroring", "clean")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -109,7 +109,7 @@ func TestStepAttribution_Take_DropsTailToTake(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("u1", "u2", "u3", "u4")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -157,7 +157,7 @@ func TestStepAttribution_FirstStepWins(t *testing.T) {
 		{id: "f1", vendor: "v2", tags: []string{"tier:fallback"}}, // dropped by byTag
 		{id: "m_bad", vendor: "v3", tags: []string{"tier:main"}},  // erroring, dropped by excludeIf
 	})
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -201,7 +201,7 @@ func TestStepAttribution_ReorderStepsDontAttribute(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("a", "b", "c")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -232,7 +232,7 @@ func TestStepAttribution_RawFilterFallsBackToEval(t *testing.T) {
 	defer engine.Stop()
 
 	ups := mkUps("survivor", "doomed")
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return ups }, cfg))
 
@@ -268,7 +268,7 @@ func TestStepAttribution_RejectionMetricEmitsPrimitive(t *testing.T) {
 		{id: "f-drop", vendor: "v2", tags: []string{"tier:fallback"}}, // byTag
 		{id: "m-bad", vendor: "v3", tags: []string{"tier:main"}},      // excludeIf
 	})
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:rej", "rej-alias", func() []common.Upstream { return ups }, cfg))
 

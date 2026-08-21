@@ -40,7 +40,7 @@ func TestSelectionPolicy_HeadLagExclusion_AllScopes(t *testing.T) {
 			ups := mkUps("rpc1", "rpc2")
 			cfg := &common.SelectionPolicyConfig{
 				EvalInterval: 0,
-				EvalTimeout:  common.Duration(50 * time.Millisecond),
+				EvalTimeout:  testEvalTimeout,
 				EvalFunc:     eval,
 				EvalScope:    sc.scope,
 			}

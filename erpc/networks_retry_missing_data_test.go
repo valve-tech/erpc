@@ -2797,8 +2797,7 @@ func setupTestNetworkWithMethodIgnore(
 		nil,
 	)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 	require.NoError(t, err)
@@ -2877,8 +2876,7 @@ func setupTestNetworkWithCustomUpstreams(
 		nil,
 	)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 	require.NoError(t, err)

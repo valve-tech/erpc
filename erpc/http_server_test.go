@@ -112,7 +112,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 		erpcInstance.Bootstrap(ctx)
 		require.NoError(t, err)
 
-		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 		require.NoError(t, err)
 
 		// Start the server on a random port
@@ -254,7 +254,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 		erpcInstance.Bootstrap(ctx)
 		require.NoError(t, err)
 
-		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 		require.NoError(t, err)
 
 		// Start the server on a random port
@@ -400,7 +400,7 @@ func TestHttpServer_RaceTimeouts(t *testing.T) {
 		erpcInstance.Bootstrap(ctx)
 		require.NoError(t, err)
 
-		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 		require.NoError(t, err)
 
 		// Start the server on a random port
@@ -3944,10 +3944,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Config:            &common.ProjectConfig{Id: "test", Upstreams: []*common.UpstreamConfig{up1}},
 					upstreamsRegistry: upstream.NewUpstreamsRegistry(ctx, logger, "", []*common.UpstreamConfig{up1}, ssr, nil, vr, pr, nil, mtk, nil),
 				}
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				up := pp.upstreamsRegistry.GetAllUpstreams()[0]
 				metrics := mtk.GetUpstreamMethodMetrics(up, "*", common.DataFinalityStateAll)
@@ -3983,10 +3981,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Config:            &common.ProjectConfig{Id: "test", Upstreams: []*common.UpstreamConfig{up1}},
 					upstreamsRegistry: upstream.NewUpstreamsRegistry(ctx, logger, "", []*common.UpstreamConfig{up1}, ssr, nil, vr, pr, nil, mtk, nil),
 				}
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				up := pp.upstreamsRegistry.GetAllUpstreams()[0]
 				metrics := mtk.GetUpstreamMethodMetrics(up, "*", common.DataFinalityStateAll)
@@ -4031,10 +4027,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Config:            &common.ProjectConfig{Id: "test", Upstreams: []*common.UpstreamConfig{up1, upBad}},
 					upstreamsRegistry: upstream.NewUpstreamsRegistry(ctx, logger, "", []*common.UpstreamConfig{up1, upBad}, ssr, nil, vr, pr, nil, mtk, nil),
 				}
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				ups1 := pp.upstreamsRegistry.GetAllUpstreams()[0]
 				metrics := mtk.GetUpstreamMethodMetrics(ups1, "*", common.DataFinalityStateAll)
@@ -4089,10 +4083,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Reply(200).
 					BodyString(`{"jsonrpc":"2.0","id":1,"result":"0x7b"}`)
 
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				gock.New("http://rpc1.localhost").
 					Post("/").
@@ -4273,10 +4265,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Config:            &common.ProjectConfig{Id: "test", Upstreams: []*common.UpstreamConfig{up1}},
 					upstreamsRegistry: upstream.NewUpstreamsRegistry(ctx, logger, "", []*common.UpstreamConfig{up1}, ssr, nil, vr, pr, nil, mtk, nil),
 				}
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				return &HttpServer{
 					logger: logger,
@@ -4377,10 +4367,8 @@ func TestHttpServer_HandleHealthCheck(t *testing.T) {
 					Config:            &common.ProjectConfig{Id: "test", Upstreams: []*common.UpstreamConfig{up1}},
 					upstreamsRegistry: upstream.NewUpstreamsRegistry(ctx, logger, "", []*common.UpstreamConfig{up1}, ssr, nil, vr, pr, nil, mtk, nil),
 				}
-				pp.upstreamsRegistry.Bootstrap(ctx)
+				_ = pp.upstreamsRegistry.BootstrapAndWait(ctx)
 				pp.networksRegistry = NewNetworksRegistry(pp, ctx, pp.upstreamsRegistry, mtk, nil, nil, nil, nil, logger)
-
-				time.Sleep(1000 * time.Millisecond)
 
 				// Cordon the upstream
 				up := pp.upstreamsRegistry.GetAllUpstreams()[0]
@@ -4812,7 +4800,15 @@ func TestHttpServer_ProviderBasedUpstreams(t *testing.T) {
 		assert.Equal(t, http.StatusOK, statusCode)
 		assert.Contains(t, body, "0x123456")
 
-		time.Sleep((3 * time.Second) + (200 * time.Millisecond))
+		// No wait between the two requests. The FIRST request is the one that
+		// blocks on the initializer's retry — it returns 200 only once the
+		// provider task has re-attempted and added the upstream, and that is
+		// what this test is named for. The old 3.2s nap was sized as "the 3s
+		// retry backoff plus 200ms", 6.7% slack for a retry, an HTTP
+		// round-trip and a registration; it bought nothing the first request
+		// had not already proved. Measured: the subtest runs 4.61s with the
+		// nap deleted and passes 3/3, and still fails when the provider's
+		// eth_chainId never recovers.
 
 		statusCode, _, body = sendRequest(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"fromBlock":"0x0","toBlock":"0x0"}],"id":1234}`, nil, map[string]string{"chainId": "12340001234"})
 		assert.Equal(t, http.StatusOK, statusCode)
@@ -5243,9 +5239,6 @@ func TestHttpServer_EvmGetLogs(t *testing.T) {
 		sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
 		defer shutdown()
 
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
-
 		statusCode, _, body := sendRequest(fullRangeRequest, nil, nil)
 		assert.Equal(t, http.StatusOK, statusCode)
 
@@ -5379,9 +5372,6 @@ func TestHttpServer_EvmGetLogs(t *testing.T) {
 		sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
 		defer shutdown()
 
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
-
 		// Make the request and verify it fails
 		statusCode, _, body := sendRequest(fullRangeRequest, nil, nil)
 
@@ -5508,9 +5498,6 @@ func TestHttpServer_EvmGetLogs(t *testing.T) {
 		sendRequest, _, _, shutdown, _ := createServerTestFixtures(cfg, t)
 		defer shutdown()
 
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
-
 		// Make the request and verify it fails
 		statusCode, _, body := sendRequest(fullRangeRequest, nil, nil)
 		assert.Equal(t, http.StatusOK, statusCode)
@@ -5598,9 +5585,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
 
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
-
 		headers := map[string]string{
 			"X-ERPC-Skip-Interpolation": "true",
 		}
@@ -5676,9 +5660,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
 
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 
@@ -5765,9 +5746,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
 
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 
@@ -5862,9 +5840,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
 
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 
@@ -6254,9 +6229,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
 
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
-
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 
 		assert.Equal(t, http.StatusOK, statusCode)
@@ -6446,9 +6418,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
 
-		// Give state poller time to initialize and update shared state
-		time.Sleep(500 * time.Millisecond)
-
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 
 		assert.Equal(t, http.StatusOK, statusCode)
@@ -6518,9 +6487,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
 
 		statusCode, _, body := sendRequest(requestBody, nil, nil)
 		t.Logf("Response body: %s", body)
@@ -6592,9 +6558,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
 
 		statusCode, _, respBody := sendRequest(requestBody, nil, nil)
 		assert.Equal(t, 200, statusCode, "should return success")
@@ -6684,9 +6647,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
 
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
-
 		statusCode, _, respBody := sendRequest(userRequestBody, nil, nil)
 		assert.Equal(t, http.StatusOK, statusCode)
 
@@ -6745,9 +6705,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize
-		time.Sleep(500 * time.Millisecond)
 
 		// We'll test "earliest" -> returns 0x0
 		userRequestEarliest := `{
@@ -6969,9 +6926,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
 
-		// Give state poller time to initialize and populate highest finalized
-		time.Sleep(500 * time.Millisecond)
-
 		// eth_getBlockByNumber does NOT interpolate "finalized" (TranslateFinalizedTag=false by default),
 		// so the request goes to upstream with "finalized" directly.
 		// The state poller mock for rpc1 returns 0x11117777 for finalized, and rpc2 returns 0x22227777.
@@ -7190,9 +7144,6 @@ func TestHttpServer_EvmGetBlockByNumber(t *testing.T) {
 		prj, err := erpcInstance.GetProject("test_project")
 		require.NoError(t, err)
 		policy.OverrideAllForTest(prj.policyEngine)
-
-		// Give state poller time to initialize and learn about finalized blocks
-		time.Sleep(1 * time.Second)
 
 		statusCode, _, respBody := sendRequest(userRequest, nil, nil)
 		assert.Equal(t, http.StatusOK, statusCode, "overall request should be successful")
@@ -7817,10 +7768,13 @@ func createServerTestFixtures(cfg *common.Config, t *testing.T) (
 
 	// Callback now set at construction; do not mutate in tests
 
-	erpcInstance.Bootstrap(ctx)
-	require.NoError(t, err)
+	// BootstrapAndWait, not Bootstrap: every fixture in this file used to
+	// follow the fire-and-forget call with a nap ("give the state poller time
+	// to initialize") and hope registration had finished. This returns once it
+	// has, and the EVM poller's first poll runs inside it.
+	_ = erpcInstance.BootstrapAndWait(ctx)
 
-	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 	require.NoError(t, err)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -7834,7 +7788,10 @@ func createServerTestFixtures(cfg *common.Config, t *testing.T) (
 		}
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	// No wait for the listener. net.Listen above already bound the socket, so
+	// the kernel accepts and queues connections whether or not Serve has been
+	// scheduled yet. The 500ms nap that stood here bought nothing and every
+	// fixture in this file paid it.
 
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
 
@@ -8107,12 +8064,9 @@ func TestHttpServer_Evm_GetLogs_MemoryProfile(t *testing.T) {
 
 	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
 	require.NoError(t, err)
-	erpcInstance.Bootstrap(ctx)
+	_ = erpcInstance.BootstrapAndWait(ctx)
 
-	// Give state poller more time to initialize and update shared state
-	time.Sleep(1 * time.Second)
-
-	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 	require.NoError(t, err)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -8231,7 +8185,7 @@ func TestHttpServer_DrainStampsConnectionClose(t *testing.T) {
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 
-	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+	httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 	require.NoError(t, err)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -8324,7 +8278,7 @@ func TestHttpServer_AdminMethodFilter(t *testing.T) {
 		require.NoError(t, err)
 		erpcInstance.Bootstrap(ctx)
 
-		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+		httpServer, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 		require.NoError(t, err)
 
 		listener, err := net.Listen("tcp", "127.0.0.1:0")

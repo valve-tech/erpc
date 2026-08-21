@@ -766,9 +766,7 @@ func setupTestNetworkWithRetryConfig(t *testing.T, ctx context.Context, directiv
 		nil,
 	)
 
-	upstreamsRegistry.Bootstrap(ctx)
-
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 	require.NoError(t, err)
@@ -842,9 +840,7 @@ func setupTestNetworkWithMultipleFailsafePolicies(t *testing.T, ctx context.Cont
 		nil,
 	)
 
-	upstreamsRegistry.Bootstrap(ctx)
-
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil)
 	require.NoError(t, err)

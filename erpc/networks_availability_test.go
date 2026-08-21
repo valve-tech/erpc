@@ -73,8 +73,7 @@ func TestNetworkAvailability_LowerExactBlock_Skip(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -153,9 +152,6 @@ func TestNetworkAvailability_LowerLatestMinus_Skip(t *testing.T) {
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
 
-	// Wait for state poller to initialize and get latest block
-	time.Sleep(1000 * time.Millisecond)
-
 	// Request far below latest-10 should be skipped; we don't register a method mock
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x2",false]}`))
 	req.SetNetwork(network)
@@ -233,16 +229,13 @@ func TestNetworkAvailability_LowerEarliestPlus_InitAndSkip(t *testing.T) {
 			},
 		})
 
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	// Allow earliest discovery to run
-	time.Sleep(300 * time.Millisecond)
 
 	// Request block 1, but lower is earliest+2 => skip
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
@@ -324,16 +317,13 @@ func TestNetworkAvailability_InvalidRange_FailOpen_AllowsRequest(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	// Allow earliest discovery to run (upper uses earliest)
-	time.Sleep(300 * time.Millisecond)
 
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
 	req.SetNetwork(network)
@@ -402,16 +392,13 @@ func TestNetworkAvailability_Window_ExactLowerUpper(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	// Allow earliest discovery to run
-	time.Sleep(300 * time.Millisecond)
 
 	// Below lower (0x1) -> skip/exhausted
 	reqBelow := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
@@ -504,16 +491,13 @@ func TestNetworkAvailability_EarliestPlus_Freeze_NoAdvance(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	// Allow earliest discovery to run
-	time.Sleep(300 * time.Millisecond)
 
 	// Request block 1 -> below earliest+2 (3) => skipped
 	req0 := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
@@ -594,8 +578,7 @@ func TestNetworkAvailability_EarliestPlus_UpdateRate_Advance(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -604,7 +587,6 @@ func TestNetworkAvailability_EarliestPlus_UpdateRate_Advance(t *testing.T) {
 	network.PinUpstreamOrderForTest()
 
 	// Wait longer than updateRate for scheduler to advance earliest from 0 to 1
-	time.Sleep(500 * time.Millisecond)
 
 	// Block 1 should now be below lower (earliest moved to 1; lower=earliest+2 => 3)
 	req0 := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
@@ -668,8 +650,7 @@ func TestNetworkAvailability_UnsupportedProbe_FailOpen(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -750,16 +731,13 @@ func TestNetworkAvailability_UpperEarliestPlus_Enforced(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
-	// Allow earliest discovery to run
-	time.Sleep(300 * time.Millisecond)
 
 	// Above upper: 0x1 should be skipped
 	req1 := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
@@ -833,8 +811,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideMethod(t *
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -913,8 +890,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideNetwork(t 
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -988,8 +964,7 @@ func TestNetworkAvailability_Enforce_ConfiguredBounds_Override_DefaultFalse(t *t
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -1056,8 +1031,7 @@ func TestNetworkAvailability_Enforce_MergedDefaults_DoNotMaskConfiguredBounds(t 
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Simulate a real config-loaded shape: MethodsConfig.SetDefaults() has merged
 	// DefaultWithBlockCacheMethods into Methods.Definitions, so the entry for
@@ -1139,8 +1113,7 @@ func TestNetworkAvailability_Enforce_NetworkFalse_Disables(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(false)}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
@@ -1201,8 +1174,7 @@ func TestCheckUpstreamBlockAvailability_BlockBeyondLatest_ReturnsRetryableError(
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Enable enforcement
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
@@ -1274,8 +1246,7 @@ func TestCheckUpstreamBlockAvailability_SmallDistance_IsRetryable(t *testing.T) 
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Enable enforcement
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
@@ -1371,8 +1342,7 @@ func TestCheckUpstreamBlockAvailability_ErrorHasCorrectDetails(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Enable enforcement so block availability is checked
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
@@ -1458,8 +1428,7 @@ func TestRetryableBlockUnavailability_NoInfiniteLoop(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	// Enable block availability enforcement
 	ntwCfg := &common.NetworkConfig{
@@ -1606,8 +1575,7 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -1622,7 +1590,6 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
 
-	time.Sleep(100 * time.Millisecond)
 	pollBaseline.Store(latestPollCount.Load())
 	require.Greater(t, pollBaseline.Load(), int64(0), "state poller should have polled during bootstrap")
 
@@ -1741,8 +1708,7 @@ func TestHandleBlockSkip_NonRetryableDoesNotTriggerRefresh(t *testing.T) {
 	sharedStateCfg.SetDefaults("test")
 	ssr, _ := data.NewSharedStateRegistry(ctx, &log.Logger, sharedStateCfg)
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
-	upr.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 
 	ntwCfg := &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -1757,7 +1723,6 @@ func TestHandleBlockSkip_NonRetryableDoesNotTriggerRefresh(t *testing.T) {
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
 
-	time.Sleep(100 * time.Millisecond)
 	pollBaseline.Store(latestPollCount.Load())
 	require.Greater(t, pollBaseline.Load(), int64(0), "state poller should have polled during bootstrap")
 

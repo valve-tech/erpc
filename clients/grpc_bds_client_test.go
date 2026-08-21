@@ -114,6 +114,8 @@ func TestGrpcBdsClientAppliesUpstreamGrpcHeaders(t *testing.T) {
 
 	gc, ok := client.(*GenericGrpcBdsClient)
 	require.True(t, ok)
+	// Join the pool maintainer before the test returns; see newTestClient.
+	t.Cleanup(gc.pool.Shutdown)
 	require.Equal(t, "Bearer secret-token", gc.headers["authorization"])
 	require.Equal(t, "abstract", gc.headers["x-goldsky-chain"])
 }
@@ -133,6 +135,7 @@ func TestGrpcBdsClientNilUpstreamNoHeaders(t *testing.T) {
 
 	gc, ok := client.(*GenericGrpcBdsClient)
 	require.True(t, ok)
+	t.Cleanup(gc.pool.Shutdown)
 	require.Empty(t, gc.headers)
 }
 
@@ -145,6 +148,7 @@ func TestGrpcBdsClientQueryMethodsDoNotShortCircuit(t *testing.T) {
 	defer cancel()
 	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
 	require.NoError(t, err)
+	t.Cleanup(client.(*GenericGrpcBdsClient).pool.Shutdown)
 
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_queryBlocks","params":[{"fromBlock":"0x1","toBlock":"0x2","limit":1}]}`))
 

@@ -1,11 +1,76 @@
 package util
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestParseBlockParameter_RejectsANumberThatNamesNoBlock covers bug 105.
+//
+// Every JSON number reaches ParseBlockParameter as a float64, so the cast to
+// uint64 decides what an out-of-range or fractional value means. Go leaves that
+// conversion implementation-defined, so the same request produced a different
+// block on a different CPU. A value that names no block must fail here rather
+// than become genesis, become the largest possible block, or truncate in
+// silence.
+func TestParseBlockParameter_RejectsANumberThatNamesNoBlock(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input interface{}
+	}{
+		{"negative one", float64(-1)},
+		{"large negative", float64(-1e18)},
+		{"NaN", math.NaN()},
+		{"positive infinity", math.Inf(1)},
+		{"negative infinity", math.Inf(-1)},
+		{"beyond uint64", float64(1e30)},
+		{"exactly two to the sixty-four", math.Pow(2, 64)},
+		{"fractional", float64(1.5)},
+		{"negative int64", int64(-1)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			blockNumber, blockHash, err := ParseBlockParameter(tc.input)
+
+			require.Error(t, err, "%v names no block, so the parser must say so", tc.input)
+			require.Empty(t, blockNumber, "a rejected value must not leak a block number")
+			require.Nil(t, blockHash)
+		})
+	}
+}
+
+// TestParseBlockParameter_AcceptsEveryNumberAUint64Represents keeps the
+// rejection above from swallowing the values that do name a block.
+func TestParseBlockParameter_AcceptsEveryNumberAUint64Represents(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		input interface{}
+		want  string
+	}{
+		{float64(0), "0x0"},
+		{float64(1), "0x1"},
+		{float64(21_000_000), "0x1406f40"},
+		{math.Pow(2, 63), "0x8000000000000000"},
+		{int64(0), "0x0"},
+		{uint64(math.MaxUint64), "0xffffffffffffffff"},
+	}
+
+	for _, tc := range cases {
+		blockNumber, blockHash, err := ParseBlockParameter(tc.input)
+		require.NoError(t, err, "%v names a block", tc.input)
+		require.Equal(t, tc.want, blockNumber)
+		require.Nil(t, blockHash)
+	}
+}
 
 func TestParseBlockParameter(t *testing.T) {
 	tests := []struct {

@@ -1947,8 +1947,7 @@ func setupTestNetworkWithScoring(
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	err = upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 	require.NoError(t, err)
@@ -1962,10 +1961,8 @@ func setupTestNetworkWithScoring(
 	for _, ups := range upsList {
 		err = ups.Bootstrap(ctx)
 		require.NoError(t, err)
-		ups.EvmStatePoller().SuggestLatestBlock(1000)
-		ups.EvmStatePoller().SuggestFinalizedBlock(900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, ups, 1000, 900)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	// TODO(phase-10): migrate to policy.OverrideAllForTest(<engine>); was: upstream.ReorderUpstreams(upstreamsRegistry)
 	upstreamsRegistry.OverrideOrderForTest(util.EvmNetworkId(123))

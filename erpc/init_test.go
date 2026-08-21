@@ -3,9 +3,11 @@ package erpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -142,9 +144,21 @@ func TestInit_AllGood(t *testing.T) {
 	}
 }
 
+// forbidOsExit fails the test if anything under Init ends the process. Init is
+// library code: it reports a failure to its caller and lets cmd/erpc decide.
+func forbidOsExit(t *testing.T) {
+	t.Helper()
+	previous := util.OsExit
+	util.OsExit = func(code int) {
+		t.Errorf("Init must not end the process, but it called util.OsExit(%d)", code)
+	}
+	t.Cleanup(func() { util.OsExit = previous })
+}
+
 func TestInit_InvalidHttpPort(t *testing.T) {
 	mainMutex.Lock()
 	defer mainMutex.Unlock()
+	forbidOsExit(t)
 
 	cfg := &common.Config{
 		LogLevel: "DEBUG",
@@ -155,26 +169,66 @@ func TestInit_InvalidHttpPort(t *testing.T) {
 		},
 	}
 
-	logger := log.Logger
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// Replace exit channel with a buffered channel
-	exitChan := make(chan int, 1)
-	util.OsExit = func(code int) {
-		exitChan <- code
+	err := Init(ctx, cfg, log.Logger)
+	if err == nil {
+		t.Fatal("expected Init to return the http server failure")
+	}
+	if !errors.Is(err, ErrServerFailed) {
+		t.Fatalf("expected the error to identify a failed server, got %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("Init waited for the context instead of reporting the failure")
+	}
+}
+
+// TestInit_ReturnsWhenTheHttpPortIsAlreadyBound is the embedder's test. A Go
+// program that embeds eRPC and cannot bind its HTTP port must get an error it
+// can act on. Before the fix a goroutine inside Init called os.Exit, so the
+// embedder's whole process ended and this test binary died with no assertion.
+func TestInit_ReturnsWhenTheHttpPortIsAlreadyBound(t *testing.T) {
+	mainMutex.Lock()
+	defer mainMutex.Unlock()
+	forbidOsExit(t)
+
+	// Hold the port, so the http server inside Init cannot bind it.
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to take a port: %v", err)
+	}
+	defer squatter.Close()
+	port := squatter.Addr().(*net.TCPAddr).Port
+
+	cfg := &common.Config{
+		LogLevel: "ERROR",
+		Server: &common.ServerConfig{
+			HttpHostV4: util.StringPtr("127.0.0.1"),
+			ListenV4:   util.BoolPtr(true),
+			HttpPortV4: &port,
+		},
 	}
 
-	// Launch init
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	Init(ctx, cfg, logger)
+
+	done := make(chan error, 1)
+	go func() { done <- Init(ctx, cfg, log.Logger) }()
 
 	select {
-	case code := <-exitChan:
-		if code != util.ExitCodeHttpServerFailed {
-			t.Errorf("expected exit code %d, got %d", util.ExitCodeHttpServerFailed, code)
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Init to return the bind failure")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for Init to return an error")
+		if !errors.Is(err, ErrServerFailed) {
+			t.Fatalf("expected the error to identify a failed server, got %v", err)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprint(port)) {
+			t.Errorf("expected the error to name port %d, got %v", port, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Init never reported the bind failure to its caller")
 	}
 }
 

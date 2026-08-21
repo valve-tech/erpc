@@ -162,8 +162,7 @@ func setupRealPollLagNetwork(t *testing.T, ctx context.Context, fixtures []realP
 	network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig, rateLimitersRegistry, upstreamsRegistry, metricsTracker, policyEngine)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(50 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 

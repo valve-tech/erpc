@@ -83,8 +83,7 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 		nil,
 	)
 
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	if err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 		b.Fatal(err)
 	}
@@ -188,8 +187,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 		nil,
 	)
 
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	if err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 		b.Fatal(err)
 	}
@@ -299,8 +297,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 		mt,
 		nil,
 	)
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	if err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 		b.Fatal(err)
 	}
@@ -415,8 +412,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 		mt,
 		nil,
 	)
-	upsReg.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upsReg.BootstrapAndWait(ctx)
 	if err := upsReg.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 		b.Fatal(err)
 	}
@@ -449,10 +445,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 	if err != nil {
 		b.Fatal(err)
 	}
-	upsList[0].EvmStatePoller().SuggestLatestBlock(0x11118000)
-	upsList[0].EvmStatePoller().SuggestFinalizedBlock(0x11117FFF)
-
-	time.Sleep(1*time.Second + 10*time.Millisecond)
+	seedEvmHeads(b, ctx, upsReg, upsList[0], 0x11118000, 0x11117FFF)
 
 	b.SetParallelism(500)
 	b.ResetTimer()

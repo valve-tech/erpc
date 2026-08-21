@@ -214,9 +214,6 @@ func TestNetwork_BatchRequests(t *testing.T) {
 		err := network.upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123))
 		require.NoError(t, err)
 
-		// Allow async upstream bootstrapping to settle before issuing batch requests
-		time.Sleep(100 * time.Millisecond)
-
 		// Mock batch responses for two different methods with the same IDs
 		// eth_blockNumber returns block number, eth_chainId returns chain ID
 		gock.New("http://rpc1.localhost").

@@ -169,8 +169,7 @@ func setupServedTipNetworkWith(t *testing.T, ctx context.Context, fixtures []ser
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(200 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 
 	initErr := upstreamsRegistry.GetInitializer().WaitForTasks(ctx)
 	require.NoError(t, initErr, "Upstream initializer failed to complete tasks")
@@ -178,7 +177,6 @@ func setupServedTipNetworkWith(t *testing.T, ctx context.Context, fixtures []ser
 	err = network.Bootstrap(ctx)
 	require.NoError(t, err)
 	network.PinUpstreamOrderForTest()
-	time.Sleep(250 * time.Millisecond)
 
 	upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(chainID))
 	require.Len(t, upsList, len(fixtures))
@@ -195,10 +193,12 @@ func setupServedTipNetworkWith(t *testing.T, ctx context.Context, fixtures []ser
 		require.NotNil(t, ordered[i], "fixture %q not found in upstreams list", f.id)
 	}
 
-	// Push each upstream's poller to the requested state.
+	// Push each upstream's poller to the requested state. seedEvmLatestHead
+	// writes the shared head counter synchronously and reads it back, so the
+	// fixture state is in place when this returns.
 	for i, f := range fixtures {
 		if f.latestBlock > 0 {
-			ordered[i].EvmStatePoller().SuggestLatestBlock(f.latestBlock)
+			seedEvmLatestHead(t, ctx, upstreamsRegistry, ordered[i], f.latestBlock)
 		}
 		if f.syncing {
 			ordered[i].EvmStatePoller().SetSyncingState(common.EvmSyncingStateSyncing)
@@ -206,7 +206,6 @@ func setupServedTipNetworkWith(t *testing.T, ctx context.Context, fixtures []ser
 			ordered[i].EvmStatePoller().SetSyncingState(common.EvmSyncingStateNotSyncing)
 		}
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	return network, ordered
 }
@@ -303,10 +302,13 @@ func TestServedTip_NoRegressionOnUpstreamRetreat(t *testing.T) {
 
 	// All upstreams retreat (e.g., transient outage causing pollers to lose
 	// state, or a partial chain reorg perceived by some upstreams).
-	ups[0].EvmStatePoller().SuggestLatestBlock(80)
-	ups[1].EvmStatePoller().SuggestLatestBlock(79)
-	ups[2].EvmStatePoller().SuggestLatestBlock(78)
-	time.Sleep(50 * time.Millisecond)
+	// writeEvmHeadCounter, not seedEvmLatestHead: the counter is EXPECTED to
+	// reject these retreats, so there is nothing to assert on the way in. The
+	// write settles before it returns either way.
+	reg := network.upstreamsRegistry
+	writeEvmHeadCounter(t, ctx, reg, ups[0], evmLatestHeadCounter, 80)
+	writeEvmHeadCounter(t, ctx, reg, ups[1], evmLatestHeadCounter, 79)
+	writeEvmHeadCounter(t, ctx, reg, ups[2], evmLatestHeadCounter, 78)
 
 	served2 := network.EvmHighestLatestBlockNumber(ctx)
 	// The per-upstream poller is monotonic via CounterInt64: its TryUpdate
@@ -642,13 +644,16 @@ func TestServedTip_NoNetworkLevelStickiness(t *testing.T) {
 
 	// And no downward stickiness either: the moment the remaining head
 	// advances, the pick follows it up.
-	// (9_000 → 11_000 is a MAJOR jump, so it passes the poller's off-hot-path
-	// chain-identity check — mocked eth_chainId matches — before it applies.)
-	ups[2].EvmStatePoller().SuggestLatestBlock(11_000)
-	require.Eventually(t, func() bool {
-		return network.EvmHighestLatestBlockNumber(ctx) == 11_000
-	}, 2*time.Second, 10*time.Millisecond,
-		"the pick must follow the verified major forward jump with no stickiness")
+	//
+	// The head is seeded, not suggested. SuggestLatestBlock routes a MAJOR
+	// forward jump (9_000 → 11_000) through an off-hot-path chain-identity
+	// check that runs in another goroutine and drops on contention, so the
+	// old `Eventually` was betting on a best-effort write. This test is about
+	// the NETWORK layer keeping no memory of the prior 10_000; the poller's
+	// own jump gate has its own tests in architecture/evm.
+	seedEvmLatestHead(t, ctx, network.upstreamsRegistry, ups[2], 11_000)
+	require.Equal(t, int64(11_000), network.EvmHighestLatestBlockNumber(ctx),
+		"the pick must follow the head advance with no stickiness")
 }
 
 // A halted chain that resumes with a burst (sequencer outage ending, L2 batch

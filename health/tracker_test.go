@@ -17,6 +17,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// rotateFullWindow advances every tracked metric by one COMPLETE rolling
+// window, synchronously, on the calling goroutine. A sample recorded before the
+// call is gone after it — by construction, not by elapsed time.
+//
+// This is the deterministic replacement for `tracker.Bootstrap(ctx)` followed
+// by `time.Sleep(windowSize + margin)`. That pattern bets that a background
+// goroutine wakes up `rollingBuckets` times inside the margin, and it loses the
+// bet under `make test-fast`.
+//
+// Do NOT call Bootstrap on a tracker driven this way: the two would rotate the
+// same buckets from two goroutines and the count would stop being exact.
+func rotateFullWindow(tracker *Tracker) {
+	for i := 0; i < rollingBuckets; i++ {
+		tracker.rotateOnce()
+	}
+}
+
 func TestTracker(t *testing.T) {
 	projectID := "test-project"
 	windowSize := 2000 * time.Millisecond
@@ -50,10 +67,6 @@ func TestTracker(t *testing.T) {
 	t.Run("MetricsOverTime", func(t *testing.T) {
 		tracker := NewTracker(&log.Logger, projectID, windowSize)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		tracker.Bootstrap(ctx)
-
 		ups := common.NewFakeUpstream("a")
 
 		// First window
@@ -63,7 +76,7 @@ func TestTracker(t *testing.T) {
 		assert.Equal(t, int64(100), metrics1.RequestsTotal.Load())
 		assert.Equal(t, int64(10), metrics1.ErrorsTotal.Load())
 
-		time.Sleep(windowSize + 10*time.Millisecond)
+		rotateFullWindow(tracker)
 
 		// Second window
 		simulateRequestMetrics(tracker, ups, "method1", 50, 5)
@@ -138,12 +151,16 @@ func TestTracker(t *testing.T) {
 		assert.True(t, errorRate2 < errorRate1 && errorRate1 < errorRate3, "Error rates should be ordered: ups2 < ups1 < ups3")
 	})
 
+	// A full window of rotations must drop a recorded sample completely.
+	//
+	// The test rotates the window itself instead of sleeping for `windowSize`
+	// and hoping the ticker goroutine woke up on time. The old form slept
+	// `windowSize + 10ms` — a 10 ms margin spread over ten separate goroutine
+	// wake-ups — and lost that bet under `make test-fast`, where several
+	// `go test` processes compete for scheduler slots. Widening the margin only
+	// moves the losing point; `rotateFullWindow` removes the deadline entirely.
 	t.Run("ResetMetrics", func(t *testing.T) {
 		tracker := NewTracker(&log.Logger, projectID, windowSize)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		tracker.Bootstrap(ctx)
 
 		ups := common.NewFakeUpstream("a")
 
@@ -154,12 +171,42 @@ func TestTracker(t *testing.T) {
 		assert.Equal(t, int64(10), metricsBefore.ErrorsTotal.Load())
 		assert.Equal(t, int64(0), metricsBefore.RemoteRateLimitedTotal.Load())
 
-		time.Sleep(windowSize + 10*time.Millisecond)
+		rotateFullWindow(tracker)
 
 		metricsAfter := tracker.GetUpstreamMethodMetrics(ups, "method1", common.DataFinalityStateAll)
 		assert.Equal(t, int64(0), metricsAfter.RequestsTotal.Load())
 		assert.Equal(t, int64(0), metricsAfter.ErrorsTotal.Load())
 		assert.Equal(t, int64(0), metricsAfter.RemoteRateLimitedTotal.Load())
+	})
+
+	// Bootstrap must actually wire the clock to the rotation loop. ResetMetrics
+	// above drives the loop by hand, so on its own it would still pass if
+	// Bootstrap started nothing at all. This one covers that wiring, and it
+	// waits on the EVENT (the counter reaching zero) rather than on a deadline:
+	// Eventually returns the moment the condition holds, and the ceiling is
+	// only there to turn a hang into a readable failure.
+	t.Run("BootstrapDrivesRotation", func(t *testing.T) {
+		tracker := NewTracker(&log.Logger, projectID, 100*time.Millisecond)
+		// Rotation is the subject here. The idle sweep rides the same tick and
+		// reaches into process-global telemetry handles, which races the next
+		// `-count` iteration's telemetry.SetHistogramBuckets. Switch it off so
+		// this test reports on rotation only.
+		tracker.SetIdleEvictionAfter(0)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		tracker.Bootstrap(ctx)
+
+		ups := common.NewFakeUpstream("bootstrap-rotates")
+		simulateRequestMetrics(tracker, ups, "method1", 100, 10)
+
+		m := tracker.GetUpstreamMethodMetrics(ups, "method1", common.DataFinalityStateAll)
+		require.Equal(t, int64(100), m.RequestsTotal.Load())
+
+		require.Eventually(t, func() bool {
+			return m.RequestsTotal.Load() == 0
+		}, 30*time.Second, 5*time.Millisecond,
+			"Bootstrap must start the rotation loop against a real ticker")
 	})
 
 	t.Run("DifferentMethods", func(t *testing.T) {
@@ -181,19 +228,24 @@ func TestTracker(t *testing.T) {
 		assert.Equal(t, int64(50), metrics2.RequestsTotal.Load())
 	})
 
+	// Samples spread ACROSS a window all count: rotation moves the write slot
+	// forward, it does not wipe what came before.
+	//
+	// The batches used to be spaced by `time.Sleep(50ms)` against a 500 ms
+	// window — five sleeps plus five record batches had to finish inside ten
+	// rotation ticks, or the first batch aged out and the total came in at 80.
+	// One explicit rotation per batch says the same thing exactly: five
+	// rotations is half a window, so nothing can have aged out yet.
 	t.Run("LongTermMetrics", func(t *testing.T) {
 		longWindowSize := 500 * time.Millisecond
 		tracker := NewTracker(&log.Logger, projectID, longWindowSize)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		tracker.Bootstrap(ctx)
-
 		ups := common.NewFakeUpstream("a")
 
+		require.Less(t, 5, rollingBuckets, "five rotations must stay inside one window")
 		for i := 0; i < 5; i++ {
 			simulateRequestMetrics(tracker, ups, "method1", 20, 2)
-			time.Sleep(50 * time.Millisecond)
+			tracker.rotateOnce()
 		}
 
 		metrics := tracker.GetUpstreamMethodMetrics(ups, "method1", common.DataFinalityStateAll)
@@ -205,10 +257,6 @@ func TestTracker(t *testing.T) {
 		tracker := NewTracker(&log.Logger, projectID, windowSize)
 		resetMetrics()
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		tracker.Bootstrap(ctx)
-
 		ups := common.NewFakeUpstream("a")
 
 		for i := 0; i < 5; i++ {
@@ -218,7 +266,7 @@ func TestTracker(t *testing.T) {
 			assert.Equal(t, int64(20), metrics.RequestsTotal.Load())
 			assert.Equal(t, int64(2), metrics.ErrorsTotal.Load())
 
-			time.Sleep(windowSize + 10*time.Millisecond)
+			rotateFullWindow(tracker)
 		}
 	})
 
@@ -336,10 +384,6 @@ func TestBlockHeadLagPersistsAcrossResets(t *testing.T) {
 
 	tracker := NewTracker(&log.Logger, projectID, windowSize)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tracker.Bootstrap(ctx)
-
 	ups1 := common.NewFakeUpstream("upstream1")
 	ups2 := common.NewFakeUpstream("upstream2")
 
@@ -367,8 +411,9 @@ func TestBlockHeadLagPersistsAcrossResets(t *testing.T) {
 	assert.Equal(t, int64(1), metrics1Before.RequestsTotal.Load())
 	assert.Equal(t, int64(1), metrics1Before.ErrorsTotal.Load())
 
-	// Wait for reset cycle
-	time.Sleep(windowSize + 50*time.Millisecond)
+	// Advance one full rolling window — synchronously, so the assertions below
+	// depend on the rotation count, not on a background goroutine's wake-up.
+	rotateFullWindow(tracker)
 
 	// Get metrics after reset
 	metrics1After := tracker.GetUpstreamMethodMetrics(ups1, "method1", common.DataFinalityStateAll)
@@ -400,10 +445,6 @@ func TestFinalizationLagPersistsAcrossResets(t *testing.T) {
 
 	tracker := NewTracker(&log.Logger, projectID, windowSize)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tracker.Bootstrap(ctx)
-
 	ups1 := common.NewFakeUpstream("upstream1")
 	ups2 := common.NewFakeUpstream("upstream2")
 
@@ -424,8 +465,9 @@ func TestFinalizationLagPersistsAcrossResets(t *testing.T) {
 	assert.Equal(t, int64(20), metrics2Before.FinalizationLag.Load()) // ups2 is 20 blocks behind
 	assert.Equal(t, int64(1), metrics1Before.RequestsTotal.Load())
 
-	// Wait for reset cycle
-	time.Sleep(windowSize + 50*time.Millisecond)
+	// Advance one full rolling window — synchronously, so the assertions below
+	// depend on the rotation count, not on a background goroutine's wake-up.
+	rotateFullWindow(tracker)
 
 	// Get metrics after reset
 	metrics1After := tracker.GetUpstreamMethodMetrics(ups1, "method1", common.DataFinalityStateAll)
