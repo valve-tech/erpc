@@ -36,28 +36,44 @@ result. Treat a bucket as a proposal with a stated reason, not as a verdict.
 | **Watch** | 3 | Real, not actionable yet. |
 | **Duplicate** | 1 | Entry 71 restates 24. |
 
-## The headline: ten entries are one defect
+## The headline: ten entries obey one rule, at ten sites
 
-Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** all have one shape:
+Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** share one property:
 
-> eRPC accepts a configuration input it does not understand, and proceeds
-> without a word.
+> eRPC collapses three different operator events into one outcome — "did not
+> say", "said this", and "said something I cannot read".
 
-The surface differs each time. It drops keys the legacy schema never learned
-(53, 126). It ignores a one-character typo and leaves a control switched off
-(64, 121). It takes a wrong default because a value does not survive its own
-round trip (117). It silences every log line (125). It reads a file the
-operator did not name (127). It panics (25). It resolves an ambiguous auth
-block last-block-wins (18).
+Entry 121 states it best in its own text: *"Parse failure is not the same event
+as absence, and the code collapses the two."* An operator who writes
+`minSwitchInterval: '30 s'` gets a cooldown of zero, while one who omits the key
+gets 30 seconds. Writing the knob wrongly buys LESS protection than not writing
+it at all. That inversion is the family.
 
-Ten separate patches would be ten unforced commitments and ten rebase
-conflicts. One property at the config edge closes them: **eRPC must not
-discard an operator's stated intent in silence.** The repo's own razor asks
-for exactly this — wire facts are explicit validated commitments at the edge,
-and configuration is the edge.
+**Correction, and it changes the plan.** The first version of this triage said
+one patch at the config edge closes all ten. That was a guess about mechanism,
+and it is wrong. The guess was that `KnownFields(true)` fails to reach inside
+the nine types in `common/config.go` that define their own `UnmarshalYAML`. A
+probe says otherwise: a typo'd key under `SelectionPolicyConfig`,
+`UpstreamConfig` and `NetworkDefaults` is rejected, same as the control. Strict
+decoding already works.
 
-This is the single highest-value item in the list, and the cheapest to carry.
-Do it first.
+The ten sit in at least six code paths, so they are ten small patches sharing
+one rule, not one patch:
+
+| Mechanism | Entries | Where |
+|---|---|---|
+| A fallback decode's shadow struct has not grown with the real type, and its error masks the real one | **53, 64** | `common/config.go` `UnmarshalYAML` |
+| Defaulting cannot tell "unset" from "set wrong" — a nil check stands in for "the user did not specify" | **18, 25, 36** | `common/defaults.go` |
+| A parse failure becomes a silent zero or silence | **121, 125** | `internal/policy/stdlib/install.go`, `cmd/erpc/` |
+| A value marshals out and will not parse back | **117** | `common/architecture_evm.go` |
+| A guard tests the wrong thing (`len(s) > 1`, not `s != ""`) | **127** | `cmd/erpc/main.go` |
+| The warning list covers project-level keys only | **126** | `common/legacy/translate.go` |
+
+It is still the item to do first, for a different reason than claimed. The
+sites are small, two pairs genuinely share a fix (53 with 64, 121 with 125), and
+one test idiom covers all ten: **assert that a wrong value and an absent value
+produce different outcomes, and that the wrong one is reported.** Ten patches
+under one rule cost far less to carry and to review than ten unrelated ones.
 
 Two cautions, both from the entries themselves. Entry 53 and entry 64 each have
 a test that **asserts today's broken behaviour**; those tests change with the
