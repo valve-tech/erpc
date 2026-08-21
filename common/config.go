@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"reflect"
 	"time"
 
 	"strings"
@@ -45,6 +46,7 @@ type Config struct {
 	Projects     []*ProjectConfig   `yaml:"projects,omitempty" json:"projects"`
 	RateLimiters *RateLimiterConfig `yaml:"rateLimiters,omitempty" json:"rateLimiters"`
 	Metrics      *MetricsConfig     `yaml:"metrics,omitempty" json:"metrics"`
+	Indexer      *IndexerConfig     `yaml:"indexer,omitempty" json:"indexer"`
 	ProxyPools   []*ProxyPoolConfig `yaml:"proxyPools,omitempty" json:"proxyPools"`
 	Tracing      *TracingConfig     `yaml:"tracing,omitempty" json:"tracing"`
 
@@ -82,6 +84,21 @@ var LegacyTranslateFn func(*Config) ([]string, error)
 // emitted by LegacyTranslateFn. If nil, warnings are dropped silently.
 var LegacyTranslateLogger func(warning string)
 
+// IndexerConfig tunes the transport-neutral event-stream indexer that
+// powers `eth_subscribe` fan-out and reorg-aware log invalidation. Most
+// deployments can leave this unset.
+type IndexerConfig struct {
+	// CanonicalChainDepth is the per-network ring-buffer size for the
+	// canonical-chain tracker. It bounds how deep a reorg the indexer
+	// can fully resolve — reorgs beyond this window get only the
+	// immediate head evicted. 0 uses the internal default (256).
+	CanonicalChainDepth int `yaml:"canonicalChainDepth,omitempty" json:"canonicalChainDepth"`
+	// DedupWindowSize is the per-filter seen-set capacity for log /
+	// pending-tx fan-out across sibling upstreams. 0 uses the internal
+	// default (8192).
+	DedupWindowSize int `yaml:"dedupWindowSize,omitempty" json:"dedupWindowSize"`
+}
+
 // LoadConfig loads the configuration from the specified file.
 // It supports both YAML and TypeScript (.ts) files.
 func LoadConfig(fs afero.Fs, filename string, opts *DefaultOptions) (*Config, error) {
@@ -108,6 +125,10 @@ func LoadConfig(fs afero.Fs, filename string, opts *DefaultOptions) (*Config, er
 		}
 	}
 
+	if err := rejectEmptyListItems(&cfg); err != nil {
+		return nil, err
+	}
+
 	if LegacyTranslateFn != nil {
 		warnings, err := LegacyTranslateFn(&cfg)
 		if err != nil {
@@ -131,34 +152,154 @@ func LoadConfig(fs afero.Fs, filename string, opts *DefaultOptions) (*Config, er
 	return &cfg, nil
 }
 
+// configPackagePath bounds the reflective walk below to the config structs
+// declared in this package. Anything else (sobek programs, sync primitives,
+// stdlib types) is left alone.
+var configPackagePath = reflect.TypeOf(Config{}).PkgPath()
+
+// maxConfigWalkDepth stops the walk on a config type that points back at
+// itself. Each config level costs about three steps (field, pointer, slice
+// element) and the real tree is roughly twenty levels, so this leaves a wide
+// margin — the cap exists to bound a cycle, not to bound the config.
+const maxConfigWalkDepth = 256
+
+// rejectEmptyListItems turns an empty item in any config list into a clear
+// error that names the item.
+//
+// YAML decodes an item with nothing after the dash ("upstreams:\n  -") into a
+// nil pointer, and JSON does the same for a literal `null`. Every SetDefaults
+// down the tree dereferences its receiver without a guard, so a single stray
+// dash used to kill the process at boot with a nil-pointer panic and no clue
+// about which list held it.
+//
+// The walk is generic on purpose: it covers every list of config objects that
+// exists today and every one added later, instead of a guard per list.
+func rejectEmptyListItems(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	return walkForEmptyListItems(reflect.ValueOf(cfg), "", 0)
+}
+
+func walkForEmptyListItems(v reflect.Value, path string, depth int) error {
+	if !v.IsValid() || depth > maxConfigWalkDepth {
+		return nil
+	}
+
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return nil
+		}
+		return walkForEmptyListItems(v.Elem(), path, depth+1)
+
+	case reflect.Struct:
+		t := v.Type()
+		if t.PkgPath() != configPackagePath {
+			return nil
+		}
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			if err := walkForEmptyListItems(v.Field(i), joinConfigPath(path, configFieldName(f)), depth+1); err != nil {
+				return err
+			}
+		}
+
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			item := v.Index(i)
+			itemPath := fmt.Sprintf("%s[%d]", path, i)
+			if isEmptyConfigItem(item) {
+				return emptyConfigItemError(itemPath)
+			}
+			if err := walkForEmptyListItems(item, itemPath, depth+1); err != nil {
+				return err
+			}
+		}
+
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			itemPath := fmt.Sprintf("%s[%v]", path, iter.Key())
+			if isEmptyConfigItem(iter.Value()) {
+				return emptyConfigItemError(itemPath)
+			}
+			if err := walkForEmptyListItems(iter.Value(), itemPath, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// isEmptyConfigItem reports whether an element of a config list or map carries
+// no object at all.
+//
+// Only a nil POINTER to a config object counts. A nil inside an
+// []interface{} (cache policy params, static response params) is a legitimate
+// JSON-RPC null and must survive.
+func isEmptyConfigItem(v reflect.Value) bool {
+	return v.Kind() == reflect.Pointer && v.IsNil() && v.Type().Elem().Kind() == reflect.Struct
+}
+
+func emptyConfigItemError(path string) error {
+	return fmt.Errorf("config: %s has no content, remove the entry or fill it in", path)
+}
+
+func configFieldName(f reflect.StructField) string {
+	tag := f.Tag.Get("yaml")
+	if tag == "" {
+		return f.Name
+	}
+	if idx := strings.Index(tag, ","); idx >= 0 {
+		tag = tag[:idx]
+	}
+	if tag == "" || tag == "-" {
+		return f.Name
+	}
+	return tag
+}
+
+func joinConfigPath(parent, field string) string {
+	if parent == "" {
+		return field
+	}
+	return parent + "." + field
+}
+
 type ServerConfig struct {
-	ListenV4            *bool             `yaml:"listenV4,omitempty" json:"listenV4"`
-	HttpHostV4          *string           `yaml:"httpHostV4,omitempty" json:"httpHostV4"`
-	ListenV6            *bool             `yaml:"listenV6,omitempty" json:"listenV6"`
-	HttpHostV6          *string           `yaml:"httpHostV6,omitempty" json:"httpHostV6"`
-	HttpPort            *int              `yaml:"httpPort,omitempty" json:"httpPort"` // Deprecated: use HttpPortV4
-	HttpPortV4          *int              `yaml:"httpPortV4,omitempty" json:"httpPortV4"`
-	HttpPortV6          *int              `yaml:"httpPortV6,omitempty" json:"httpPortV6"`
-	GrpcEnabled         *bool             `yaml:"grpcEnabled,omitempty" json:"grpcEnabled"`
-	GrpcHostV4          *string           `yaml:"grpcHostV4,omitempty" json:"grpcHostV4"`
-	GrpcPortV4          *int              `yaml:"grpcPortV4,omitempty" json:"grpcPortV4"`
-	GrpcHostV6          *string           `yaml:"grpcHostV6,omitempty" json:"grpcHostV6"`
-	GrpcPortV6          *int              `yaml:"grpcPortV6,omitempty" json:"grpcPortV6"`
-	GrpcMaxRecvMsgSize  *int              `yaml:"grpcMaxRecvMsgSize,omitempty" json:"grpcMaxRecvMsgSize"`
-	GrpcMaxSendMsgSize  *int              `yaml:"grpcMaxSendMsgSize,omitempty" json:"grpcMaxSendMsgSize"`
-	GrpcReflection      *bool             `yaml:"grpcReflection,omitempty" json:"grpcReflection"`
-	MaxTimeout          *Duration         `yaml:"maxTimeout,omitempty" json:"maxTimeout" tstype:"Duration"`
-	ReadTimeout         *Duration         `yaml:"readTimeout,omitempty" json:"readTimeout" tstype:"Duration"`
-	WriteTimeout        *Duration         `yaml:"writeTimeout,omitempty" json:"writeTimeout" tstype:"Duration"`
-	EnableGzip          *bool             `yaml:"enableGzip,omitempty" json:"enableGzip"`
-	TLS                 *TLSConfig        `yaml:"tls,omitempty" json:"tls"`
-	Aliasing            *AliasingConfig   `yaml:"aliasing" json:"aliasing"`
-	WaitBeforeShutdown  *Duration         `yaml:"waitBeforeShutdown,omitempty" json:"waitBeforeShutdown" tstype:"Duration"`
-	WaitAfterShutdown   *Duration         `yaml:"waitAfterShutdown,omitempty" json:"waitAfterShutdown" tstype:"Duration"`
-	IncludeErrorDetails *bool             `yaml:"includeErrorDetails,omitempty" json:"includeErrorDetails"`
-	TrustedIPForwarders []string          `yaml:"trustedIPForwarders,omitempty" json:"trustedIPForwarders"`
-	TrustedIPHeaders    []string          `yaml:"trustedIPHeaders,omitempty" json:"trustedIPHeaders"`
-	ResponseHeaders     map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders"`
+	ListenV4            *bool                  `yaml:"listenV4,omitempty" json:"listenV4"`
+	HttpHostV4          *string                `yaml:"httpHostV4,omitempty" json:"httpHostV4"`
+	ListenV6            *bool                  `yaml:"listenV6,omitempty" json:"listenV6"`
+	HttpHostV6          *string                `yaml:"httpHostV6,omitempty" json:"httpHostV6"`
+	HttpPort            *int                   `yaml:"httpPort,omitempty" json:"httpPort"` // Deprecated: use HttpPortV4
+	HttpPortV4          *int                   `yaml:"httpPortV4,omitempty" json:"httpPortV4"`
+	HttpPortV6          *int                   `yaml:"httpPortV6,omitempty" json:"httpPortV6"`
+	GrpcEnabled         *bool                  `yaml:"grpcEnabled,omitempty" json:"grpcEnabled"`
+	GrpcHostV4          *string                `yaml:"grpcHostV4,omitempty" json:"grpcHostV4"`
+	GrpcPortV4          *int                   `yaml:"grpcPortV4,omitempty" json:"grpcPortV4"`
+	GrpcHostV6          *string                `yaml:"grpcHostV6,omitempty" json:"grpcHostV6"`
+	GrpcPortV6          *int                   `yaml:"grpcPortV6,omitempty" json:"grpcPortV6"`
+	GrpcMaxRecvMsgSize  *int                   `yaml:"grpcMaxRecvMsgSize,omitempty" json:"grpcMaxRecvMsgSize"`
+	GrpcMaxSendMsgSize  *int                   `yaml:"grpcMaxSendMsgSize,omitempty" json:"grpcMaxSendMsgSize"`
+	GrpcReflection      *bool                  `yaml:"grpcReflection,omitempty" json:"grpcReflection"`
+	MaxTimeout          *Duration              `yaml:"maxTimeout,omitempty" json:"maxTimeout" tstype:"Duration"`
+	ReadTimeout         *Duration              `yaml:"readTimeout,omitempty" json:"readTimeout" tstype:"Duration"`
+	WriteTimeout        *Duration              `yaml:"writeTimeout,omitempty" json:"writeTimeout" tstype:"Duration"`
+	EnableGzip          *bool                  `yaml:"enableGzip,omitempty" json:"enableGzip"`
+	TLS                 *TLSConfig             `yaml:"tls,omitempty" json:"tls"`
+	Aliasing            *AliasingConfig        `yaml:"aliasing" json:"aliasing"`
+	WaitBeforeShutdown  *Duration              `yaml:"waitBeforeShutdown,omitempty" json:"waitBeforeShutdown" tstype:"Duration"`
+	WaitAfterShutdown   *Duration              `yaml:"waitAfterShutdown,omitempty" json:"waitAfterShutdown" tstype:"Duration"`
+	IncludeErrorDetails *bool                  `yaml:"includeErrorDetails,omitempty" json:"includeErrorDetails"`
+	TrustedIPForwarders []string               `yaml:"trustedIPForwarders,omitempty" json:"trustedIPForwarders"`
+	TrustedIPHeaders    []string               `yaml:"trustedIPHeaders,omitempty" json:"trustedIPHeaders"`
+	ResponseHeaders     map[string]string      `yaml:"responseHeaders,omitempty" json:"responseHeaders"`
+	WebSocket           *WebSocketServerConfig `yaml:"webSocket,omitempty" json:"webSocket"`
 
 	// ExecutionHeaders controls the per-request diagnostic headers
 	// (X-ERPC-Attempts, X-ERPC-Upstreams-Tried, etc.) that expose how
@@ -173,6 +314,14 @@ type ServerConfig struct {
 	// default. Credit-unit pricing is vendor-level configuration — see
 	// CreditUnitsProvider and UpstreamConfig.CreditUnits.
 	CostHeaders *bool `yaml:"costHeaders,omitempty" json:"costHeaders"`
+}
+
+type WebSocketServerConfig struct {
+	ReadBufferSize                int       `yaml:"readBufferSize,omitempty" json:"readBufferSize"`
+	WriteBufferSize               int       `yaml:"writeBufferSize,omitempty" json:"writeBufferSize"`
+	MaxMessageSize                int64     `yaml:"maxMessageSize,omitempty" json:"maxMessageSize"`
+	PingInterval                  *Duration `yaml:"pingInterval,omitempty" json:"pingInterval" tstype:"Duration"`
+	MaxSubscriptionsPerConnection int       `yaml:"maxSubscriptionsPerConnection,omitempty" json:"maxSubscriptionsPerConnection"`
 }
 
 // ExecutionHeadersMode controls how much per-request execution detail is
@@ -708,6 +857,43 @@ type NetworkDefaults struct {
 	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm" tstype:"TsEvmNetworkConfigForDefaults"`
 	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm" tstype:"TsSvmNetworkConfigForDefaults"`
 	Multiplexing      *bool                    `yaml:"multiplexing,omitempty" json:"multiplexing"`
+	Failover          *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
+}
+
+// FailoverConfig controls within-request escalation to the fallback
+// tier — the upstreams tagged `tier:fallback`.
+type FailoverConfig struct {
+	// OnDefaultsExhausted, when true, lets one request escalate to the
+	// fallback tier after every default upstream has failed it. Default
+	// upstreams are simply the ones NOT tagged `tier:fallback`.
+	//
+	// HTTP requests. The network's selection policy ranks the fallback
+	// tier LAST instead of dropping it, so the request loop sweeps into
+	// the fallback tier once the defaults return retryable errors. A
+	// deterministic client error still short-circuits without advancing.
+	// This works through `ctx.failoverOnDefaultsExhausted`, which the
+	// bundled default selection policy reads. A network with a
+	// hand-written `selectionPolicy.evalFunc` must read that same ctx
+	// field itself; the policy engine logs a warning at startup when it
+	// does not.
+	//
+	// WebSocket subscribes. `tier:fallback` upstreams go into a separate
+	// ingress tier that the indexer only touches after every default
+	// ingress failed (erpc/subscription_manager.go).
+	//
+	// Cost. The escape makes the fallback tier reachable on a healthy
+	// tick, so failsafe policies that pick beyond the head of the list —
+	// hedge and consensus — can now send traffic to it. Leave the key
+	// off unless the fallback upstreams are meant to absorb that.
+	OnDefaultsExhausted *bool `yaml:"onDefaultsExhausted,omitempty" json:"onDefaultsExhausted"`
+}
+
+// Enabled reports whether any failover behaviour is configured. Nil-safe.
+func (f *FailoverConfig) Enabled() bool {
+	if f == nil {
+		return false
+	}
+	return f.OnDefaultsExhausted != nil && *f.OnDefaultsExhausted
 }
 
 // UnmarshalYAML provides backward compatibility for old single failsafe object format
@@ -839,6 +1025,20 @@ func (p *ProviderConfig) MarshalYAML() (interface{}, error) {
 	}, nil
 }
 
+// TagTierFallback marks an upstream as part of the fallback tier (via the
+// `tier:fallback` tag convention): used only when all non-fallback upstreams
+// are unavailable.
+//
+// THE SELECTION POLICY IS THE ONLY PLACE THAT READS THIS TAG. The default
+// program's `preferTag('!tier:fallback', { minHealthy: 1, fallback:
+// 'tier:fallback' })` is a hard filter, so one healthy primary removes every
+// fallback from the eligible list. Block-number aggregation inherits that for
+// free: every tip accessor sources its candidate set from the same eligible
+// list (Network.tipCandidateUpstreams), so an ahead fallback cannot drag the
+// served `latest`/`finalized` past what the primaries can serve. Do not add a
+// second tier check in Go — see erpc/networks_fallback_tier_tip_test.go.
+const TagTierFallback = "tier:fallback"
+
 // RateLimitCountMode selects the accounting unit an upstream's rate-limit
 // budget charges per call.
 type RateLimitCountMode string
@@ -913,6 +1113,33 @@ type UpstreamConfig struct {
 	// inherits the project-level `upstreamDefaults.routing` (all-or-nothing,
 	// matching the Tags inheritance pattern).
 	Routing *UpstreamRoutingConfig `yaml:"routing,omitempty" json:"routing,omitempty"`
+
+	// Chain names the network this upstream serves, for upstream types that
+	// have no config block of their own — "mainnet" in `type: btc`. It is the
+	// body of the upstream's network ID, and the chain family validates it
+	// (common.ChainFamily.ValidateNetworkId).
+	//
+	// The mirror of NetworkConfig.Chain, and deliberately the same one field
+	// rather than one config block per chain: that is what keeps adding
+	// Bitcoin, Zcash or Dogecoin a config exercise instead of new Go code.
+	//
+	// evm and svm ignore this field. Their identity already lives in
+	// evm.chainId and svm.cluster, and moving it would rewrite every existing
+	// config and cache key.
+	Chain string `yaml:"chain,omitempty" json:"chain,omitempty"`
+
+	// ChainProbeInterval is how often the chain family re-probes this upstream
+	// for its liveness and its tip. It applies to families driven by
+	// ChainFamily.Probe (btc today); evm and svm keep their own state pollers
+	// and ignore it.
+	//
+	// The interval is config rather than a constant because block times differ
+	// by two orders of magnitude across the chains this seam is for — Bitcoin
+	// produces a block every ten minutes, Dogecoin every minute. A value at or
+	// below zero means "use the default"; there is no way to switch the probe
+	// off, because an upstream that never publishes a tip can be neither ranked
+	// nor excluded and would take traffic on no evidence.
+	ChainProbeInterval Duration `yaml:"chainProbeInterval,omitempty" json:"chainProbeInterval,omitempty"`
 }
 
 // UpstreamRoutingConfig holds per-upstream routing hints. Today this is
@@ -939,6 +1166,29 @@ type UpstreamRoutingConfig struct {
 	// via state-poller-driven structural metrics like head lag). Use
 	// `"off"` for pay-per-call vendors where shadow traffic eats quota.
 	Probe ProbeMode `yaml:"probe,omitempty" json:"probe,omitempty" tstype:"ProbeMode | \"on\" | \"off\""`
+}
+
+// Copy deep-copies the routing hints, including every score-multiplier entry.
+// ApplyDefaults already clones this struct and its entry list, which shows the
+// code treats a shared Routing block as a hazard; it stops at the entries by
+// declaring them immutable. Copying them too costs one small allocation per
+// entry at bootstrap and removes the assumption.
+func (c *UpstreamRoutingConfig) Copy() *UpstreamRoutingConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &UpstreamRoutingConfig{}
+	*copied = *c
+
+	if c.ScoreMultipliers != nil {
+		copied.ScoreMultipliers = make([]*ScoreMultiplierConfig, len(c.ScoreMultipliers))
+		for i, sm := range c.ScoreMultipliers {
+			copied.ScoreMultipliers[i] = sm.Copy()
+		}
+	}
+
+	return copied
 }
 
 // ProbeMode is the per-upstream `routing.probe` enum.
@@ -977,6 +1227,26 @@ type ScoreMultiplierConfig struct {
 	// influences scoring (the score is computed from rolling-window rates,
 	// not absolute request counts).
 	TotalRequests *float64 `yaml:"totalRequests,omitempty" json:"totalRequests,omitempty"`
+}
+
+// Copy deep-copies one score-multiplier entry. The weights stay shared
+// pointers: every writer in this codebase replaces such a pointer instead of
+// writing through it, which is how the rest of the Copy family treats *bool
+// and *float64 fields.
+func (c *ScoreMultiplierConfig) Copy() *ScoreMultiplierConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &ScoreMultiplierConfig{}
+	*copied = *c
+
+	if c.Finality != nil {
+		copied.Finality = make([]DataFinalityState, len(c.Finality))
+		copy(copied.Finality, c.Finality)
+	}
+
+	return copied
 }
 
 // UnmarshalYAML accepts the current canonical schema, plus three legacy
@@ -1135,6 +1405,31 @@ func (c *UpstreamConfig) Copy() *UpstreamConfig {
 	if c.RateLimitAutoTune != nil {
 		copied.RateLimitAutoTune = c.RateLimitAutoTune.Copy()
 	}
+	if c.Svm != nil {
+		copied.Svm = c.Svm.Copy()
+	}
+	if c.Shadow != nil {
+		copied.Shadow = c.Shadow.Copy()
+	}
+	if c.Routing != nil {
+		copied.Routing = c.Routing.Copy()
+	}
+
+	// Tags is a slice, so `append` on a copy that still has spare capacity
+	// writes into the ORIGINAL's backing array. The selection policy reads
+	// tags on the request path.
+	if c.Tags != nil {
+		copied.Tags = make([]string, len(c.Tags))
+		copy(copied.Tags, c.Tags)
+	}
+
+	// CreditUnits is a map. Two bootstrap attempts writing one shared map is a
+	// Go fatal "concurrent map writes" — the runtime kills the process and no
+	// recover catches it.
+	if c.CreditUnits != nil {
+		copied.CreditUnits = make(map[string]int64, len(c.CreditUnits))
+		maps.Copy(copied.CreditUnits, c.CreditUnits)
+	}
 
 	if c.IgnoreMethods != nil {
 		copied.IgnoreMethods = make([]string, len(c.IgnoreMethods))
@@ -1153,6 +1448,38 @@ type ShadowUpstreamConfig struct {
 	Enabled      bool                `yaml:"enabled" json:"enabled"`
 	SampleRate   *float64            `yaml:"sampleRate,omitempty" json:"sampleRate,omitempty"`
 	IgnoreFields map[string][]string `yaml:"ignoreFields,omitempty" json:"ignoreFields"`
+}
+
+// Copy deep-copies the shadow settings. IgnoreFields is a map of slices, so a
+// struct-level copy alone still leaves both configs writing into one map and
+// into one set of backing arrays. erpc/shadow.go reads IgnoreFields per
+// comparison, concurrently with upstream bootstrap.
+func (c *ShadowUpstreamConfig) Copy() *ShadowUpstreamConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &ShadowUpstreamConfig{}
+	*copied = *c
+
+	if c.SampleRate != nil {
+		v := *c.SampleRate
+		copied.SampleRate = &v
+	}
+	if c.IgnoreFields != nil {
+		copied.IgnoreFields = make(map[string][]string, len(c.IgnoreFields))
+		for method, fields := range c.IgnoreFields {
+			if fields == nil {
+				copied.IgnoreFields[method] = nil
+				continue
+			}
+			cp := make([]string, len(fields))
+			copy(cp, fields)
+			copied.IgnoreFields[method] = cp
+		}
+	}
+
+	return copied
 }
 
 // Deprecated: UpstreamIntegrityConfig is a non-functional legacy stub (never
@@ -1259,7 +1586,12 @@ func (c *JsonRpcUpstreamConfig) Copy() *JsonRpcUpstreamConfig {
 	copied := &JsonRpcUpstreamConfig{}
 	*copied = *c
 
+	// Allocate first: `*copied = *c` gave copied.Headers the SAME map as c, so
+	// copying into it without this line copies the map into itself and leaves
+	// the two configs sharing one header map. Headers carry credentials, and a
+	// vendor writes into them per upstream.
 	if c.Headers != nil {
+		copied.Headers = make(map[string]string, len(c.Headers))
 		maps.Copy(copied.Headers, c.Headers)
 	}
 
@@ -1571,6 +1903,20 @@ func (c *RetryPolicyConfig) Copy() *RetryPolicyConfig {
 	}
 	copied := &RetryPolicyConfig{}
 	*copied = *c
+
+	// Both method lists escape the config. ResolveEmptyResultAccept hands
+	// EmptyResultAccept straight to the request path, and SetDefaults assigns
+	// EmptyResultIgnore to EmptyResultAccept, so without these copies one
+	// backing array reaches two fields of every copy of every config.
+	if c.EmptyResultAccept != nil {
+		copied.EmptyResultAccept = make([]string, len(c.EmptyResultAccept))
+		copy(copied.EmptyResultAccept, c.EmptyResultAccept)
+	}
+	if c.EmptyResultIgnore != nil {
+		copied.EmptyResultIgnore = make([]string, len(c.EmptyResultIgnore))
+		copy(copied.EmptyResultIgnore, c.EmptyResultIgnore)
+	}
+
 	return copied
 }
 
@@ -2215,9 +2561,21 @@ type NetworkConfig struct {
 	Methods           *MethodsConfig           `yaml:"methods,omitempty" json:"methods"`
 	Multiplexing      *bool                    `yaml:"multiplexing,omitempty" json:"multiplexing"`
 	StaticResponses   []*StaticResponseConfig  `yaml:"staticResponses,omitempty" json:"staticResponses,omitempty"`
+	Failover          *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
+
 	// Integrity overrides the project-wide data-integrity configuration for this
 	// network. Merges over the project block (network wins).
 	Integrity *IntegrityConfig `yaml:"integrity,omitempty" json:"integrity,omitempty"`
+
+	// Chain names the network for architectures that have no config block of
+	// their own — "mainnet" in "btc:mainnet". It is the body of the network ID,
+	// and the chain family validates it (see NetworkId below).
+	//
+	// evm and svm ignore this field: their identity already lives in
+	// evm.chainId and svm.cluster, and moving it would rewrite every existing
+	// config and cache key. One shared field, rather than one config block per
+	// chain, is what keeps adding a chain a config exercise.
+	Chain string `yaml:"chain,omitempty" json:"chain,omitempty"`
 }
 
 // StaticResponseConfig declares a canned JSON-RPC response for a specific
@@ -2456,6 +2814,21 @@ type SvmUpstreamConfig struct {
 	CheckGenesisHash bool `yaml:"checkGenesisHash,omitempty" json:"checkGenesisHash"`
 }
 
+// Copy deep-copies the SVM settings. Every field is a scalar today, so the
+// struct assignment is the whole copy — but ApplyDefaults writes Chain,
+// Cluster and CheckGenesisHash in place, so a shared pointer here is one
+// call-order change away from one upstream editing another's identity.
+func (c *SvmUpstreamConfig) Copy() *SvmUpstreamConfig {
+	if c == nil {
+		return nil
+	}
+
+	copied := &SvmUpstreamConfig{}
+	*copied = *c
+
+	return copied
+}
+
 type EvmNetworkConfig struct {
 	ChainId                     int64               `yaml:"chainId" json:"chainId"`
 	FallbackFinalityDepth       int64               `yaml:"fallbackFinalityDepth,omitempty" json:"fallbackFinalityDepth"`
@@ -2498,6 +2871,18 @@ type EvmNetworkConfig struct {
 	// empty result likely means the upstream hasn't indexed that data yet.
 	// Default includes common point-lookup methods like eth_getBlockByNumber, eth_getTransactionByHash, etc.
 	MarkEmptyAsErrorMethods []string `yaml:"markEmptyAsErrorMethods,omitempty" json:"markEmptyAsErrorMethods,omitempty"`
+
+	// StripSubscribeFromBlockZero, when true, removes `fromBlock: "0x0"` from
+	// eth_subscribe logs filters before forwarding to upstream WebSockets.
+	// Some clients include `fromBlock: "0x0"` in the filter as a
+	// "from genesis" marker. eth_subscribe is a live-stream RPC — fromBlock
+	// has no standardised meaning there — and on backends that prune
+	// historical data the subscription fails outright. Enabling this flag
+	// for such networks drops the field so the live stream succeeds;
+	// historical logs remain retrievable via eth_getLogs. Only the exact
+	// value "0x0" or "0" is stripped — non-zero fromBlocks pass through
+	// unchanged. DEFAULT: false.
+	StripSubscribeFromBlockZero *bool `yaml:"stripSubscribeFromBlockZero,omitempty" json:"stripSubscribeFromBlockZero,omitempty"`
 
 	// DynamicBlockTimeDebounceMultiplier scales the EMA-estimated block time to derive
 	// the debounce interval for block polling. A value of 0.7 means debounce = 70% of
@@ -2709,6 +3094,16 @@ type SelectionPolicyConfig struct {
 	// Signature: `(upstreams, ctx) => Upstream[]`.
 	// See specs/selection-policy/feature.md for the stdlib reference.
 	EvalFunc string `yaml:"evalFunc,omitempty" json:"evalFunc" tstype:"SelectionPolicyEvalFunction | string"`
+
+	// FailoverOnDefaultsExhausted mirrors the network's
+	// `failover.onDefaultsExhausted` (see FailoverConfig) into the policy
+	// engine. Derived, never parsed — `Network.Bootstrap` copies it in
+	// from NetworkConfig.Failover just before it registers the network.
+	// The engine publishes it to the eval as
+	// `ctx.failoverOnDefaultsExhausted`; the bundled default policy reads
+	// it to keep `tier:fallback` upstreams in the tick's list (ranked
+	// last) instead of dropping them.
+	FailoverOnDefaultsExhausted bool `yaml:"-" json:"-"`
 
 	// DisableTickerForTest skips spawning the per-slot ticker goroutine.
 	// Tests that don't need background re-eval set this to avoid
@@ -2993,7 +3388,15 @@ func (c *NetworkConfig) NetworkId() string {
 		}
 		return util.SvmNetworkId(c.Svm.Chain, c.Svm.Cluster)
 	default:
-		return ""
+		// Any other architecture names its network in `chain:` and the family
+		// says whether that name is real. Returning "" for an unregistered
+		// architecture is what keeps a typo'd `architecture:` from minting an
+		// id that no upstream will ever match.
+		family, known := LookupChainFamily(c.Architecture)
+		if !known || !family.ValidateNetworkId(c.Chain) {
+			return ""
+		}
+		return string(c.Architecture) + ":" + c.Chain
 	}
 }
 
@@ -3106,7 +3509,13 @@ func loadConfigFromTypescript(filename string) (*Config, error) {
 		return nil, err
 	}
 
-	defaultExport := runtime.Exports().Get("default")
+	// A file with no exports at all leaves no `exports` global behind, so
+	// the operator who forgot `export default` lands on the same sentence
+	// as the one who exported nothing.
+	var defaultExport sobek.Value
+	if exports := runtime.Exports(); exports != nil {
+		defaultExport = exports.Get("default")
+	}
 	if defaultExport == nil || sobek.IsUndefined(defaultExport) || sobek.IsNull(defaultExport) {
 		return nil, fmt.Errorf("config object must be default exported from TypeScript code AND must be the last statement in the file")
 	}

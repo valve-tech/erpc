@@ -230,11 +230,24 @@ func (n *Network) Bootstrap(ctx context.Context) error {
 	if n.policyEngine == nil {
 		return nil
 	}
-	cfg := n.cfg.SelectionPolicy
-	if cfg == nil {
-		cfg = &common.SelectionPolicyConfig{}
-		n.cfg.SelectionPolicy = cfg
+	// Register a copy, never the operator's own struct. Two networks can hold
+	// one *SelectionPolicyConfig, and everything below writes it: the failover
+	// flag here, and EvalFunc / EvalFuncOriginal / CompiledProgram inside
+	// SetDefaults and inside the engine's default-policy upgrade. With a shared
+	// struct the last network to bootstrap wins, so one network silently runs
+	// under another's failover flag. See entries 96, 97 and 131 in
+	// valve/upstream-bug-log.md. The copy is shallow on purpose: the only
+	// pointer field it carries is the compiled program, which nothing mutates
+	// after compilation.
+	cfg := &common.SelectionPolicyConfig{}
+	if n.cfg.SelectionPolicy != nil {
+		*cfg = *n.cfg.SelectionPolicy
 	}
+	// `failover.onDefaultsExhausted` reaches the HTTP path through the
+	// selection policy: the engine publishes this to the eval as
+	// `ctx.failoverOnDefaultsExhausted`, and the bundled default policy
+	// reads it to rank the fallback tier last instead of dropping it.
+	cfg.FailoverOnDefaultsExhausted = n.cfg.Failover.Enabled()
 	// Defensive: callers may have set Eval but skipped SetDefaults (common
 	// in tests that build Config as Go struct literals). Compile here so
 	// the engine never sees a nil program.
@@ -2503,33 +2516,23 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	return resp, nil
 }
 
+// prepareRequest validates the inbound body and lets the architecture rewrite
+// it before the pipeline runs.
+//
+// Registry lookup, not a switch over architecture names: an architecture that
+// registered a handler is one eRPC serves, so adding a chain does not touch
+// this function. Two steps, in this order:
+//
+//  1. Parse the JSON-RPC body. Every architecture eRPC can serve speaks
+//     JSON-RPC over HTTP POST — a REST family is refused at registration
+//     (common/chain_family.go) precisely because NormalizedRequest carries no
+//     verb or path — so the parse is shared rather than repeated per family.
+//  2. Ask the handler to normalize. Only EVM does (hex padding, block-tag
+//     expansion); a handler with nothing to rewrite implements nothing and is
+//     skipped.
 func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedRequest) error {
-	switch n.Architecture() {
-	case common.ArchitectureEvm:
-		jsonRpcReq, err := nr.JsonRpcRequest(ctx)
-		if err != nil {
-			return common.NewErrJsonRpcExceptionInternal(
-				0,
-				common.JsonRpcErrorParseException,
-				"failed to unmarshal json-rpc request",
-				err,
-				nil,
-			)
-		}
-		evm.NormalizeHttpJsonRpc(ctx, nr, jsonRpcReq)
-	case common.ArchitectureSvm:
-		// SVM doesn't need any EVM-style normalization (hex padding, block tag expansion, etc.).
-		// Validate that the request parses as JSON-RPC and move on.
-		if _, err := nr.JsonRpcRequest(ctx); err != nil {
-			return common.NewErrJsonRpcExceptionInternal(
-				0,
-				common.JsonRpcErrorParseException,
-				"failed to unmarshal json-rpc request",
-				err,
-				nil,
-			)
-		}
-	default:
+	handler, err := common.GetArchitectureHandler(n.Architecture())
+	if err != nil {
 		return common.NewErrJsonRpcExceptionInternal(
 			0,
 			common.JsonRpcErrorServerSideException,
@@ -2539,6 +2542,19 @@ func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedReque
 		)
 	}
 
+	if _, err := nr.JsonRpcRequest(ctx); err != nil {
+		return common.NewErrJsonRpcExceptionInternal(
+			0,
+			common.JsonRpcErrorParseException,
+			"failed to unmarshal json-rpc request",
+			err,
+			nil,
+		)
+	}
+
+	if normalizer, ok := handler.(common.RequestNormalizer); ok {
+		return normalizer.NormalizeRequest(ctx, nr)
+	}
 	return nil
 }
 
@@ -2840,6 +2856,15 @@ func (n *Network) checkUpstreamBlockAvailability(ctx context.Context, u common.U
 	if methodHasDedicatedRangeAvailabilityHook(method) {
 		return nil, false
 	}
+	// A block-agnostic method cannot be missing a block. eth_chainId and net_version
+	// are marked finalized and carry block number 1 as a CACHE sentinel — "final
+	// since the first ever block" — not as a block the caller asked for. Gating on
+	// that 1 refused every static method on any upstream with a lower bound, which
+	// includes every node configured with maxAvailableRecentBlocks. Ask the method
+	// config rather than decoding the sentinel.
+	if evm.MethodHasNoBlockDependency(method, n) {
+		return nil, false
+	}
 	// Explicit method/network enforceBlockAvailability:false is an operator opt-out.
 	if n.blockAvailabilityExplicitlyDisabled(method) {
 		return nil, false
@@ -2927,6 +2952,13 @@ func (n *Network) eligibleUpstreamIDsForBoundary(ctx context.Context, method str
 		return nil
 	}
 	if methodHasDedicatedRangeAvailabilityHook(method) {
+		return nil
+	}
+	// Same sentinel, same reason as checkUpstreamBlockAvailability: a block-agnostic
+	// method has no boundary, so every upstream is eligible. Returning nil here means
+	// "no boundary lane applies", which is what the caller wants — an empty non-nil
+	// slice would mean "no upstream can serve this".
+	if evm.MethodHasNoBlockDependency(method, n) {
 		return nil
 	}
 	// Resolve the request's block number (cached at normalization, with a

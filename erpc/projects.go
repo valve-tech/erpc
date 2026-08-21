@@ -67,6 +67,16 @@ func (p *PreparedProject) Bootstrap(appCtx context.Context) {
 	p.networksRegistry.Bootstrap(appCtx)
 }
 
+// BootstrapAndWait runs the project's upstream and network registration on the
+// caller's own goroutine and returns once both have settled. Bootstrap runs the
+// same work fire-and-forget. See UpstreamsRegistry.BootstrapAndWait.
+func (p *PreparedProject) BootstrapAndWait(appCtx context.Context) error {
+	if err := p.upstreamsRegistry.BootstrapAndWait(appCtx); err != nil {
+		return err
+	}
+	return p.networksRegistry.BootstrapAndWait(appCtx)
+}
+
 func (p *PreparedProject) GetNetwork(ctx context.Context, networkId string) (*Network, error) {
 	return p.networksRegistry.GetNetwork(ctx, networkId)
 }

@@ -97,7 +97,11 @@ func (v *ThirdwebVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Lo
 
 	if upstream.Endpoint == "" {
 		if clientId, ok := settings["clientId"].(string); ok && clientId != "" {
-			parsedURL, err := v.generateUrl(upstream.Evm.ChainId, clientId)
+			chainID := upstream.EvmChainId()
+			if chainID == 0 {
+				return nil, fmt.Errorf("thirdweb vendor requires upstream.evm.chainId to be defined")
+			}
+			parsedURL, err := v.generateUrl(chainID, clientId)
 			if err != nil {
 				return nil, err
 			}

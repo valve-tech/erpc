@@ -71,9 +71,22 @@ func (u *Upstream) svmFetchGenesisHash(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// KEPT DELIBERATELY: the next two checks do not fire today. Forward already
+	// turns a JSON-RPC error answer into a returned error, so the check above
+	// catches it (see TestSvmGenesisGate_RejectsAnUpstreamItCouldNotVerify), and
+	// JsonRpcResponse reports a parse failure as jrr.Error rather than as err.
+	// They stay because this is the identity gate: it decides whether an
+	// upstream joins the pool, and the failure it prevents — a devnet node
+	// serving mainnet queries — is silent. Both checks make it fail closed if
+	// Forward ever passes an error answer through. jrr == nil is a documented
+	// return of JsonRpcResponse for a nil response, and reading .Error on it
+	// would panic.
 	jrr, err := resp.JsonRpcResponse()
 	if err != nil {
 		return "", err
+	}
+	if jrr == nil {
+		return "", fmt.Errorf("no json-rpc response for getGenesisHash")
 	}
 	if jrr.Error != nil {
 		return "", jrr.Error

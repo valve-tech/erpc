@@ -207,14 +207,28 @@ type RetryableError interface {
 	WithRetryableTowardNetwork(bool) RetryableError
 }
 
+// WithRetryableTowardNetwork records the opt-out flag on the error itself.
+//
+// Callers CHAIN this method and return its result, so the value it gives back
+// is the value the rest of the pipeline sees. A concrete type that leaves the
+// method to promotion gets a *BaseError back and loses everything the outer
+// type added: its ErrorStatusCode, and its identity to errors.As — which is how
+// erpc/http_server.go lifts an execution exception out of a failed bundle so the
+// client reads the revert instead of the wrapper. Every type that is chained
+// with this method therefore overrides it and returns itself;
+// setRetryableTowardNetwork below holds the one copy of the flag logic.
 func (e *BaseError) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
+func (e *BaseError) setRetryableTowardNetwork(r bool) {
 	if e != nil {
 		if e.Details == nil {
 			e.Details = map[string]interface{}{}
 		}
 		e.Details["retryableTowardNetwork"] = r
 	}
-	return e
 }
 
 // WithPermanentMissingData marks a MissingData verdict as permanent — the data
@@ -478,6 +492,11 @@ var NewErrInvalidRequest = func(cause error) error {
 
 func (e *ErrInvalidRequest) ErrorStatusCode() int {
 	return http.StatusBadRequest
+}
+
+func (e *ErrInvalidRequest) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
 }
 
 type ErrInvalidUrlPath struct{ BaseError }
@@ -780,6 +799,15 @@ type ErrUpstreamRequest struct {
 	BaseError
 }
 
+// These two errors carry the metadata that LookupResponseMetadata hands to the
+// HTTP layer. Nothing else asserts the interface, so without these declarations
+// a drifting method signature drops the headers silently — the compiler would
+// not say a word.
+var (
+	_ ResponseMetadata = (*ErrUpstreamRequest)(nil)
+	_ ResponseMetadata = (*ErrUpstreamsExhausted)(nil)
+)
+
 const ErrCodeUpstreamRequest ErrorCode = "ErrUpstreamRequest"
 
 var NewErrUpstreamRequest = func(cause error, upstream Upstream, networkId, method string, duration time.Duration, attempts, retries, hedges int) error {
@@ -807,7 +835,11 @@ var NewErrUpstreamRequest = func(cause error, upstream Upstream, networkId, meth
 	}
 }
 
-func (e *ErrUpstreamRequest) IsObjectNull() bool {
+// The context argument is unused here — it exists so the signature matches
+// ResponseMetadata.IsObjectNull. Without the match this type silently stops
+// being a ResponseMetadata, LookupResponseMetadata returns nil, and the HTTP
+// layer writes no X-ERPC-Cache or X-ERPC-Upstream header on an error response.
+func (e *ErrUpstreamRequest) IsObjectNull(_ ...context.Context) bool {
 	return e == nil || e.Code == ""
 }
 
@@ -1038,7 +1070,9 @@ func (e *ErrUpstreamsExhausted) Upstreams() []Upstream {
 	return ups
 }
 
-func (e *ErrUpstreamsExhausted) IsObjectNull() bool {
+// See the note on ErrUpstreamRequest.IsObjectNull: the variadic context keeps
+// this type inside the ResponseMetadata interface.
+func (e *ErrUpstreamsExhausted) IsObjectNull(_ ...context.Context) bool {
 	return e == nil || e.Code == ""
 }
 
@@ -2075,6 +2109,11 @@ func (e *ErrEndpointClientSideException) ErrorStatusCode() int {
 	return http.StatusBadRequest
 }
 
+func (e *ErrEndpointClientSideException) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
 type ErrEndpointExecutionException struct{ BaseError }
 
 const ErrCodeEndpointExecutionException = "ErrEndpointExecutionException"
@@ -2097,14 +2136,58 @@ func (e *ErrEndpointExecutionException) ErrorStatusCode() int {
 	return http.StatusOK
 }
 
+func (e *ErrEndpointExecutionException) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
 type ErrEndpointTransportFailure struct{ BaseError }
 
 const ErrCodeEndpointTransportFailure = "ErrEndpointTransportFailure"
 
+// RedactedEndpointPlaceholder replaces the endpoint URL in a transport failure
+// message. Endpoint URLs carry API keys, so no rendered message may contain one.
+// The placeholder is visible on purpose: a reader (and a test) can tell a
+// redaction apart from an empty message.
+const RedactedEndpointPlaceholder = "<redacted-endpoint>"
+
+// redactedCauseError hides the endpoint URL in an error message but keeps the
+// original error reachable. Error() returns the redacted text, so every surface
+// that prints a cause stays free of credentials: BaseError.Error,
+// BaseError.DeepestMessage, BaseError.MarshalJSON, BaseError.MarshalZerologObject
+// and ErrorSummary all render a non-StandardError cause through Error().
+// Unwrap() returns the untouched original, so errors.Is and errors.As still
+// reach sentinels such as context.DeadlineExceeded, io.EOF and net.ErrClosed.
+//
+// The type deliberately does not implement StandardError. The marshalling code
+// in BaseError renders a non-StandardError cause through Error(), which is the
+// redacted path we want.
+type redactedCauseError struct {
+	cause   error
+	message string
+}
+
+func (e *redactedCauseError) Error() string { return e.message }
+
+func (e *redactedCauseError) Unwrap() error { return e.cause }
+
+// redactEndpointInCause wraps cause so its message no longer shows the endpoint
+// URL. A nil or empty URL is a no-op on the message: strings.ReplaceAll with an
+// empty needle would insert the placeholder between every character.
+func redactEndpointInCause(u *url.URL, cause error) error {
+	message := cause.Error()
+	if u != nil {
+		if raw := u.String(); raw != "" {
+			message = strings.ReplaceAll(message, raw, RedactedEndpointPlaceholder)
+		}
+	}
+	return &redactedCauseError{cause: cause, message: message}
+}
+
 var NewErrEndpointTransportFailure = func(url *url.URL, cause error) error {
 	if cause != nil {
 		if _, ok := cause.(StandardError); !ok {
-			cause = errors.New(strings.ReplaceAll(cause.Error(), url.String(), ""))
+			cause = redactEndpointInCause(url, cause)
 		}
 	}
 	return &ErrEndpointTransportFailure{
@@ -2207,6 +2290,11 @@ func (e *ErrEndpointCapacityExceeded) ErrorStatusCode() int {
 	return http.StatusTooManyRequests
 }
 
+func (e *ErrEndpointCapacityExceeded) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
+}
+
 type ErrEndpointBillingIssue struct{ BaseError }
 
 const ErrCodeEndpointBillingIssue = "ErrEndpointBillingIssue"
@@ -2263,6 +2351,11 @@ var NewErrEndpointMissingData = func(cause error, upstream Upstream) error {
 func (e *ErrEndpointMissingData) ErrorStatusCode() int {
 	// Many clients expect status code 200 but error body for "missing data" error variations
 	return http.StatusOK
+}
+
+func (e *ErrEndpointMissingData) WithRetryableTowardNetwork(r bool) RetryableError {
+	e.setRetryableTowardNetwork(r)
+	return e
 }
 
 type ErrUpstreamNodeTypeMismatch struct{ BaseError }
@@ -2507,7 +2600,9 @@ func HasErrorCode(err error, codes ...ErrorCode) bool {
 	}
 
 	if be, ok := err.(StandardError); ok {
-		return be.HasCode(codes...)
+		if be.HasCode(codes...) {
+			return true
+		}
 	}
 
 	if be, ok := err.(*BaseError); ok {
@@ -2524,6 +2619,14 @@ func HasErrorCode(err error, codes ...ErrorCode) bool {
 				return true
 			}
 		}
+	}
+
+	// A plain fmt.Errorf("%w", ...) link must not hide a code. errors.As walks
+	// it, and callers pair the two (see eth_sendRawTransaction), so a walk that
+	// stops here makes the pair disagree. StandardError.HasCode also stops at
+	// such a link inside its own cause chain, so keep walking after it too.
+	if we, ok := err.(interface{ Unwrap() error }); ok {
+		return HasErrorCode(we.Unwrap(), codes...)
 	}
 
 	return false
@@ -3040,4 +3143,68 @@ var NewErrEndpointNonceException = func(cause error, reason NonceExceptionReason
 
 func (e *ErrEndpointNonceException) ErrorStatusCode() int {
 	return http.StatusOK
+}
+
+//
+// WebSocket / Subscription errors
+//
+
+type ErrSubscriptionNotFound struct{ BaseError }
+
+const ErrCodeSubscriptionNotFound ErrorCode = "ErrSubscriptionNotFound"
+
+var NewErrSubscriptionNotFound = func(subId string) error {
+	return &ErrSubscriptionNotFound{
+		BaseError{
+			Code:    ErrCodeSubscriptionNotFound,
+			Message: "subscription not found",
+			Details: map[string]interface{}{
+				"subscriptionId": subId,
+			},
+		},
+	}
+}
+
+func (e *ErrSubscriptionNotFound) ErrorStatusCode() int {
+	return http.StatusNotFound
+}
+
+type ErrNoWsUpstreamAvailable struct{ BaseError }
+
+const ErrCodeNoWsUpstreamAvailable ErrorCode = "ErrNoWsUpstreamAvailable"
+
+var NewErrNoWsUpstreamAvailable = func(networkId string) error {
+	return &ErrNoWsUpstreamAvailable{
+		BaseError{
+			Code:    ErrCodeNoWsUpstreamAvailable,
+			Message: fmt.Sprintf("eth_subscribe requires a WebSocket-capable upstream, none configured for network %s", networkId),
+			Details: map[string]interface{}{
+				"networkId": networkId,
+			},
+		},
+	}
+}
+
+func (e *ErrNoWsUpstreamAvailable) ErrorStatusCode() int {
+	return http.StatusBadRequest
+}
+
+type ErrSubscriptionLimitExceeded struct{ BaseError }
+
+const ErrCodeSubscriptionLimitExceeded ErrorCode = "ErrSubscriptionLimitExceeded"
+
+var NewErrSubscriptionLimitExceeded = func(max int) error {
+	return &ErrSubscriptionLimitExceeded{
+		BaseError{
+			Code:    ErrCodeSubscriptionLimitExceeded,
+			Message: "maximum subscriptions per connection exceeded",
+			Details: map[string]interface{}{
+				"maxPerConnection": max,
+			},
+		},
+	}
+}
+
+func (e *ErrSubscriptionLimitExceeded) ErrorStatusCode() int {
+	return http.StatusTooManyRequests
 }

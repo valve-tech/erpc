@@ -113,6 +113,18 @@ func (r *ProjectsRegistry) Bootstrap(appCtx context.Context) {
 	}
 }
 
+// BootstrapAndWait bootstraps every prepared project on the caller's own
+// goroutine and returns once they have all settled. See
+// UpstreamsRegistry.BootstrapAndWait.
+func (r *ProjectsRegistry) BootstrapAndWait(appCtx context.Context) error {
+	for _, prj := range r.preparedProjects {
+		if err := prj.BootstrapAndWait(appCtx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ProjectsRegistry) GetProject(projectId string) (project *PreparedProject, err error) {
 	if projectId == "" {
 		return nil, nil

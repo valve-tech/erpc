@@ -804,6 +804,35 @@ export interface UpstreamConfig {
    * matching the Tags inheritance pattern).
    */
   routing?: UpstreamRoutingConfig;
+  /**
+   * Chain names the network this upstream serves, for upstream types that
+   * have no config block of their own — "mainnet" in `type: btc`. It is the
+   * body of the upstream's network ID, and the chain family validates it
+   * (common.ChainFamily.ValidateNetworkId).
+   *
+   * The mirror of NetworkConfig.Chain, and deliberately the same one field
+   * rather than one config block per chain: that is what keeps adding
+   * Bitcoin, Zcash or Dogecoin a config exercise instead of new Go code.
+   *
+   * evm and svm ignore this field. Their identity already lives in
+   * evm.chainId and svm.cluster, and moving it would rewrite every existing
+   * config and cache key.
+   */
+  chain?: string;
+  /**
+   * ChainProbeInterval is how often the chain family re-probes this upstream
+   * for its liveness and its tip. It applies to families driven by
+   * ChainFamily.Probe (btc today); evm and svm keep their own state pollers
+   * and ignore it.
+   *
+   * The interval is config rather than a constant because block times differ
+   * by two orders of magnitude across the chains this seam is for — Bitcoin
+   * produces a block every ten minutes, Dogecoin every minute. A value at or
+   * below zero means "use the default"; there is no way to switch the probe
+   * off, because an upstream that never publishes a tip can be neither ranked
+   * nor excluded and would take traffic on no evidence.
+   */
+  chainProbeInterval?: Duration;
 }
 /**
  * UpstreamRoutingConfig holds per-upstream routing hints. Today this is

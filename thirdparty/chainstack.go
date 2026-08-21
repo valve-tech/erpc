@@ -58,6 +58,10 @@ type ChainstackFilterParams struct {
 
 const DefaultChainstackRecheckInterval = 1 * time.Hour
 
+// chainstackNodesApiUrl is the paginated node listing that fetchNodes walks.
+// It is a var so tests can point the walk at a local server.
+var chainstackNodesApiUrl = "https://api.chainstack.com/v1/nodes/"
+
 func CreateChainstackVendor() common.Vendor {
 	return &ChainstackVendor{
 		cache: NewRemoteDataCache[[]*ChainstackNode]("chainstack"),
@@ -114,9 +118,7 @@ func (v *ChainstackVendor) resolveNodes(logger *zerolog.Logger, apiKey string, s
 			if err != nil {
 				return nil, err
 			}
-			if err := v.fetchChainIDs(ctx, logger, fetched); err != nil {
-				logger.Warn().Err(err).Msg("some chainstack chain ID fetches failed; continuing with available data")
-			}
+			v.fetchChainIDs(ctx, logger, fetched)
 			return fetched, nil
 		})
 	}
@@ -233,7 +235,7 @@ func (v *ChainstackVendor) fetchNodes(ctx context.Context, logger *zerolog.Logge
 	var allNodes []*ChainstackNode
 
 	// Build initial URL with query parameters
-	baseURL := "https://api.chainstack.com/v1/nodes/"
+	baseURL := chainstackNodesApiUrl
 	params := url.Values{}
 
 	if filterParams != nil {
@@ -263,8 +265,10 @@ func (v *ChainstackVendor) fetchNodes(ctx context.Context, logger *zerolog.Logge
 		Timeout: 30 * time.Second,
 	}
 
-	for nextURL != "" {
-		req, err := http.NewRequestWithContext(ctx, "GET", nextURL, nil)
+	// fetchPage closes the page body before it returns, so the walk holds one
+	// connection at a time however many pages the account has.
+	fetchPage := func(pageURL string) (*ChainstackNodesResponse, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -284,6 +288,14 @@ func (v *ChainstackVendor) fetchNodes(ctx context.Context, logger *zerolog.Logge
 		var nodesResp ChainstackNodesResponse
 		if err := common.SonicCfg.NewDecoder(resp.Body).Decode(&nodesResp); err != nil {
 			return nil, fmt.Errorf("failed to decode Chainstack nodes response: %w", err)
+		}
+		return &nodesResp, nil
+	}
+
+	for nextURL != "" {
+		nodesResp, err := fetchPage(nextURL)
+		if err != nil {
+			return nil, err
 		}
 
 		// Decode each node individually, ignoring nodes that fail to decode
@@ -311,7 +323,12 @@ func (v *ChainstackVendor) fetchNodes(ctx context.Context, logger *zerolog.Logge
 	return allNodes, nil
 }
 
-func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Logger, nodes []*ChainstackNode) error {
+// fetchChainIDs probes every running node for its chain ID and fills it in
+// place. A node whose probe fails keeps chain ID 0 and drops out of routing.
+// That is a per-node outcome, not a failure of the walk, so there is nothing
+// to return: the caller must keep the nodes that did answer. Every failure
+// goes to the logger, which is the operator's signal.
+func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Logger, nodes []*ChainstackNode) {
 	// Use semaphore to limit concurrent requests
 	sem := semaphore.NewWeighted(10)
 	var wg sync.WaitGroup
@@ -401,8 +418,6 @@ func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Lo
 	if len(errors) > 0 {
 		logger.Warn().Errs("errors", errors).Msg("failed to fetch chain IDs for some Chainstack nodes")
 	}
-
-	return nil
 }
 
 func (v *ChainstackVendor) GetVendorSpecificErrorIfAny(req *common.NormalizedRequest, resp *http.Response, jrr interface{}, details map[string]interface{}) error {
