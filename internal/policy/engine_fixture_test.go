@@ -272,7 +272,7 @@ func defaultPolicyConfig(opts ...func(*common.SelectionPolicyConfig)) *common.Se
 		// Generous: the whole default chain runs per tick and the race
 		// detector slows the sobek interpreter down a lot. A real hang
 		// still fails, it just takes five seconds to say so.
-		EvalTimeout:          common.Duration(5 * time.Second),
+		EvalTimeout:          testEvalTimeout,
 		EvalFunc:             common.DefaultSelectionPolicySource,
 		DisableTickerForTest: true,
 	}

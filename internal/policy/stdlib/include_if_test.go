@@ -36,7 +36,7 @@ func mkReserveEngine(t *testing.T, eval string) (*policy.Engine, []common.Upstre
 
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: 0,
-		EvalTimeout:  common.Duration(50 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 		EvalFunc:     eval,
 	}
 	require.NoError(t, cfg.SetDefaults())

@@ -47,7 +47,7 @@ func TestStdlib_EvalPerFinality_SeparateSlots(t *testing.T) {
 
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: common.Duration(0), // frozen — drive manually
-		EvalTimeout:  common.Duration(50 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 		EvalFunc:     eval,
 		EvalScope:    common.EvalScopeNetworkFinality,
 	}

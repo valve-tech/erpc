@@ -272,6 +272,21 @@ Reproduced on the pre-merge tree, so it is not caused by any fork change. Not
 yet diagnosed; the setup uses `LockMaxWait: 200ms` and `UpdateMaxWait: 200ms`
 over an in-memory connector, so a cross-process lock is not the cause.
 
+**Hypothesis, recorded on 2026-08-21, NOT confirmed.** "In-memory" rules out
+lock CONTENTION, not the deadline. A goroutine starved of CPU can miss a 200 ms
+wait on an uncontended in-memory lock just as easily. If a shared-state update
+expires, one upstream drops out, corroboration has nothing to corroborate
+against, and the test is served rpc1's `0x5` instead of the corroborated `0x0`
+— which is exactly the assertion that fails.
+
+**Deliberately not acted on.** The fix would be the one applied to 168: delete
+the deadline the test is not testing. It was not applied here, for two reasons.
+The `200 ms` pair is a copied fixture idiom across eight `erpc` test files, so
+changing one is inconsistent and changing all eight is a wide edit made on a
+guess. And an attempt to reproduce 168's much better-understood flake failed
+under eight CPU burners, so a reproduction of this one is not cheap either.
+Confirm the hypothesis first; the entry stays open until someone does.
+
 ---
 
 ## 11. `guessVendorName`'s multi-level-TLD guard is off by one
@@ -575,9 +590,16 @@ Reproduced on a clean tree with
 `go test ./architecture/evm/ -count=1 -parallel 8 -race`, failing
 `TestSuggestFinalizedBlock_MajorJumpChainIdMismatchDroppedAndCordoned`.
 
-The drop-on-contention is deliberate in production — the next poll re-observes —
-so the fix belongs in the test, not the poller. Compare bug 10: this is the
-second flaky test found whose cause is a test racing a background poller.
+**That last sentence used to read** "the drop-on-contention is deliberate in
+production — the next poll re-observes — so the fix belongs in the test, not the
+poller." It survived the fix and contradicted this entry's own status, which
+says the cause was in the poller. The status is right: `47d863f` changed the
+poller, not the test. Left here as the correction rather than deleted, because
+the reasoning was wrong in an instructive way — "the next poll re-observes"
+assumed a next poll always comes.
+
+Compare bug 10: that is another flaky test whose cause is a test racing a
+background poller, and it is still open.
 
 ---
 
@@ -5176,8 +5198,8 @@ outright.
 
 ## 168. A third load-triggered flaky test, in `internal/policy/stdlib`
 
-**Status:** open. **Severity: low for correctness, medium for CI trust.** Same
-shape as entries 10 and 23.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low
+for correctness, medium for CI trust.** Same shape as entries 10 and 23.
 
 `TestStdlib_DemoteTag_RanksLastNeverDrops`
 (`internal/policy/stdlib/stdlib_test.go:1688`) failed once during a
@@ -5197,8 +5219,29 @@ The same test passes 5 runs in a row on a quiet machine, and the whole
 `internal/policy/...` tree passes. Nothing in the failing path was modified by
 the work that found this.
 
-The fix is the one entries 10 and 23 point at: wait for the condition instead
-of betting on a deadline.
+**The fix.** The bet is deleted rather than made safer. `testEvalTimeout`
+(`internal/policy/stdlib/eval_timeout_testconst_test.go`, and its twin in
+`internal/policy`) replaces 77 hand-written per-test deadlines of 10 ms, 50 ms,
+100 ms and 200 ms. The initial eval is synchronous inside `RegisterNetwork`
+(`internal/policy/engine.go`), so a deadline that cannot plausibly fire makes
+these tests deterministic, not merely less flaky.
+
+The constant is 10 s, not larger: `EvalInterval` defaults to 15 s when unset
+and `Validate` refuses an `evalTimeout` that is not below the interval. Six
+call sites drive a real ticker with a smaller interval and therefore keep their
+own small timeout — the constant would be invalid there.
+
+This matters more since 46 was fixed. The timeout now WINS, so an eval that
+overruns no longer sneaks a late answer into the cache. Every one of those 77
+deadlines became more fragile the moment 46 was fixed.
+
+**What was NOT demonstrated.** I could not reproduce the original failure. With
+the 50 ms deadline restored and eight CPU burners saturating all 8 cores,
+`./internal/policy/stdlib/ -race -count=3 -parallel 16` still passed. So the
+mechanism above is read from the code and is not confirmed by a reproduction.
+What IS established: the arbitrary deadline is gone, `-race -count=3
+-parallel 16` is clean across the whole policy tree, and the test no longer
+depends on how busy the machine is.
 
 ## 155. `TestInitializer_MultipleRapidFailures` asserts against a live auto-retry loop
 

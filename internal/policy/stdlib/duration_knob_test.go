@@ -32,7 +32,7 @@ func stickyCooldownFixture(t *testing.T, minSwitchIntervalJS string) (*policy.En
 	ups := mkUps("aaa", "bbb")
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: common.Duration(0),
-		EvalTimeout:  common.Duration(500 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 		EvalFunc:     eval,
 	}
 	require.NoError(t, cfg.SetDefaults())

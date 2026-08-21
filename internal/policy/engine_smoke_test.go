@@ -92,7 +92,7 @@ func TestEngine_OverrideOrderForTest(t *testing.T) {
 
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval: common.Duration(0), // frozen: only manual ticks
-		EvalTimeout:  common.Duration(10 * time.Millisecond),
+		EvalTimeout:  testEvalTimeout,
 	}
 	require.NoError(t, cfg.SetDefaults())
 
@@ -142,7 +142,7 @@ func TestEngine_SweepIdleSlots(t *testing.T) {
 		// (it's separate from the ticker), so the wildcard slot's
 		// cache is populated for the GetOrdered fallback to hit.
 		EvalInterval:         common.Duration(0),
-		EvalTimeout:          common.Duration(500 * time.Millisecond),
+		EvalTimeout:          testEvalTimeout,
 		EvalScope:            common.EvalScopeNetworkMethod, // lazy per-method slots
 		EvalFunc:             `(ups, _ctx) => ups`,          // trivial pass-through
 		DisableTickerForTest: true,
@@ -213,7 +213,7 @@ func registerAndCaptureLogs(t *testing.T, evalFunc string, failoverOn bool) stri
 	logger := zerolog.New(&buf)
 	tracker := health.NewTracker(&logger, "p1", time.Minute)
 
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(50 * time.Millisecond)}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout}
 	if evalFunc != "" {
 		cfg.EvalFunc = evalFunc
 	}

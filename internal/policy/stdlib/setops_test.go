@@ -2,7 +2,6 @@ package stdlib_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/internal/policy"
@@ -40,7 +39,7 @@ func runEval(t *testing.T, eval string, ups []upSpec) []string {
 	}
 	list := mkUpsWithTags(specs)
 
-	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: common.Duration(200 * time.Millisecond), EvalFunc: eval}
+	cfg := &common.SelectionPolicyConfig{EvalInterval: 0, EvalTimeout: testEvalTimeout, EvalFunc: eval}
 	require.NoError(t, cfg.SetDefaults())
 	require.NoError(t, engine.RegisterNetwork("evm:1", "", func() []common.Upstream { return list }, cfg))
 
