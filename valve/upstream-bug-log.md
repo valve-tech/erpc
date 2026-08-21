@@ -5814,6 +5814,60 @@ premise unexamined.
 ---
 
 
+
+## 171. The shadow block-availability gate drops a request that names no block
+
+**Status: FIXED in the fork.** Upstream carries it in NEW code — `8bbc04f4`,
+merged after the fork's last sync. **Severity: medium.** Shadow comparison
+silently stops for whole classes of method.
+
+**Found by rebasing, not by reading.** The fork rebased onto upstream and
+`TestProjectForward_MirrorsTheServedAnswerToTheShadowUpstream` failed. It passes
+on the commit before the rebase. Nothing conflicted; the two sides merged
+cleanly and disagreed about behaviour anyway.
+
+`erpc/shadow.go`. Upstream added a gate so a recent-only shadow upstream is not
+sent archive-depth traffic it can only refuse:
+
+```go
+if _, blockNumber, err := evm.ExtractBlockReferenceFromRequest(ctx, origReq); err == nil && blockNumber > 0 {
+    available, err := ups.EvmAssertBlockAvailability(ctx, method, ..., blockNumber)
+    if err == nil && !available { continue }
+}
+```
+
+The intent is right and its comment states the intended bound exactly: "Only a
+CONCRETE height the upstream states it does not have is skipped." The code does
+not hold that bound, for two reasons.
+
+**1. This is entry 72, third site.** A block-agnostic method has no block to be
+missing. A finalized method carries block number **1** as a cache sentinel, and
+`blockNumber > 0` reads it as a real height — the same misreading the fork fixed
+in `checkUpstreamBlockAvailability` and `eligibleUpstreamIDsForBoundary`.
+
+**2. Shadow is worse than the routing path**, because it runs AFTER the forward.
+`origReq` now carries a block number cached from the **answer**, not from
+anything the caller asked for. `eth_blockNumber` is the plain case: it is
+`realtime`, so the request resolves to 0, but by shadow time the request holds
+the head it just returned. The gate then asks whether the shadow upstream "has"
+block 1100. Measured: `method=eth_blockNumber block=1100 available=false`.
+
+**3. The fail-open does not fire.** It keys on `err != nil`. A shadow upstream
+whose state poller has not learned a head yet answers `available=false` with a
+**nil** error — a confident "no" resting on no data. That is not "a height the
+upstream states it does not have"; it is an upstream that has not looked.
+
+The fork's fix reuses the helper written for 72: ask
+`evm.MethodHasNoBlockDependency(method, network)` first, and only gate a method
+that actually depends on a block.
+
+**Left for upstream, not fixed here:** point 3 is a separate defect and survives
+this fix. An upstream with no polled head still answers a confident `false` to
+`EvmAssertBlockAvailability`. Any caller that trusts that answer inherits the
+same bug. The weak fix is for the assertion to distinguish "outside my range"
+from "I do not know my range yet", so a caller can fail open on the second.
+
+---
 ## 170. `waitForTasks` calls `task.Error()` twice and dereferences the second
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity was:
