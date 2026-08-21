@@ -2072,8 +2072,9 @@ instead of `*atomicMap` — and reading the field as a pointer — clears it.
 
 ## 72. A static method is refused as a missing historical block
 
-**Status:** open. **Severity: high.** Every `eth_chainId` and `net_version`
-fails on any upstream that declares a lower availability bound.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** Every `eth_chainId` and `net_version` failed on any upstream that
+declared a lower availability bound.
 
 `architecture/evm/block_ref.go:356` gives block-agnostic, cache-forever methods
 the block reference `*` and the block number **1** — the comment says so: "We
@@ -2103,8 +2104,21 @@ node out of service.
 The gate needs to distinguish "no block dependency" from "block one". Reading
 the block *reference* (`*`) rather than the number is enough.
 
-`TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound`
-(`erpc/networks_boundary_test.go`) pins both halves.
+**The fix.** `evm.MethodHasNoBlockDependency` (`architecture/evm/block_ref.go`)
+answers from the same `CacheMethodConfig` that produced the sentinel: a method
+marked `finalized` or `realtime` has no block dependency, so no upstream can be
+missing its block. Both gates call it and return early.
+
+Asking the config, rather than decoding the number 1, is the point. A check for
+`blockNumber == 1` would re-encode the sentinel in a second place, and a check
+for `blockRef == "*"` would be wrong — `*` also means "several differing block
+params" for `eth_getLogs`, where the block dependency is real.
+
+`TestBlockAvailability_StaticMethodIsNotGatedByTheCacheSentinel`
+(`erpc/networks_boundary_test.go`) pins both halves, and asserts that a genuine
+historical read below the bound is STILL refused, so the fix cannot pass by
+disabling the gate. Proven by reverting the fix: the test fails on both
+methods. Full `make test-fast` green on 2026-08-21.
 
 ## 73. The gRPC query surface ignores every `queryShim` limit
 

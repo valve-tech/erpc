@@ -206,21 +206,22 @@ func TestEligibleUpstreamIDsForBoundary_RefusesToScope(t *testing.T) {
 	})
 }
 
-// TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound
-// characterises a defect, it does not endorse it.
+// Bug 72 pin. eRPC marks block-agnostic methods — eth_chainId, net_version —
+// as finalized and gives them block number 1, "a signal to indicate data is
+// finalized on first ever block" (architecture/evm/block_ref.go). That 1 is a
+// CACHE sentinel, not a block the caller asked for.
 //
-// eRPC marks block-agnostic methods — eth_chainId, net_version — as finalized
-// and gives them block number 1, "a signal to indicate data is finalized on
-// first ever block" (architecture/evm/block_ref.go:356). That 1 is a cache
-// sentinel, not a block the caller asked for. The availability gate reads it as
-// a real block: 1 is below any configured lower bound, so the upstream is
-// reported as not holding the block, and the boundary lane comes back empty.
+// The availability gate used to read it as a real block. 1 is below any
+// configured lower bound, so every static method was refused on every pruned
+// node, and the boundary lane came back empty. An operator saw eth_chainId
+// fail across the whole pool while eth_getBalance on the same nodes succeeded.
+// The bound arrives the same way from maxAvailableRecentBlocks, which resolves
+// to latest-N, so this was not confined to explicit bounds.
 //
-// An operator sees eth_chainId fail on every pruned node in the pool while
-// eth_getBalance on the same nodes succeeds. The lower bound arrives the same
-// way from `maxAvailableRecentBlocks`, which resolves to latest-N, so this is
-// not confined to the newer explicit bounds.
-func TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound(t *testing.T) {
+// Both gates now ask evm.MethodHasNoBlockDependency — the same config that
+// produced the sentinel — instead of decoding the number. This test pins that:
+// a static method is served, and a real historical read is still refused.
+func TestBlockAvailability_StaticMethodIsNotGatedByTheCacheSentinel(t *testing.T) {
 	lower := int64(100)
 	n := laneNetwork(t, common.ArchitectureEvm, laneUpstream(t, "recent", &lower))
 	n.projectId = "boundary-test"
@@ -232,20 +233,25 @@ func TestBlockAvailability_RefusesAStaticMethodOnAnUpstreamWithALowerBound(t *te
 			req := laneRequest(t, `{"jsonrpc":"2.0","id":1,"method":"`+method+`","params":[]}`)
 
 			err, retryable := n.checkUpstreamBlockAvailability(context.Background(), ups[0], req, method)
-			require.Error(t, err, "defect: a chain-id probe is refused as a historical block")
-			require.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamBlockUnavailable))
-			require.Contains(t, err.Error(), `"blockNumber":1`,
-				"the block it names is the cache sentinel, not anything the caller asked for")
-			require.False(t, retryable, "and the upstream is taken out of the running for it")
+			require.NoError(t, err,
+				"bug 72: a chain-id probe needs no block, so no upstream can be missing one")
+			require.False(t, retryable)
 
-			require.Equal(t, []string{}, n.eligibleUpstreamIDsForBoundary(context.Background(), method, req),
-				"defect: the boundary lane is empty for a method that needs no block at all")
+			require.Nil(t, n.eligibleUpstreamIDsForBoundary(context.Background(), method, req),
+				"bug 72: no boundary applies to a block-agnostic method, so every upstream is eligible")
 		})
 	}
 
-	// The contrast: a request that really is about the tip is not gated, because
-	// its block number resolves to 0 rather than to the sentinel.
+	// The contrast that keeps the fix honest. A tip-bound read is allowed for a
+	// different reason (it resolves to block 0), and a real historical read below
+	// the bound is still refused — the fix must not have disabled the gate.
 	req := laneRequest(t, `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xaaaa","latest"]}`)
 	err, _ := n.checkUpstreamBlockAvailability(context.Background(), ups[0], req, "eth_getBalance")
 	require.NoError(t, err, "a tip-bound read on the same upstream is allowed through")
+
+	req = laneRequest(t, `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xaaaa","0x5"]}`)
+	err, retryable := n.checkUpstreamBlockAvailability(context.Background(), ups[0], req, "eth_getBalance")
+	require.Error(t, err, "block 5 is below the lower bound of 100 and must still be refused")
+	require.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamBlockUnavailable))
+	require.False(t, retryable)
 }

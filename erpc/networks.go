@@ -2856,6 +2856,15 @@ func (n *Network) checkUpstreamBlockAvailability(ctx context.Context, u common.U
 	if methodHasDedicatedRangeAvailabilityHook(method) {
 		return nil, false
 	}
+	// A block-agnostic method cannot be missing a block. eth_chainId and net_version
+	// are marked finalized and carry block number 1 as a CACHE sentinel — "final
+	// since the first ever block" — not as a block the caller asked for. Gating on
+	// that 1 refused every static method on any upstream with a lower bound, which
+	// includes every node configured with maxAvailableRecentBlocks. Ask the method
+	// config rather than decoding the sentinel.
+	if evm.MethodHasNoBlockDependency(method, n) {
+		return nil, false
+	}
 	// Explicit method/network enforceBlockAvailability:false is an operator opt-out.
 	if n.blockAvailabilityExplicitlyDisabled(method) {
 		return nil, false
@@ -2943,6 +2952,13 @@ func (n *Network) eligibleUpstreamIDsForBoundary(ctx context.Context, method str
 		return nil
 	}
 	if methodHasDedicatedRangeAvailabilityHook(method) {
+		return nil
+	}
+	// Same sentinel, same reason as checkUpstreamBlockAvailability: a block-agnostic
+	// method has no boundary, so every upstream is eligible. Returning nil here means
+	// "no boundary lane applies", which is what the caller wants — an empty non-nil
+	// slice would mean "no upstream can serve this".
+	if evm.MethodHasNoBlockDependency(method, n) {
 		return nil
 	}
 	// Resolve the request's block number (cached at normalization, with a
