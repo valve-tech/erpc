@@ -3,8 +3,11 @@
 Bugs that live in code the fork inherits from upstream `erpc/erpc`. Each one is
 a candidate to report or to send back as a patch.
 
-The fork tracks upstream and merges from it regularly, so fixing these locally
-costs merge surface forever. Sending them upstream costs one pull request.
+The fork tracks upstream by rebasing on it. It does NOT send these back as
+pull requests — that was considered and ruled out. So every fix here is a patch
+that must survive each rebase, or be retired when upstream fixes the same
+defect its own way. The 73 entries reading "FIXED in the fork" are therefore a
+rebase risk register, not a pull-request backlog.
 
 **Status key.** Every entry carries exactly one of four statuses.
 
@@ -20,6 +23,21 @@ costs merge surface forever. Sending them upstream costs one pull request.
 
 Every entry below was checked against the code on 2026-08-19, not inferred. The
 audit corrected the `file:line` citations that had drifted.
+
+**Reading this file.** Three things about its shape are deliberate, and each
+one has misled a reader at least once.
+
+- **Entry ids have gaps.** 78, 79, 84, 89, 102, 103, 104, 119, 124, 129, 139
+  and 148-154 do not exist and never did. Parallel sessions reserved numbers
+  and did not all use them. Git history carries no heading for any of them, so
+  nothing was lost in a merge. Do not hunt for a missing entry.
+- **Ids are not in order.** Sessions appended wherever they were working. The
+  file is searched, not scrolled, so the order was left alone rather than
+  churning 159 entries for tidiness.
+- **Section headers are weaker evidence than Status lines.** Headers drifted as
+  later sessions appended under whichever one was last. Two of them said things
+  that had stopped being true. The per-entry Status line is gated by
+  `valve/check-bug-log.sh`; the headers are not. Trust the Status line.
 
 ---
 
@@ -2052,73 +2070,6 @@ instead of `*atomicMap` — and reading the field as a pointer — clears it.
 
 ---
 
-# Redundant guards — not defects, recorded so they are not re-derived
-
-Each of these is shadowed by another check, so a single-line mutation of it is
-unobservable. They are not bugs, and a test cannot pin them.
-
-- `consensus/rules.go:932` — the unassailable-lead short-circuit declines while
-  `preferNonEmpty` is set and the leading group is empty. The very next check at
-  `:936` already declines for any leader that is not non-empty, and both read the
-  same `best`. Unobservable.
-- `consensus/rules.go:103-105` — `prefer-highest-value-for` floors the agreement
-  threshold at 1. A response group always holds at least one response, so
-  `count < threshold` is already false for every threshold at or below 1. The
-  floor changes nothing.
-- `consensus/executor.go:1019` — empty-round guard, shadowed by `:1063`.
-- `consensus/executor.go:1200` — `continue`, unreachable given the guard at `:1205`.
-- `auth/authorizer.go:126` — empty-budget guard, shadowed by
-  `upstream/ratelimiter_registry.go:225`.
-- `upstream/chain_family_bootstrap.go:210` — `probe.Tip > 0`, shadowed by
-  `health/tracker.go:1367`.
-- `architecture/evm` — `enforceHighestBlock`'s tag guard, shadowed by the
-  switch's `default` branch.
-- `clients/http_json_rpc_client.go:233` and `:341` — duplicate cancelled-request
-  checks; `architecture/svm/handler.go:63` and `hooks.go:703` likewise. Both
-  pairs are deliberate defence in depth.
-- `data/grpc.go:190-193` — the duplicate-server guard in the bootstrap task.
-  Dropping it lets the second server overwrite the first in
-  `clientByNetwork`, and both outcomes leave exactly one client that a caller
-  cannot tell apart. `TestNewGrpcConnector_TwoServersForOneChainLeaveOneClient`
-  covers the branch; no assertion can kill a mutation of it.
-- `data/redis_pubsub_manager.go:193` — the ping health check in
-  `reconnectPubSub`. Removing it does not install a subscription on a dead
-  redis, because the `Receive` confirmation at `:203` fails and the cleanup at
-  `:207-211` clears `m.pubsub` anyway. The check saves a round trip; it does
-  not decide the outcome.
-- `common/config.go:1117` and `common/config.go:2389` — the unknown-field guard
-  before each legacy-shape fallback. The legacy struct is a subset of the
-  strict one, so an unknown key fails both decodes and `return originalErr`
-  after the fallback produces the same error. Deleting either guard alone
-  changes nothing.
-- `common/defaults.go:1462` and `:1402` — the "failed to convert upstream
-  (id: %s) to provider" wrap, written twice on the same error path: once inside
-  `convertUpstreamToProvider` and once around the call. Removing either alone
-  leaves the operator with the same message; removing both drops the upstream
-  id, which
-  `TestConvertUpstreamToProvider_UnknownVendorAbortsTheLoad` catches.
-- `common/request.go:279` and `:289` — the nil-receiver guards in
-  `NormalizedRequest.CreditUnitsTotal` and `CreditUnitsByVendor`. `ExecState()`
-  already returns nil for a nil request, and `ExecState.CreditUnitsTotal`
-  (`common/exec_state.go:176`) and `CreditUnitsByVendor` guard their own nil
-  receiver, so removing either outer guard changes nothing an assertion can see.
-- `common/json_rpc.go:551-553` — the `else` arm that logs `errBytes` as a plain
-  string when it is not semi-valid JSON. `ParseError` (`common/json_rpc.go:421`)
-  is the only writer of `errBytes` and writes only after the payload already
-  parsed into a JSON-RPC error object, so those bytes always start with `{`.
-  The arm is unreachable, not untested.
-- `common/defaults.go:1057` and `:1070` — `f.MatchMethod = "*"` for connector
-  failsafe policies, shadowed by the same default inside
-  `FailsafeConfig.SetDefaults` (`common/defaults.go:2619`).
-- `common/request.go:1225`, `:1228`, `:1234`, `:1237`, `:1249`, `:1255`,
-  `:1270`, `:1273`, `:1276`, `:1282` — the `curl`, `wget`, `insomnia`,
-  `httpie`, `java`, `ruby`, `edge`, `viem`, `ethers` and `alchemy` branches of
-  `simplifyAgentName`. For each client's canonical user agent the generic
-  first-word fallthrough already yields the same label, so the branch only
-  matters for the non-canonical spellings (`libcurl-agent/1.0`,
-  `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
-  path and these are optimisations, correctly.
-
 ## 72. A static method is refused as a missing historical block
 
 **Status:** open. **Severity: high.** Every `eth_chainId` and `net_version`
@@ -2608,6 +2559,75 @@ of a `checkProbe` error no probe implementation produces).
 
 ---
 
+# Redundant guards — not defects, recorded so they are not re-derived
+
+Each of these is shadowed by another check, so a single-line mutation of it is
+unobservable. They are not bugs, and a test cannot pin them.
+
+- `consensus/rules.go:932` — the unassailable-lead short-circuit declines while
+  `preferNonEmpty` is set and the leading group is empty. The very next check at
+  `:936` already declines for any leader that is not non-empty, and both read the
+  same `best`. Unobservable.
+- `consensus/rules.go:103-105` — `prefer-highest-value-for` floors the agreement
+  threshold at 1. A response group always holds at least one response, so
+  `count < threshold` is already false for every threshold at or below 1. The
+  floor changes nothing.
+- `consensus/executor.go:1019` — empty-round guard, shadowed by `:1063`.
+- `consensus/executor.go:1200` — `continue`, unreachable given the guard at `:1205`.
+- `auth/authorizer.go:126` — empty-budget guard, shadowed by
+  `upstream/ratelimiter_registry.go:225`.
+- `upstream/chain_family_bootstrap.go:210` — `probe.Tip > 0`, shadowed by
+  `health/tracker.go:1367`.
+- `architecture/evm` — `enforceHighestBlock`'s tag guard, shadowed by the
+  switch's `default` branch.
+- `clients/http_json_rpc_client.go:233` and `:341` — duplicate cancelled-request
+  checks; `architecture/svm/handler.go:63` and `hooks.go:703` likewise. Both
+  pairs are deliberate defence in depth.
+- `data/grpc.go:190-193` — the duplicate-server guard in the bootstrap task.
+  Dropping it lets the second server overwrite the first in
+  `clientByNetwork`, and both outcomes leave exactly one client that a caller
+  cannot tell apart. `TestNewGrpcConnector_TwoServersForOneChainLeaveOneClient`
+  covers the branch; no assertion can kill a mutation of it.
+- `data/redis_pubsub_manager.go:193` — the ping health check in
+  `reconnectPubSub`. Removing it does not install a subscription on a dead
+  redis, because the `Receive` confirmation at `:203` fails and the cleanup at
+  `:207-211` clears `m.pubsub` anyway. The check saves a round trip; it does
+  not decide the outcome.
+- `common/config.go:1117` and `common/config.go:2389` — the unknown-field guard
+  before each legacy-shape fallback. The legacy struct is a subset of the
+  strict one, so an unknown key fails both decodes and `return originalErr`
+  after the fallback produces the same error. Deleting either guard alone
+  changes nothing.
+- `common/defaults.go:1462` and `:1402` — the "failed to convert upstream
+  (id: %s) to provider" wrap, written twice on the same error path: once inside
+  `convertUpstreamToProvider` and once around the call. Removing either alone
+  leaves the operator with the same message; removing both drops the upstream
+  id, which
+  `TestConvertUpstreamToProvider_UnknownVendorAbortsTheLoad` catches.
+- `common/request.go:279` and `:289` — the nil-receiver guards in
+  `NormalizedRequest.CreditUnitsTotal` and `CreditUnitsByVendor`. `ExecState()`
+  already returns nil for a nil request, and `ExecState.CreditUnitsTotal`
+  (`common/exec_state.go:176`) and `CreditUnitsByVendor` guard their own nil
+  receiver, so removing either outer guard changes nothing an assertion can see.
+- `common/json_rpc.go:551-553` — the `else` arm that logs `errBytes` as a plain
+  string when it is not semi-valid JSON. `ParseError` (`common/json_rpc.go:421`)
+  is the only writer of `errBytes` and writes only after the payload already
+  parsed into a JSON-RPC error object, so those bytes always start with `{`.
+  The arm is unreachable, not untested.
+- `common/defaults.go:1057` and `:1070` — `f.MatchMethod = "*"` for connector
+  failsafe policies, shadowed by the same default inside
+  `FailsafeConfig.SetDefaults` (`common/defaults.go:2619`).
+- `common/request.go:1225`, `:1228`, `:1234`, `:1237`, `:1249`, `:1255`,
+  `:1270`, `:1273`, `:1276`, `:1282` — the `curl`, `wget`, `insomnia`,
+  `httpie`, `java`, `ruby`, `edge`, `viem`, `ethers` and `alchemy` branches of
+  `simplifyAgentName`. For each client's canonical user agent the generic
+  first-word fallthrough already yields the same label, so the branch only
+  matters for the non-canonical spellings (`libcurl-agent/1.0`,
+  `GNU Wget/…`). Under the repo's design razor the fallthrough is the primary
+  path and these are optimisations, correctly.
+
+---
+
 # Not a bug — recorded so it is not "fixed" by mistake
 
 - **`eth_sendRawTransaction` is deliberately absent** from
@@ -2823,12 +2843,18 @@ Found while fixing a `go vet` failure in `erpc/query_executor_test.go`, which
 copied a populated `sync.Map` over the registry's field. That fixture bug is
 fixed; this one is upstream's.
 
-# Polyglot live run — entries 90–94
+# Polyglot live run, and the work that followed it
 
-Found on 2026-08-17 while running one eRPC process against Ethereum mainnet,
-Solana mainnet-beta and Bitcoin mainnet at once. Full run:
-[polyglot-live-run.md](polyglot-live-run.md). Config:
+Entries **90 to 94** came from a live run on 2026-08-17, with one eRPC process
+serving Ethereum mainnet, Solana mainnet-beta and Bitcoin mainnet at once. Full
+run: [polyglot-live-run.md](polyglot-live-run.md). Config:
 [polyglot-live-pool.yaml](polyglot-live-pool.yaml).
+
+The header used to read "entries 90–94" and the section now holds 36 entries.
+Later sessions appended here rather than starting a section of their own, so
+everything after 94 came from ordinary code reading, NOT from the live run. Do
+not cite this header as evidence that an entry was reproduced against a live
+chain — check the entry itself.
 
 ## 90. `erpc/chain_families.go` says btc cannot serve, and btc serves
 
@@ -4271,10 +4297,13 @@ of an intention, not a test.
 
 ---
 
-# Found by the 2026-08-19 status audit — recorded, not fixed
+# Found by the 2026-08-19 status audit, and the work that followed it
 
-These five are new. The audit that rewrote every Status line above found them
-while reading the code each entry cites. Nobody fixed them.
+The audit that rewrote every Status line above found **five** new defects while
+reading the code each entry cites. The section now holds 32 entries, because
+later sessions appended here too. "Recorded, not fixed" is no longer true of
+the section as a whole either — several of these are fixed. The Status line on
+each entry is the authority; this header is not.
 
 ## 130. `writeFatalError` shadows the error it was given, so every fatal POST closes its span as OK
 

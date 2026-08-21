@@ -58,6 +58,33 @@ if [ -n "$outside" ]; then
 	echo "$outside" | awk '{print "  " $0}' >&2
 fi
 
+# A section header that names an id range must hold only ids in that range.
+# "# Polyglot live run — entries 90-94" grew to 36 entries numbered 76 to 128,
+# so the header claimed a live chain had reproduced defects found by reading
+# code. A header is prose and drifts in silence; the ids under it do not.
+strays=$(awk '
+	# Three-argument match() is a gawk extension and this must run on the
+	# BSD awk that ships with macOS. Extract with RSTART/RLENGTH instead.
+	/^# / {
+		sec = ""
+		if (match($0, /entries[^0-9]*[0-9]+[^0-9]+[0-9]+/)) {
+			t = substr($0, RSTART, RLENGTH)
+			gsub(/[^0-9]+/, " ", t)
+			if (split(t, a, " ") >= 2) { sec = $0; lo = a[1] + 0; hi = a[2] + 0 }
+		}
+		next
+	}
+	sec != "" && /^## [0-9]+\./ {
+		id = $2; sub(/\..*/, "", id)
+		if (id + 0 < lo || id + 0 > hi)
+			printf "  %s\n    is under: %s\n", $0, sec
+	}
+' "$LOG")
+if [ -n "$strays" ]; then
+	note "entries outside the id range their section header claims:"
+	echo "$strays" >&2
+fi
+
 if [ "$fail" -eq 0 ]; then
 	echo "check-bug-log: $(grep -cE "^$ENTRY" "$LOG") entries, unique ids, one vocabulary"
 fi
