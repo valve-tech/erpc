@@ -80,15 +80,33 @@ func (p *PreparedProject) executeShadowRequests(ctx context.Context, network *Ne
 		// unparseable ref, a non-EVM upstream or an errored assertion all
 		// mirror as before. Only a CONCRETE height the upstream states it
 		// does not have is skipped.
-		if _, blockNumber, err := evm.ExtractBlockReferenceFromRequest(ctx, origReq); err == nil && blockNumber > 0 {
-			available, err := ups.EvmAssertBlockAvailability(ctx, method, common.AvailbilityConfidenceBlockHead, false, blockNumber)
-			if err == nil && !available {
-				p.Logger.Debug().
-					Str("method", method).
-					Str("upstreamId", ups.Id()).
-					Int64("blockNumber", blockNumber).
-					Msg("shadow request skipped: block outside the upstream's available range")
-				continue
+		//
+		// Bug 72, third site. A block-agnostic method has no block to be missing,
+		// so it must not reach this gate at all. Two things make that worse here
+		// than on the routing path:
+		//
+		//   - A finalized method carries block number 1 as a CACHE sentinel, and
+		//     `blockNumber > 0` reads it as a real height.
+		//   - By the time shadow runs, `origReq` has been through the forward, so
+		//     the extraction can return a number taken from the ANSWER rather than
+		//     from anything the caller asked for. `eth_blockNumber` is the plain
+		//     case: it resolves to the head it just returned, and the gate then
+		//     asks whether the shadow upstream "has" that block.
+		//
+		// A shadow upstream that has not polled a head yet answers `available=false`
+		// with a nil error, so the fail-open above never fires and the mirror is
+		// dropped for a request that names no block. Ask the method config first.
+		if !evm.MethodHasNoBlockDependency(method, network) {
+			if _, blockNumber, err := evm.ExtractBlockReferenceFromRequest(ctx, origReq); err == nil && blockNumber > 0 {
+				available, err := ups.EvmAssertBlockAvailability(ctx, method, common.AvailbilityConfidenceBlockHead, false, blockNumber)
+				if err == nil && !available {
+					p.Logger.Debug().
+						Str("method", method).
+						Str("upstreamId", ups.Id()).
+						Int64("blockNumber", blockNumber).
+						Msg("shadow request skipped: block outside the upstream's available range")
+					continue
+				}
 			}
 		}
 		// Apply sample rate: skip this shadow upstream based on configured probability
