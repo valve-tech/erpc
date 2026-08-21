@@ -851,7 +851,7 @@ const (
 
 type NetworkDefaults struct {
 	RateLimitBudget   string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
-	Failsafe          []*FailsafeConfig        `yaml:"failsafe,omitempty" json:"failsafe"`
+	Failsafe          FailsafeConfigList       `yaml:"failsafe,omitempty" json:"failsafe"`
 	SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
 	DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty" json:"directiveDefaults"`
 	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm" tstype:"TsEvmNetworkConfigForDefaults"`
@@ -897,63 +897,6 @@ func (f *FailoverConfig) Enabled() bool {
 }
 
 // UnmarshalYAML provides backward compatibility for old single failsafe object format
-func (n *NetworkDefaults) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	// Define a type alias to avoid recursion
-	type rawNetworkDefaults NetworkDefaults
-	raw := (*rawNetworkDefaults)(n)
-
-	// Try unmarshaling normally first
-	err := unmarshal(raw)
-	if err == nil {
-		return nil
-	}
-
-	// Save the original error - it might be more informative
-	originalErr := err
-
-	// Check if the error is about unknown fields - if so, return it as is
-	// This preserves errors like "field maxCount not found in type"
-	errStr := err.Error()
-	if strings.Contains(errStr, "not found in type") ||
-		strings.Contains(errStr, "unknown field") {
-		return originalErr
-	}
-
-	// If that fails, try the old format with single failsafe object
-	type oldNetworkDefaults struct {
-		RateLimitBudget   string                   `yaml:"rateLimitBudget,omitempty"`
-		Failsafe          *FailsafeConfig          `yaml:"failsafe,omitempty"`
-		SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty"`
-		DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty"`
-		Evm               *EvmNetworkConfig        `yaml:"evm,omitempty"`
-		Svm               *SvmNetworkConfig        `yaml:"svm,omitempty"`
-	}
-
-	var old oldNetworkDefaults
-	if err := unmarshal(&old); err != nil {
-		// If both formats fail, return the original error as it's likely more informative
-		// about the actual problem (like invalid field names)
-		return originalErr
-	}
-
-	// Convert old format to new format
-	n.RateLimitBudget = old.RateLimitBudget
-	n.SelectionPolicy = old.SelectionPolicy
-	n.DirectiveDefaults = old.DirectiveDefaults
-	n.Evm = old.Evm
-	n.Svm = old.Svm
-
-	if old.Failsafe != nil {
-		// Ensure MatchMethod has a default value for backward compatibility
-		if old.Failsafe.MatchMethod == "" {
-			old.Failsafe.MatchMethod = "*"
-		}
-		n.Failsafe = []*FailsafeConfig{old.Failsafe}
-	}
-
-	return nil
-}
-
 type CORSConfig struct {
 	AllowedOrigins   []string `yaml:"allowedOrigins" json:"allowedOrigins"`
 	AllowedMethods   []string `yaml:"allowedMethods" json:"allowedMethods"`
@@ -1088,7 +1031,7 @@ type UpstreamConfig struct {
 	IgnoreMethods                []string                 `yaml:"ignoreMethods,omitempty" json:"ignoreMethods"`
 	AllowMethods                 []string                 `yaml:"allowMethods,omitempty" json:"allowMethods"`
 	AutoIgnoreUnsupportedMethods *bool                    `yaml:"autoIgnoreUnsupportedMethods,omitempty" json:"autoIgnoreUnsupportedMethods"`
-	Failsafe                     []*FailsafeConfig        `yaml:"failsafe,omitempty" json:"failsafe"`
+	Failsafe                     FailsafeConfigList       `yaml:"failsafe,omitempty" json:"failsafe"`
 	RateLimitBudget              string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
 	RateLimitAutoTune            *RateLimitAutoTuneConfig `yaml:"rateLimitAutoTune,omitempty" json:"rateLimitAutoTune"`
 	// RateLimitCountMode selects how this upstream's rate-limit budget
@@ -1278,70 +1221,12 @@ func (u *UpstreamConfig) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		return nil
 	}
 
-	originalErr := err
-	errStr := err.Error()
-	// Unknown-field errors are real schema bugs; surface them as-is.
-	if strings.Contains(errStr, "not found in type") ||
-		strings.Contains(errStr, "unknown field") {
-		return originalErr
-	}
-
-	// Legacy shape: `failsafe:` as a single object instead of a list.
-	type oldShadow struct {
-		Id                           string                   `yaml:"id,omitempty"`
-		Type                         UpstreamType             `yaml:"type,omitempty"`
-		Tags                         []string                 `yaml:"tags,omitempty"`
-		Group                        string                   `yaml:"group,omitempty"`
-		Cohort                       string                   `yaml:"cohort,omitempty"`
-		Routing                      *UpstreamRoutingConfig   `yaml:"routing,omitempty"`
-		VendorName                   string                   `yaml:"vendorName,omitempty"`
-		Endpoint                     string                   `yaml:"endpoint,omitempty"`
-		Evm                          *EvmUpstreamConfig       `yaml:"evm,omitempty"`
-		Svm                          *SvmUpstreamConfig       `yaml:"svm,omitempty"`
-		JsonRpc                      *JsonRpcUpstreamConfig   `yaml:"jsonRpc,omitempty"`
-		Grpc                         *GrpcUpstreamConfig      `yaml:"grpc,omitempty"`
-		IgnoreMethods                []string                 `yaml:"ignoreMethods,omitempty"`
-		AllowMethods                 []string                 `yaml:"allowMethods,omitempty"`
-		AutoIgnoreUnsupportedMethods *bool                    `yaml:"autoIgnoreUnsupportedMethods,omitempty"`
-		Failsafe                     *FailsafeConfig          `yaml:"failsafe,omitempty"`
-		RateLimitBudget              string                   `yaml:"rateLimitBudget,omitempty"`
-		RateLimitAutoTune            *RateLimitAutoTuneConfig `yaml:"rateLimitAutoTune,omitempty"`
-		Shadow                       *ShadowUpstreamConfig    `yaml:"shadow,omitempty"`
-	}
-
-	var old oldShadow
-	if err := unmarshal(&old); err != nil {
-		return originalErr
-	}
-
-	u.Id = old.Id
-	u.Type = old.Type
-	u.Tags = old.Tags
-	u.VendorName = old.VendorName
-	u.Endpoint = old.Endpoint
-	u.Evm = old.Evm
-	u.Svm = old.Svm
-	u.JsonRpc = old.JsonRpc
-	u.Grpc = old.Grpc
-	u.IgnoreMethods = old.IgnoreMethods
-	u.AllowMethods = old.AllowMethods
-	u.AutoIgnoreUnsupportedMethods = old.AutoIgnoreUnsupportedMethods
-	u.RateLimitBudget = old.RateLimitBudget
-	u.RateLimitAutoTune = old.RateLimitAutoTune
-	u.Shadow = old.Shadow
-
-	if old.Failsafe != nil {
-		if old.Failsafe.MatchMethod == "" {
-			old.Failsafe.MatchMethod = "*"
-		}
-		u.Failsafe = []*FailsafeConfig{old.Failsafe}
-	}
-
-	mergeLegacyLabelKeysIntoTags(u, old.Group, old.Cohort)
-	if old.Routing != nil {
-		u.Routing = old.Routing
-	}
-	return nil
+	// One decode, one error. There is no second attempt against a copy of this
+	// struct any more: FailsafeConfigList takes the legacy single-object shape
+	// itself, which was the only reason the copy existed. The error the operator
+	// reads is now the real one, not a complaint about a hand-listed shadow type
+	// they cannot see and did not write.
+	return err
 }
 
 // HasTag returns true if `u.Tags` contains the given exact tag. For
@@ -1794,6 +1679,57 @@ func (c *EvmUpstreamConfig) Copy() *EvmUpstreamConfig {
 	}
 
 	return copied
+}
+
+// FailsafeConfigList is a list of failsafe policies that also accepts the
+// single `failsafe:` object eRPC used to take.
+//
+// It exists so no caller has to keep a parallel copy of its own struct to
+// decode the legacy shape. Three of them did, each hand-listing the fields it
+// expected, and each one drifted: UpstreamConfig's copy silently dropped
+// rateLimitCountMode, creditUnits, chain and chainProbeInterval, because the
+// real struct grew and the copy did not. Deciding the shape HERE, where the
+// shape actually varies, makes that drift impossible rather than merely fixed.
+type FailsafeConfigList []*FailsafeConfig
+
+func (l *FailsafeConfigList) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	// Decide on the value's SHAPE, not on which decode failed. Choosing by
+	// failure reports the wrong error: a list holding one bad field fails as a
+	// list, gets retried as a single policy, and complains that a sequence is
+	// not a mapping — which says nothing about the field the operator got
+	// wrong.
+	//
+	// The shape comes from a decode into interface{} rather than a yaml.Node.
+	// A Node stays empty here: this is yaml.v3's obsolete unmarshaler
+	// signature, which cannot fill one. The modern signature could, but its
+	// Node.Decode builds a decoder with KnownFields off, which would stop an
+	// unknown key inside a failsafe policy being reported at all. Losing that
+	// is the very defect this type exists to close.
+	var shape interface{}
+	if err := unmarshal(&shape); err != nil {
+		return err
+	}
+
+	if _, isMapping := shape.(map[string]interface{}); isMapping {
+		// The legacy shape: one policy written as a mapping.
+		var one FailsafeConfig
+		if err := unmarshal(&one); err != nil {
+			return err
+		}
+		// A single policy carried no matchMethod, and it applied to everything.
+		if one.MatchMethod == "" {
+			one.MatchMethod = "*"
+		}
+		*l = FailsafeConfigList{&one}
+		return nil
+	}
+
+	var list []*FailsafeConfig
+	if err := unmarshal(&list); err != nil {
+		return err
+	}
+	*l = list
+	return nil
 }
 
 type FailsafeConfig struct {
@@ -2552,7 +2488,7 @@ type MethodsConfig struct {
 type NetworkConfig struct {
 	Architecture      NetworkArchitecture      `yaml:"architecture" json:"architecture" tstype:"TsNetworkArchitecture"`
 	RateLimitBudget   string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
-	Failsafe          []*FailsafeConfig        `yaml:"failsafe,omitempty" json:"failsafe"`
+	Failsafe          FailsafeConfigList       `yaml:"failsafe,omitempty" json:"failsafe"`
 	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm"`
 	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm"`
 	SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
@@ -2612,71 +2548,6 @@ func (n *NetworkConfig) MultiplexingEnabled() bool {
 }
 
 // UnmarshalYAML provides backward compatibility for old single failsafe object format
-func (n *NetworkConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	// Define a type alias to avoid recursion
-	type rawNetworkConfig NetworkConfig
-	raw := (*rawNetworkConfig)(n)
-
-	// Try unmarshaling normally first
-	err := unmarshal(raw)
-	if err == nil {
-		return nil
-	}
-
-	// Save the original error - it might be more informative
-	originalErr := err
-
-	// Check if the error is about unknown fields - if so, return it as is
-	// This preserves errors like "field maxCount not found in type"
-	errStr := err.Error()
-	if strings.Contains(errStr, "not found in type") ||
-		strings.Contains(errStr, "unknown field") {
-		return originalErr
-	}
-
-	// If that fails, try the old format with single failsafe object
-	type oldNetworkConfig struct {
-		Architecture      NetworkArchitecture      `yaml:"architecture"`
-		RateLimitBudget   string                   `yaml:"rateLimitBudget,omitempty"`
-		Failsafe          *FailsafeConfig          `yaml:"failsafe,omitempty"`
-		Evm               *EvmNetworkConfig        `yaml:"evm,omitempty"`
-		Svm               *SvmNetworkConfig        `yaml:"svm,omitempty"`
-		SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty"`
-		DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty"`
-		Alias             string                   `yaml:"alias,omitempty"`
-		Methods           *MethodsConfig           `yaml:"methods,omitempty"`
-		StaticResponses   []*StaticResponseConfig  `yaml:"staticResponses,omitempty"`
-	}
-
-	var old oldNetworkConfig
-	if err := unmarshal(&old); err != nil {
-		// If both formats fail, return the original error as it's likely more informative
-		// about the actual problem (like invalid field names)
-		return originalErr
-	}
-
-	// Convert old format to new format
-	n.Architecture = old.Architecture
-	n.RateLimitBudget = old.RateLimitBudget
-	n.Evm = old.Evm
-	n.Svm = old.Svm
-	n.SelectionPolicy = old.SelectionPolicy
-	n.DirectiveDefaults = old.DirectiveDefaults
-	n.Alias = old.Alias
-	n.Methods = old.Methods
-	n.StaticResponses = old.StaticResponses
-
-	if old.Failsafe != nil {
-		// Ensure MatchMethod has a default value for backward compatibility
-		if old.Failsafe.MatchMethod == "" {
-			old.Failsafe.MatchMethod = "*"
-		}
-		n.Failsafe = []*FailsafeConfig{old.Failsafe}
-	}
-
-	return nil
-}
-
 type DirectiveDefaultsConfig struct {
 	RetryEmpty        *bool       `yaml:"retryEmpty,omitempty" json:"retryEmpty"`
 	RetryPending      *bool       `yaml:"retryPending,omitempty" json:"retryPending"`
