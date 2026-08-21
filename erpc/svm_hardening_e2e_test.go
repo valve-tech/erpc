@@ -373,8 +373,7 @@ func setupSvmSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamC
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(100 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
 	require.NoError(t, network.Bootstrap(ctx))
 

@@ -157,9 +157,13 @@ func TestDynamoDBConnectorReverseIndex(t *testing.T) {
 		RangeKeyName:     "rk",
 		ReverseIndexName: "rk-pk-index",
 		TTLAttributeName: "ttl",
-		InitTimeout:      common.Duration(2 * time.Second),
-		GetTimeout:       common.Duration(2 * time.Second),
-		SetTimeout:       common.Duration(2 * time.Second),
+		// Generous on purpose. This test exercises reverse-index queries, not
+		// timeout behaviour, so these values are incidental setup. dynamodb-local
+		// is a JVM whose startup and first calls swing widely, and the `-race`
+		// build adds its own penalty. At 2s a loaded run failed in Set.
+		InitTimeout:      common.Duration(30 * time.Second),
+		GetTimeout:       common.Duration(30 * time.Second),
+		SetTimeout:       common.Duration(30 * time.Second),
 		Auth: &common.AwsAuthConfig{
 			Mode:            "secret",
 			AccessKeyID:     "fakeKey",
@@ -374,10 +378,23 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 
 		require.Error(t, err, "lock acquisition should time out")
 		require.Nil(t, lock, "lock should be nil")
-		if !strings.Contains(err.Error(), "lock acquisition timed out") && !strings.Contains(err.Error(), "request context canceled") {
-			t.Errorf("expected error to contain 'lock acquisition timed out' or 'request context canceled', got: %s", err.Error())
+		// Lock has two timeout exits and either is correct here. It leaves at
+		// the top of the retry loop ("cancelled or timed out") when the
+		// deadline passes between attempts, and inside the retry wait
+		// ("timed out while waiting to retry") when it passes during the
+		// pause. Which one wins depends on where the deadline lands, so a
+		// loaded machine picks the other branch. Accepting only one made this
+		// test fail under load while the code did exactly the right thing.
+		if !strings.Contains(err.Error(), "timed out") &&
+			!strings.Contains(err.Error(), "cancelled") &&
+			!strings.Contains(err.Error(), "request context canceled") {
+			t.Errorf("expected a timeout or cancellation error, got: %s", err.Error())
 		}
-		assert.InDelta(t, timeSpent.Milliseconds(), int64(300), 100, "should have waited for the full timeout")
+		// The deadline is the floor: Lock must not give up early. The ceiling
+		// is generous on purpose — an overloaded machine adds scheduling
+		// delay, and pinning it tighter tests the machine, not the code.
+		assert.GreaterOrEqual(t, timeSpent, 250*time.Millisecond, "should have waited for the full timeout")
+		assert.Less(t, timeSpent, 10*time.Second, "should not have waited far past the deadline")
 	})
 
 	t.Run("ContextCancellationDuringLockAcquisition", func(t *testing.T) {
@@ -437,14 +454,22 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 		})
 		require.NoError(t, err, "should create expired lock record")
 
-		// Try to acquire the lock - should succeed immediately despite record existing
-		start := time.Now()
-		lock, err := connector.Lock(ctx, lockKey, 5*time.Second)
-		timeSpent := time.Since(start)
+		// An expired record must not block acquisition. State that as behaviour,
+		// not as a latency budget. Lock gets a deadline far shorter than waiting
+		// out a live lock would need. A connector that wrongly reads the expired
+		// record as held retries every lockRetryInterval until this context
+		// expires, and the call returns an error.
+		//
+		// The assertion here used to be `timeSpent <= 100ms`. That measured the
+		// machine, not the connector. It failed under `-race` at 199ms with no
+		// retry involved at all.
+		lctx, lcancel := context.WithTimeout(ctx, 5*time.Second)
+		defer lcancel()
 
-		require.NoError(t, err, "should acquire lock immediately")
+		lock, err := connector.Lock(lctx, lockKey, 5*time.Second)
+
+		require.NoError(t, err, "an expired lock record must not block acquisition")
 		require.NotNil(t, lock, "lock should not be nil")
-		assert.LessOrEqual(t, timeSpent.Milliseconds(), int64(100), "should acquire expired lock quickly")
 
 		// Clean up
 		err = lock.Unlock(ctx)

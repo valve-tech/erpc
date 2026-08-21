@@ -1212,6 +1212,88 @@ projects:
 	})
 }
 
+// TestNetworkConfig_SetDefaults_FailoverSkipsAutoSelectionPolicy pins the
+// interaction between failover.onDefaultsExhausted and SetDefaults' handling
+// of SelectionPolicy.
+//
+// RECONCILE NOTE (valve fork): this test was written when SetDefaults
+// auto-attached a SelectionPolicy as soon as any upstream carried the
+// fallback tier, and failover existed to suppress that policy so the
+// per-request loop could still see fallbacks. Upstream has since moved
+// tiering into the policy engine's default program
+// (preferTag('!tier:fallback', {fallback: 'tier:fallback'}) in
+// internal/policy/default_policy.js), and NewDefaultNetworkConfig no longer
+// carries a SelectionPolicy — so the auto-attach branch in SetDefaults now
+// assigns nil and the failover suppression has nothing left to suppress.
+//
+// The assertions below therefore pin CURRENT behaviour: SetDefaults leaves
+// SelectionPolicy nil unless the user supplied one.
+//
+// The open question the note used to carry — does the fork still need a
+// per-request fallback escape now that the engine handles the tier split —
+// is now answered, and answered inside the policy layer rather than here.
+// `Network.Bootstrap` copies `failover.onDefaultsExhausted` onto the
+// SelectionPolicyConfig it registers, and the default policy reads it as
+// `ctx.failoverOnDefaultsExhausted` to rank the fallback tier last instead
+// of dropping it. SetDefaults still attaches nothing, which is why these
+// assertions are unchanged.
+func TestNetworkConfig_SetDefaults_FailoverSkipsAutoSelectionPolicy(t *testing.T) {
+	upstreams := []*UpstreamConfig{
+		{Id: "a", Endpoint: "http://a", Type: UpstreamTypeEvm},
+		{Id: "b", Endpoint: "http://b", Type: UpstreamTypeEvm, Tags: []string{TagTierFallback}},
+	}
+
+	t.Run("without failover no auto policy is attached", func(t *testing.T) {
+		n := &NetworkConfig{Architecture: ArchitectureEvm, Evm: &EvmNetworkConfig{ChainId: 1}}
+		err := n.SetDefaults(upstreams, nil)
+		assert.NoError(t, err)
+		assert.Nil(t, n.SelectionPolicy,
+			"tiering now comes from the policy engine's default program, not an auto-attached SelectionPolicy")
+	})
+
+	t.Run("with failover enabled the auto policy is suppressed", func(t *testing.T) {
+		enabled := true
+		n := &NetworkConfig{
+			Architecture: ArchitectureEvm,
+			Evm:          &EvmNetworkConfig{ChainId: 1},
+			Failover:     &FailoverConfig{OnDefaultsExhausted: &enabled},
+		}
+		err := n.SetDefaults(upstreams, nil)
+		assert.NoError(t, err)
+		assert.Nil(t, n.SelectionPolicy, "auto SelectionPolicy should NOT be applied when failover handles escalation")
+	})
+
+	t.Run("user-supplied SelectionPolicy is preserved regardless of failover", func(t *testing.T) {
+		enabled := true
+		userPolicy := &SelectionPolicyConfig{EvalInterval: Duration(time.Minute)}
+		n := &NetworkConfig{
+			Architecture:    ArchitectureEvm,
+			Evm:             &EvmNetworkConfig{ChainId: 1},
+			Failover:        &FailoverConfig{OnDefaultsExhausted: &enabled},
+			SelectionPolicy: userPolicy,
+		}
+		err := n.SetDefaults(upstreams, nil)
+		assert.NoError(t, err)
+		assert.NotNil(t, n.SelectionPolicy)
+		assert.Equal(t, Duration(time.Minute), n.SelectionPolicy.EvalInterval)
+	})
+}
+
+// TestNetworkConfig_SetDefaults_FailoverInheritsFromDefaults verifies that a
+// failover flag set at the NetworkDefaults level is propagated to networks
+// that don't override it.
+func TestNetworkConfig_SetDefaults_FailoverInheritsFromDefaults(t *testing.T) {
+	enabled := true
+	defaults := &NetworkDefaults{
+		Failover: &FailoverConfig{OnDefaultsExhausted: &enabled},
+	}
+	n := &NetworkConfig{Architecture: ArchitectureEvm, Evm: &EvmNetworkConfig{ChainId: 1}}
+	err := n.SetDefaults(nil, defaults)
+	assert.NoError(t, err)
+	assert.NotNil(t, n.Failover)
+	assert.True(t, n.Failover.Enabled())
+}
+
 func TestUpstreamConfig_ValidateRateLimitCountMode(t *testing.T) {
 	cfg := &Config{}
 	base := func(mode RateLimitCountMode) *UpstreamConfig {

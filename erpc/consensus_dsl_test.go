@@ -347,8 +347,7 @@ func buildConsensusTestCaseFromDSL(t *testing.T, spec string) consensusTestCase 
 			// Set block heights
 			for idx, height := range blockHeights {
 				if idx > 0 && idx <= len(ups) {
-					ups[idx-1].EvmStatePoller().SuggestLatestBlock(int64(height))
-					time.Sleep(50 * time.Millisecond)
+					seedEvmLatestHead(t, ctx, reg, ups[idx-1], int64(height))
 				}
 			}
 
@@ -373,8 +372,7 @@ func buildConsensusTestCaseFromDSL(t *testing.T, spec string) consensusTestCase 
 						if bh, ok := blockHeights[i+1]; ok {
 							h = bh
 						}
-						u.EvmStatePoller().SuggestLatestBlock(int64(h))
-						time.Sleep(50 * time.Millisecond)
+						seedEvmLatestHead(t, ctx, reg, u, int64(h))
 						if h > maxHeight {
 							maxHeight = h
 						}
@@ -385,8 +383,7 @@ func buildConsensusTestCaseFromDSL(t *testing.T, spec string) consensusTestCase 
 				if bh, ok := blockHeights[leaderIndex]; ok && bh > maxHeight {
 					leaderHeight = bh
 				}
-				ups[leaderIndex-1].EvmStatePoller().SuggestLatestBlock(int64(leaderHeight))
-				time.Sleep(50 * time.Millisecond)
+				seedEvmLatestHead(t, ctx, reg, ups[leaderIndex-1], int64(leaderHeight))
 			}
 		}
 	}
