@@ -2789,7 +2789,9 @@ correctly.
 
 ## 70. `BootstrapTask.Wait` busy-spins on a full core and ignores its context
 
-**Status:** open. **Severity: low.** Wasted CPU, and an uncancellable wait.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** Wasted CPU, and an uncancellable wait. Fixed with entry 157 — same
+function, and 157's fix needs this one to be safe.
 
 `util/initializer.go:111-117`:
 
@@ -2821,10 +2823,17 @@ iterations. It is unbounded only in principle — nothing in the type enforces
 that the two writes stay adjacent, and `Wait` is called from the request path
 via `ExecuteTasks`.
 
-Fix: give the branch the same `select` the pending branch uses.
+**The fix.** Both no-progress paths now use the one ctx-aware sleep. There are
+two of them since 157: the branch this entry describes, and a second where
+`Wait` loops past an attempt's end and finds `doneVal` still holding the closed
+channel it just consumed. Selecting on an already-closed channel returns
+instantly, so that route spins exactly the same way. `Wait` remembers the
+channel it consumed and sleeps until a new one is published.
 
-Pinned by
-`TestBootstrapTask_WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExists`.
+Pinned by `TestBootstrapTask_WaitInTheNoChannelWindowHonoursACancelledContext`,
+which replaces the old `…WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExists`.
+That test was written to be flipped and said so. Its comments cited "bug 60";
+the entry is 70, and the citation is corrected.
 
 ---
 
@@ -5455,8 +5464,9 @@ Reverting either half brings the race back at `-count=20`.
 
 ## 157. `BootstrapTask.Wait` reports success for a task that never succeeded
 
-**Status:** open. **Severity: medium.** A caller on the request path can be
-told a bootstrap finished cleanly when every attempt failed.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** A caller on the request path could be told a bootstrap finished
+cleanly when every attempt failed.
 
 `util/initializer.go`, in `Wait`:
 
@@ -5484,13 +5494,49 @@ Reproduced by the previous version of `TestInitializer_MultipleRapidFailures`
 (entry 155) under `go test -race ./util/ -count=4`: every attempt logged
 "initialization task failed", and `WaitForTasks` still returned no error.
 
-The narrow fix is to loop instead of returning `nil`: only a terminal state may
-end the wait. That changes one more thing, which is why it is recorded rather
-than done here — the `case <-ch` branch is also where `Wait` substitutes
-`"task failed without specific error"` for an empty error (entry 56's adjacent
-finding), and the top-of-loop branch does not. Moving the exit needs that
-substitution moved with it, and
-`TestInitializer_CancelledTaskIsReportedWithoutItsReason` pins today's wording.
+**The fix.** `Wait` loops instead of returning: only a TERMINAL state ends the
+wait. The worry recorded here — that the substitution lives in the `case <-ch`
+branch and would have to move — turned out to resolve itself. The substitution
+is stored in `lastErr`, and the top-of-loop terminal check reads `lastErr`, so
+looping delivers it without moving anything.
+
+**THREE routes to this defect, not one.** The entry above describes the race.
+Reading the function turned up two more, both deterministic:
+
+1. The `case <-ch` branch stored the substituted error and then ran
+   `return wr.err` — the ORIGINAL nil. A failed task with no recorded reason
+   reported success every single time, no race needed.
+2. The terminal branch itself returned `lastErr` if set and `nil` otherwise. So
+   a `Wait` called on an already-failed task that recorded no reason ALSO
+   answered success. The cancellation path is a live producer of exactly that
+   state — see `TestInitializer_CancelledTaskIsReportedWithoutItsReason`.
+   `TaskFailed`, `TaskTimedOut` and `TaskFatal` now answer an error whatever
+   `lastErr` holds; only `TaskSucceeded` answers nil.
+
+**Fixed together with entry 70**, because they are the same function and they
+interact: looping past an attempt's end re-reads `doneVal`, which can still
+hold the closed channel just consumed, and selecting on it again is precisely
+70's hot spin reached by a new route. `Wait` now remembers the channel it
+consumed and sleeps until the next one is published.
+
+**Two callers had to change with it.**
+
+- `waitForTasks` treated ANY non-nil `Wait` error as "the context was
+  cancelled, give up on the rest". That was true while `Wait` returned nil for
+  task failures. Now it returns the task's own error, so the check is on
+  `ctx.Err()` and a task failure falls through to be recorded — which keeps the
+  aggregate "N/M tasks failed" message.
+- That aggregate built its text with `%v` on the error slice, so the chain
+  stopped there and `errors.Is(err, context.Canceled)` answered false for an
+  aggregate that plainly contained it. It never showed before, because a task
+  error used to leave `Wait` as a bare early return and never reached that line.
+  It now wraps `errors.Join(errs...)` with `%w`.
+
+Pinned by `TestBootstrapTask_WaitOnATerminalFailureWithNoRecordedReasonStillFails`
+(all three terminal states), `TestBootstrapTask_WaitOnASuccessAnswersNil` as the
+control, and `TestBootstrapTask_WaitDoesNotMistakeAnEndedAttemptForAnEndedTask`,
+which drives the window directly rather than betting on a real race. All three
+fixes are mutation-proven. `go test ./util/ -race` is clean.
 
 ## 158. A task's terminal state was published before the log line it summarises
 

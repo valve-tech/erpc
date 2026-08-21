@@ -18,20 +18,19 @@ import (
 // the Initializer holds a lock across that window, and MarkTaskAsFailed writes
 // task state without taking tasksMu at all.
 
-// TestBootstrapTask_WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExists
-// pins Wait's running-but-no-channel branch.
+// Bug 70 pin. attemptRemainingTasks swaps a task to Running and only THEN
+// stores the channel that signals the attempt's end. A Wait that landed between
+// the two found a running task with no channel, and the branch it took was a
+// bare `continue`: no context check, no sleep, no yield. Wait burned a whole
+// core and could not be cancelled until another goroutine published the channel
+// or moved the task to a terminal state.
 //
-// attemptRemainingTasks swaps a task to Running and only then stores the
-// channel that signals the attempt's end. A Wait that lands between the two
-// finds a running task with no channel to wait on, and the branch it takes is
-// a bare `continue`: no context check, no sleep, no yield. Wait therefore burns
-// a whole core and cannot be cancelled until another goroutine publishes the
-// channel or a terminal state. Logged as upstream bug 60.
+// (Earlier comments here cited "bug 60". The entry is 70.)
 //
-// The setup is deterministic, not a race: with the state Running and no done
-// channel, Wait has no path that returns, so the observation window below can
-// only end one way.
-func TestBootstrapTask_WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExists(t *testing.T) {
+// Both no-progress paths now use the same ctx-aware sleep, so a cancelled
+// context ends the wait. The setup is deterministic, not a race: Running with
+// no done channel is the exact window, and it cannot resolve itself.
+func TestBootstrapTask_WaitInTheNoChannelWindowHonoursACancelledContext(t *testing.T) {
 	t.Parallel()
 
 	task := NewBootstrapTask("windowed", func(context.Context) error { return nil })
@@ -44,26 +43,12 @@ func TestBootstrapTask_WaitBusySpinsAndIgnoresItsContextBeforeTheDoneChannelExis
 	waited := make(chan error, 1)
 	go func() { waited <- task.Wait(ctx) }()
 
-	// Bug 60: a cancelled context must end the wait, and it does not. Any
-	// return here would mean the branch honoured cancellation.
 	select {
 	case err := <-waited:
-		t.Fatalf("Wait returned %v; bug 60 is fixed, update this test", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-
-	// Only another goroutine moving the task out of Running can release it —
-	// which is what MarkTaskAsFailed does. Use a distinct error so the
-	// returned value proves which path produced it.
-	task.lastErr.Store(wrappedError{err: assert.AnError})
-	task.state.Store(int32(TaskFailed))
-
-	select {
-	case err := <-waited:
-		require.ErrorIs(t, err, assert.AnError,
-			"Wait must report the attempt's own failure, not the context it ignored")
-	case <-time.After(20 * time.Second):
-		t.Fatal("Wait never left the window after the task left the Running state")
+		require.ErrorIs(t, err, context.Canceled,
+			"bug 70: the no-channel branch must honour a cancelled context")
+	case <-time.After(5 * time.Second):
+		t.Fatal("bug 70: Wait ignored a cancelled context in the no-channel window")
 	}
 }
 

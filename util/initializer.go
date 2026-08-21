@@ -95,49 +95,85 @@ func (t *BootstrapTask) createNewDoneChannel() chan struct{} {
 	return newCh
 }
 
-// Wait waits until the most recent attempt finishes (i.e., "done" is closed)
-// or until the context is canceled.
-// If the task has never begun (still pending), Wait will block until it eventually starts or ctx is canceled.
+// Wait blocks until the task reaches a TERMINAL state, or ctx ends.
+//
+// "An attempt ended" is not "the task ended". With auto-retry on, a failed
+// attempt is followed by another, and only the loop condition at the top of
+// this function decides that the task is done. Two defects came from confusing
+// the two:
+//
+//   - Bug 157. The old code returned as soon as the attempt's done channel
+//     closed. It read the state on the next line to decide what to return, and
+//     the auto-retry loop could claim a new attempt in between — so the state
+//     read `TaskRunning`, the `== TaskFailed` test was false, and Wait returned
+//     nil for a task that had failed every attempt and was failing again.
+//     waitForTasks then saw a non-failed state, recorded nothing, and
+//     ExecuteTasks reported success. A caller on the request path was told a
+//     bootstrap finished cleanly when nothing had.
+//   - Bug 157, second half. Even on the branch that DID see TaskFailed, the
+//     empty-error substitution was stored in lastErr and then `return wr.err`
+//     returned the original nil. That one was not a race: a failed task with no
+//     recorded error reported success every time.
+//
+// Both disappear by looping instead of returning. The terminal check at the top
+// re-reads lastErr, so the substituted error is what a caller gets.
+//
+//   - Bug 70. The no-channel branch used to `continue` with no context check
+//     and no yield whenever the state was not Pending. attemptRemainingTasks
+//     swaps a task to Running BEFORE it publishes the attempt's done channel, so
+//     a Wait landing between the two spun a whole core and ignored cancellation.
+//     Both no-progress paths now use the same ctx-aware sleep.
 func (t *BootstrapTask) Wait(ctx context.Context) error {
+	// The attempt whose end we already observed. The retry loop swaps the state
+	// to Running before it publishes the next attempt's channel, so doneVal can
+	// still hold the closed channel we just consumed. Selecting on it again
+	// would return instantly and spin — bug 70's failure mode, reached by a
+	// different route.
+	var consumed chan struct{}
+
 	for {
 		state := TaskState(t.state.Load())
-		if state == TaskSucceeded || state == TaskFailed || state == TaskTimedOut || state == TaskFatal {
-			lastErr, ok := t.lastErr.Load().(wrappedError)
-			if ok && lastErr.err != nil {
-				return lastErr.err
-			}
+		switch state {
+		case TaskSucceeded:
+			// The initializer stores wrappedError{nil} before every attempt, so a
+			// success cannot be carrying a previous attempt's error.
 			return nil
-		}
-		ch := t.doneVal.Load()
-		if ch == nil {
-			// The task hasn't started an attempt yet. If the state is no longer pending, break out.
-			if state != TaskPending {
-				// It's either running, failed, or succeeded => loop again so we re-fetch the channel.
-				continue
+		case TaskFailed, TaskTimedOut, TaskFatal:
+			if wr, _ := t.lastErr.Load().(wrappedError); wr.err != nil {
+				return wr.err
 			}
-			// We'll just do a short sleep or yield.
+			// A terminal FAILURE must never answer nil. It used to, whenever the
+			// attempt recorded no reason — the cancellation path, for one, drops
+			// its reason (see TestInitializer_CancelledTaskIsReportedWithoutItsReason).
+			// waitForTasks then found task.Error() == nil, recorded nothing, and
+			// ExecuteTasks reported success for a bootstrap that never happened.
+			return errors.New("task failed without specific error")
+		}
+
+		ch, _ := t.doneVal.Load().(chan struct{})
+		if ch == nil || ch == consumed {
+			// No attempt to wait on yet, or the next one is not published. Sleep
+			// rather than spin, and stay cancellable while doing it.
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(10 * time.Millisecond):
-				// keep looping until the task actually starts
 				continue
 			}
-		} else {
-			// We have a valid channel. Wait on it or until context is canceled.
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-ch.(chan struct{}):
-				// The attempt ended. Check if we failed.
-				if TaskState(t.state.Load()) == TaskFailed {
-					wr, _ := t.lastErr.Load().(wrappedError)
-					if wr.err == nil {
-						t.lastErr.Store(wrappedError{err: errors.New("task failed without specific error")})
-					}
-					return wr.err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+			consumed = ch
+			// Record a failure that carries no reason, so the terminal check at
+			// the top has something to return. Do NOT return here: this attempt
+			// ending says nothing about whether the TASK has ended.
+			if TaskState(t.state.Load()) == TaskFailed {
+				if wr, _ := t.lastErr.Load().(wrappedError); wr.err == nil {
+					t.lastErr.Store(wrappedError{err: errors.New("task failed without specific error")})
 				}
-				return nil // Succeeded or otherwise finished
 			}
 		}
 	}
@@ -229,8 +265,15 @@ func (i *Initializer) waitForTasks(ctx context.Context, tasks ...*BootstrapTask)
 	var errs []error
 	for _, task := range tasks {
 		if err := task.Wait(ctx); err != nil {
-			// If context was canceled, likely best to just return.
-			return err
+			// Wait returns TWO kinds of error now. Since bug 157 it returns the
+			// task's own error when the task reaches a terminal failed state —
+			// it used to return nil there, which is how a failed bootstrap was
+			// reported as success. Only a context error means "give up on the
+			// remaining tasks"; a task failure falls through and is recorded
+			// below, so the aggregate "N/M tasks failed" message survives.
+			if ctx.Err() != nil {
+				return err
+			}
 		}
 		// If task is failed, record that error
 		state := TaskState(task.state.Load())
@@ -241,7 +284,12 @@ func (i *Initializer) waitForTasks(ctx context.Context, tasks ...*BootstrapTask)
 	if len(errs) > 0 {
 		total := len(tasks)
 		i.logger.Warn().Errs("tasks", errs).Msgf("initialization failed: %d/%d tasks failed", len(errs), total)
-		return fmt.Errorf("initialization failed: %d/%d tasks failed: %v", len(errs), total, errs)
+		// %w on a joined error, not %v on the slice. %v renders the causes into
+		// text and the chain stops here, so errors.Is(err, context.Canceled)
+		// answers false for an aggregate that plainly contains it. That did not
+		// show before bug 157 was fixed, because a task error used to leave Wait
+		// as a bare early return and never reached this line.
+		return fmt.Errorf("initialization failed: %d/%d tasks failed: %w", len(errs), total, errors.Join(errs...))
 	}
 	return nil
 }
