@@ -498,7 +498,11 @@ func (s *Slot) emitMetrics(d *Decision, prevState DecisionState) {
 
 	if d.Error != "" {
 		kind := "throw"
-		if strings.Contains(d.Error, "timed out") {
+		// Match this package's own error text, not the bare words "timed out".
+		// A user eval that THROWS about its own timeout is a throw, not a
+		// policy timeout. Decision.Error is a string, so errors.Is is not
+		// available here — see bug 150.
+		if strings.Contains(d.Error, ErrEvalTimeout.Error()) {
 			kind = "timeout"
 		} else if strings.Contains(d.Error, ErrInvalidReturn.Error()) {
 			kind = "invalid_return"

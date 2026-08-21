@@ -31,12 +31,13 @@ one has misled a reader at least once.
   104, 119, 124, 129, 139, 148 and 149 do not exist and never did — parallel
   sessions reserved numbers and did not all use them. `git log --all -S` finds
   no heading for any of those.
-  **150 to 154 are different: they exist**, on the unmerged branch
+  **150 to 154 were different: they existed only on an unmerged branch**,
   `worktree-agent-a47de169d3033a216` (commit `8761576`, 2026-08-19), together
-  with a fuller fix for entry 46 than the one on `main`. An earlier version of
-  this note said all of 148-154 never existed. That was checked with `git log
-  -S` against `main` only, which walks HEAD and cannot see an unmerged branch.
-  Use `--all`.
+  with a fuller fix for entry 46 than `main` had. They are merged in now. An
+  earlier version of this note said all of 148-154 never existed; that was
+  checked with `git log -S` against `main` only, which walks HEAD and cannot
+  see an unmerged branch. Use `--all` when asking whether something ever
+  existed.
 - **Ids are not in order.** Sessions appended wherever they were working. The
   file is searched, not scrolled, so the order was left alone rather than
   churning 159 entries for tidiness.
@@ -1255,21 +1256,31 @@ and when the deadline fires the deadline wins. It still waits for the goroutine
 — sobek cannot be interrupted mid-call — but it now DISCARDS the late result
 rather than letting it overwrite `ErrEvalTimeout`.
 
-Pinned by `TestSlot_ASlowEvalReportsTheTimeoutInsteadOfItsLateResult`
-(`internal/policy/slot_eval_timeout_test.go`). The pin is deterministic and
-does not depend on machine load: the eval busy-waits 400 ms against a 50 ms
-deadline, so the timeout always fires first and the result always arrives late.
-What the test asserts is that the late result LOSES. Reverting the fix fails
-it. `go test ./internal/policy/... -race -count=2` is clean.
+Pinned by six tests in `internal/policy/slot_eval_timeout_test.go`:
+`TestSlot_EvalTimeout_ReachesTheDecision`, `…_KeepsThePreviousOrder`,
+`…_CountsAndLogs`, `…_HasNoRaceOnTheOutcome`,
+`TestSlot_EvalWithinTimeout_PublishesItsResult` and
+`TestSlot_UserThrowAboutATimeout_IsNotAPolicyTimeout`. None bets on machine
+load: every eval busy-waits well past its deadline, so the timeout always fires
+first and the result always arrives late. What they assert is that the late
+result LOSES. Reverting the concurrency fix fails them; reverting the
+classification narrowing fails the last one. `go test ./internal/policy/...
+-race -count=2` is clean.
+
+Those six came from commit `8761576` on `worktree-agent-a47de169d3033a216`,
+which fixed this defect on 2026-08-19 and never merged. `main` had one
+weaker test of its own until the branch was found while pruning worktrees.
 
 `selection_eval_errors_total{kind="timeout"}` can now increment. `emitMetrics`
 classifies on `strings.Contains(d.Error, "timed out")`, and the error text
 reaches `Decision.Error` for the first time.
 
-**Noted, not fixed:** that classifier matches an error STRING. `Decision.Error`
-is a `string`, so `errors.Is(err, ErrEvalTimeout)` is not available to it. Any
-reword of the timeout message silently reclassifies the metric as `kind="throw"`.
-Recorded as its own weakness rather than widened into this fix.
+The classifier matched the bare words "timed out", so a user eval that THREW
+about its own timeout was counted as a policy timeout. It now matches
+`ErrEvalTimeout.Error()`, pinned by
+`TestSlot_UserThrowAboutATimeout_IsNotAPolicyTimeout`. **Entry 150** carries
+the residual: matching a rendered string is the wrong shape whatever string it
+matches.
 ## 47. A PostgreSQL listener connection is never released
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity was:
@@ -5248,6 +5259,137 @@ mechanism above is read from the code and is not confirmed by a reproduction.
 What IS established: the arbitrary deadline is gone, `-race -count=3
 -parallel 16` is clean across the whole policy tree, and the test no longer
 depends on how busy the machine is.
+
+## 150. The selection-policy error kind is decided by substring, on a rendered string
+
+**Status:** open. **Severity: low.** A metric lies about which failure
+happened. The string match is NARROWED on `main`; the shape is the residual.
+
+`internal/policy/slot.go` — `Slot.emitMetrics` labels
+`selection_eval_errors_total{kind}` by searching the decision's error TEXT:
+
+```go
+kind := "throw"
+if strings.Contains(d.Error, ErrEvalTimeout.Error()) {
+    kind = "timeout"
+} else if strings.Contains(d.Error, ErrInvalidReturn.Error()) {
+    kind = "invalid_return"
+}
+```
+
+`Decision.Error` is a `string`, so `errors.Is` is not available by the time
+the classification runs. The match used to be the bare words `"timed out"`,
+which any user eval could produce by throwing about its own timeout. Fixing 46
+narrowed the match to this package's own sentinel text, and
+`TestSlot_UserThrowAboutATimeout_IsNotAPolicyTimeout` pins it.
+
+The residual is the shape, not the string. A user error that happens to quote
+eRPC's own wording still lands in the wrong bucket, and any future rewording
+of a sentinel silently reclassifies live traffic. The weak fix is to carry the
+typed error to the classifier — `tickOnce` still holds it two lines above the
+`emitMetrics` call — and let `errors.Is` decide. That deletes the string
+matching instead of tuning it. Left out of the 46 fix on scope: it changes a
+function signature the simulator also calls.
+
+## 151. The stdlib test fixtures set an eval timeout the race build cannot meet
+
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium for the test suite.** Load decided the verdict. Same defect as 168.
+
+Every fixture in `internal/policy/stdlib/*_test.go` set
+`EvalTimeout: 50ms` (a few set 100 ms or 200 ms). The stdlib primer costs
+about 20 ms per fresh sobek runtime under `-race`, and a loaded machine
+pushes a whole tick past 50 ms. None of these tests test the timeout — they
+test `excludeIf`, `sortByScore`, sticky routing and the rest.
+
+While the defect in 46 was live this only flaked the suite. With 46 fixed a
+missed deadline became a real failure: the tick reports the timeout, keeps the
+previous cache, and the test reads an order that never arrived. One run of
+`-race -count=5` failed `TestStdlib_Combinators_WhenEmpty_FallbackTo` this
+way; the same test passed 40 times in a row when run alone.
+
+**What `main` carries is broader than this entry proposed.** Rather than a 5 s
+raise in one package, `testEvalTimeout` replaces all 77 hand-written deadlines
+across `internal/policy` AND `internal/policy/stdlib`. It is 10 s, not 5 s, and
+the ceiling is not arbitrary: `EvalInterval` defaults to 15 s when unset and
+`Validate` refuses an `evalTimeout` that is not below the interval. Six sites
+that drive a real ticker keep their own small timeout. See 168.
+
+The general rule: a test that does not test the timeout must not be able to
+hit it. Pick a bound the slowest instrumented build cannot reach.
+
+## 152. This log carries three unresolved merge-conflict markers
+
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium for the log.** THIRD independent record of one defect — see also 159
+and 163. 163 carries the repair; this entry and 159 each recorded it first
+from a different session, neither knowing of the others.
+
+`valve/upstream-bug-log.md` still holds raw conflict markers:
+
+* `:3868`, `:3873`, `:3877` — entry 118 has two competing status paragraphs.
+  The `HEAD` side says `open`; the other side says `fixed-in-fork
+  (2026-08-19)`. Entry 118 is the cache-key collision, and commit `1e58054`
+  fixed it, so the `fixed-in-fork` side is the true one.
+* `:4034`, `:4035`, `:4274`, `:4379`, `:4380`, `:4590` — a nested conflict
+  that spans whole entries (125 through 144). Both sides were kept, so the
+  content is present but the boundaries are noise.
+
+Left in place on purpose. Repairing it means deciding entry 118's status and
+reflowing several hundred lines of unrelated entries, which is its own commit
+and should not ride along with a code fix. Whoever takes it should start with
+the `git log` for the two worktree branches the markers name.
+
+## 153. A policy that always overruns its timeout now routes on registration order
+
+**Status:** not a bug — the routing is the correct trade, recorded so nobody
+reports it as a regression. **Severity: low.** It is the tail of 46. The
+unwired `consecutiveFails` recovery described at the end IS a real gap; it is
+held here rather than given an id of its own.
+
+Before 46 was fixed, a policy that always exceeded `evalTimeout` was applied
+anyway, late and silently. After the fix every such tick fails, so the slot
+cache never fills, and `erpc/networks.go:1834` serves the documented
+cold-start fallback — the raw registration order, unfiltered and unranked.
+
+That is the right trade: the operator gets a warning and a
+`selection_eval_errors_total{kind="timeout"}` increment on every tick, and
+requests keep flowing. Silently publishing a stale verdict past the bound the
+config declares is worse than routing on registration order while shouting
+about it.
+
+One gap stays open underneath. `Slot.consecutiveFails` now increments for
+timeouts as well as throws, but nothing reads it: the comment at
+`internal/policy/slot.go:87` says "spec §5.7 falls back to the default policy
+after 3 consecutive failures. (Hookup deferred to Phase 5.15.)" So the
+designed recovery — swap a broken user policy for the default one — is still
+not wired. A permanently slow policy stays on the cold-start fallback until an
+operator raises `evalTimeout` or simplifies the eval.
+
+## 154. `EvalInterval: 0` does not freeze a slot, and a dozen test comments say it does
+
+**Status:** open. **Severity: low.** A test that runs long enough gets a tick
+it did not ask for.
+
+`common/defaults.go:3030` rewrites a zero `EvalInterval` to 15 s. `SetDefaults`
+runs before `RegisterNetwork`, and `Slot.start` reads the config AFTER that
+rewrite, so `interval <= 0` is never true for a config that asked for zero.
+The ticker starts.
+
+Test fixtures across `internal/policy` and `internal/policy/stdlib` set
+`EvalInterval: common.Duration(0)` with the comment "frozen — tests drive
+manual ticks" (`stdlib_test.go:110`, `finality_dimension_test.go:49`,
+`translator_e2e_test.go:49`, `sticky_scope_test.go:27`, and more). Every one
+of those slots ticks in the background at 15 s. Nothing has failed yet only
+because those tests finish first.
+
+The real freeze knob is `DisableTickerForTest`, which `Slot.start` checks
+before it reads the interval. `slot_eval_timeout_test.go` uses it. Either move
+the fixtures onto that flag, or make `SetDefaults` leave an explicit zero
+alone — the second is weaker, but it changes production defaulting, so the
+flag is the safer half.
+
+---
 
 ## 155. `TestInitializer_MultipleRapidFailures` asserts against a live auto-retry loop
 
