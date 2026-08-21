@@ -5285,10 +5285,16 @@ treat it as settled, whereas "a terminal state means the attempt is done" is a
 guarantee three callers already assumed. Six consecutive
 `go test -race ./util/ -count=4` runs are green.
 
-## 159. The bug log itself carries unresolved merge conflicts
+## 159. The bug log itself carries unresolved merge conflicts (SAME DEFECT as 163)
 
-**Status:** open. Fork document only (`valve/upstream-bug-log.md`).
-**Severity: low**, but it makes the log unreadable from entry 118 onward.
+**This is the first record of the defect that 163 fixed.** Both were written
+against commit `8fe74b2`, from different sessions, and neither knew of the
+other. 159 reports the markers and declines to resolve them; 163 resolves them
+and records what the resolution uncovered. Read 163 for the repair.
+
+**Status: FIXED in the fork.** Upstream still carries it. Fork document only
+(`valve/upstream-bug-log.md`). **Severity was: low** for the product, high for
+this file — it was unreadable from entry 118 onward.
 
 At `8fe74b2` the file contains literal conflict markers:
 
@@ -5304,6 +5310,13 @@ sit inside a three-way conflict. The two sides differ in substance, not
 formatting: entry 118's two versions disagree about whether the defect is open
 or fixed. Resolving it needs a person who knows which sessions produced which
 half, so it is recorded rather than guessed at.
+
+**How it was resolved.** Nobody had to know which session produced which half.
+Every side held DIFFERENT entries, so the merge only had to concatenate them.
+Entry 118's status block was the sole real disagreement, and the code settled
+it. Commit `63bd173` removed the marker lines; `2cf36f2` repaired entries 14,
+99 and 118, which still carried stacked status paragraphs after the markers
+went, and added the `pre-commit` gate that found them. 163 has the detail.
 
 ---
 
@@ -5392,6 +5405,9 @@ code does not have, which is worse than no comment.
 ---
 
 ## 163. The bug log carried three unresolved merge-conflict markers on `main`
+
+**Entry 159 is the same defect, recorded first** from another session against the
+same commit `8fe74b2`. 159 declines to resolve it; this entry resolves it.
 
 **Status: FIXED in the fork.** Upstream still carries it. **Severity: low for the product, high for
 this file.** Found while opening entries 130-134.
