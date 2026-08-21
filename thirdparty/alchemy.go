@@ -501,9 +501,10 @@ func (v *AlchemyVendor) GetVendorSpecificErrorIfAny(req *common.NormalizedReques
 					details,
 				),
 			)
-		} else if code >= -32099 && code <= -32599 || code >= -32603 && code <= -32699 || code >= -32701 && code <= -32768 {
+		} else if code >= -32599 && code <= -32099 || code >= -32699 && code <= -32603 || code >= -32768 && code <= -32701 {
 			// For invalid request errors (codes above), there is a high chance that the error is due to a mistake that the user
 			// has done, and retrying another upstream would not help.
+			// Alchemy documents these three bands as "Application-defined error or other".
 			// Ref: https://docs.alchemy.com/reference/error-reference#json-rpc-error-codes
 			return common.NewErrEndpointClientSideException(
 				common.NewErrJsonRpcExceptionInternal(

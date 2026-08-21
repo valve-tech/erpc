@@ -79,6 +79,31 @@ func ParseBlockHashHexToBytes(s string) ([]byte, error) {
 	return b, nil
 }
 
+// twoToTheSixtyFour is the first float64 above the uint64 range. uint64 stops
+// one below it, and the constant is exact in float64, so `v >= twoToTheSixtyFour`
+// is the precise bound. Comparing against math.MaxUint64 would not be: that
+// constant rounds UP to this same value in float64, so 2^64 itself would slip
+// through and overflow the cast.
+const twoToTheSixtyFour = float64(1 << 64)
+
+// checkBlockNumberFloat reports why a JSON number names no block, or nil when
+// a uint64 holds it exactly.
+func checkBlockNumberFloat(v float64) error {
+	switch {
+	case math.IsNaN(v):
+		return fmt.Errorf("invalid block number: NaN")
+	case math.IsInf(v, 0):
+		return fmt.Errorf("invalid block number: %v", v)
+	case v < 0:
+		return fmt.Errorf("invalid block number: %v is negative", v)
+	case v >= twoToTheSixtyFour:
+		return fmt.Errorf("invalid block number: %v exceeds the largest 64-bit block number", v)
+	case v != math.Trunc(v):
+		return fmt.Errorf("invalid block number: %v is not a whole number", v)
+	}
+	return nil
+}
+
 // ParseBlockParameter handles complex block parameters including objects with blockHash
 // Returns blockNumber string, blockHash bytes, and error
 func ParseBlockParameter(param interface{}) (blockNumber string, blockHash []byte, err error) {
@@ -95,9 +120,22 @@ func ParseBlockParameter(param interface{}) (blockNumber string, blockHash []byt
 		// This is a block number or tag
 		blockNumber = v
 	case float64:
-		// JSON numbers are parsed as float64
+		// JSON numbers are parsed as float64. Reject every value a uint64
+		// cannot hold instead of casting it. Go leaves a float-to-integer
+		// conversion whose value the target cannot represent
+		// "implementation-dependent", so the bare cast made -1, NaN and 1e30
+		// name a real block — genesis on this machine, something else on a
+		// machine whose conversion traps to the minimum. A negative,
+		// fractional, NaN, infinite or oversized number names no block, so the
+		// caller gets an error and decides what to do.
+		if err := checkBlockNumberFloat(v); err != nil {
+			return "", nil, err
+		}
 		blockNumber = fmt.Sprintf("0x%x", uint64(v))
 	case int64:
+		if v < 0 {
+			return "", nil, fmt.Errorf("invalid block number: %d is negative", v)
+		}
 		blockNumber = fmt.Sprintf("0x%x", uint64(v))
 	case uint64:
 		blockNumber = fmt.Sprintf("0x%x", v)

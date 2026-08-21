@@ -78,8 +78,10 @@ func makeSelectionResponse(nq *common.NormalizedRequest, result map[string]inter
 	return common.NewNormalizedResponse().WithJsonRpcResponse(jrrs), nil
 }
 
-// findDatabaseConnectorById finds a database connector by ID from admin auth strategies
-func (e *ERPC) findDatabaseConnectorById(projectId, connectorId string) (data.Connector, error) {
+// findDatabaseStrategyById finds a project's database auth strategy by its
+// connector ID. The API-key handlers write through the strategy, not around it,
+// so a change reaches the store and the caches in front of it together.
+func (e *ERPC) findDatabaseStrategyById(projectId, connectorId string) (*auth.DatabaseStrategy, error) {
 	if e.projectsRegistry == nil {
 		return nil, fmt.Errorf("projects registry not configured")
 	}
@@ -95,8 +97,28 @@ func (e *ERPC) findDatabaseConnectorById(projectId, connectorId string) (data.Co
 		return nil, fmt.Errorf("project '%s' has no auth registry", projectId)
 	}
 
-	// Find the database connector within the project
-	return preparedProject.consumerAuthRegistry.FindDatabaseConnector(connectorId)
+	// Find the database strategy within the project
+	return preparedProject.consumerAuthRegistry.FindDatabaseStrategy(connectorId)
+}
+
+// deleteLegacyApiKeyRecord removes an API-key record left at (apiKey, userId)
+// by an eRPC old enough to put the user id in the address.
+//
+// It only matters on PostgreSQL. That driver expands "*" on a main-index range
+// key, so a read at data.ConnectorApiKeyRangeKey matches the legacy record too,
+// and an update or a revoke that wrote only to the canonical address would
+// leave the old record behind for the next read to pick up instead. A key an
+// operator believes they revoked would keep working. Every other driver matches
+// keys literally, where this delete finds nothing and is a no-op.
+//
+// A key issued twice under two different user ids is out of reach here: the
+// read resolves one of the records and this clears that one. That case
+// predates the fix and is unchanged by it.
+func deleteLegacyApiKeyRecord(ctx context.Context, connector data.Connector, apiKey, userId string) error {
+	if userId == data.ConnectorApiKeyRangeKey {
+		return nil
+	}
+	return connector.Delete(ctx, apiKey, userId)
 }
 
 // handleAddApiKey adds a new API key
@@ -144,7 +166,7 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 		}
 	}
 
-	connector, err := e.findDatabaseConnectorById(projectId, connectorId)
+	strategy, err := e.findDatabaseStrategyById(projectId, connectorId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find connector: %w", err)
 	}
@@ -172,10 +194,18 @@ func (e *ERPC) handleAddApiKey(ctx context.Context, nq *common.NormalizedRequest
 		return nil, fmt.Errorf("failed to marshal user data: %w", err)
 	}
 
-	err = connector.Set(ctx, apiKey, userId, userDataBytes, nil)
+	// The record is addressed by the API key alone. That is all a caller
+	// presents, and the auth strategy has nothing else to look it up with. The
+	// user id rides inside the record body, where the strategy reads it from.
+	err = strategy.GetConnector().Set(ctx, apiKey, data.ConnectorApiKeyRangeKey, userDataBytes, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store API key: %w", err)
 	}
+
+	// Drop any cached decision for this key. Issuing a key that a caller has
+	// already tried would otherwise stay refused until the negative cache
+	// expires.
+	strategy.InvalidateCache(apiKey)
 
 	result := map[string]interface{}{
 		"success": true,
@@ -231,13 +261,13 @@ func (e *ERPC) handleListApiKeys(ctx context.Context, nq *common.NormalizedReque
 		}
 	}
 
-	connector, err := e.findDatabaseConnectorById(projectId, connectorId)
+	strategy, err := e.findDatabaseStrategyById(projectId, connectorId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find connector: %w", err)
 	}
 
 	// List from main index to get all API keys (optimized: only 1 row per API key)
-	results, nextToken, err := connector.List(ctx, data.ConnectorMainIndex, limit, paginationToken)
+	results, nextToken, err := strategy.GetConnector().List(ctx, data.ConnectorMainIndex, limit, paginationToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list API keys: %w", err)
 	}
@@ -250,13 +280,18 @@ func (e *ERPC) handleListApiKeys(ctx context.Context, nq *common.NormalizedReque
 			continue // Skip invalid records
 		}
 
-		// Create API key object
+		// Create API key object. The user id comes from the record body, which
+		// is where the auth strategy reads it from. The range key is a fixed
+		// address and names nobody.
 		apiKey := ApiKey{
 			Key:       item.PartitionKey,
-			UserId:    item.RangeKey, // Range key is now the userId directly
-			Enabled:   true,          // Default to enabled if not specified
-			CreatedAt: time.Now(),    // TODO: Add actual timestamps
+			Enabled:   true,       // Default to enabled if not specified
+			CreatedAt: time.Now(), // TODO: Add actual timestamps
 			UpdatedAt: time.Now(),
+		}
+
+		if userId, ok := userData["userId"].(string); ok {
+			apiKey.UserId = userId
 		}
 
 		// Read the enabled status from the database
@@ -326,12 +361,13 @@ func (e *ERPC) handleUpdateApiKey(ctx context.Context, nq *common.NormalizedRequ
 		return nil, common.NewErrInvalidRequest(fmt.Errorf("updates is required and must be an object"))
 	}
 
-	connector, err := e.findDatabaseConnectorById(projectId, connectorId)
+	strategy, err := e.findDatabaseStrategyById(projectId, connectorId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find connector: %w", err)
 	}
+	connector := strategy.GetConnector()
 
-	currentBytes, err := connector.Get(ctx, data.ConnectorMainIndex, apiKey, "*", nil)
+	currentBytes, err := connector.Get(ctx, data.ConnectorMainIndex, apiKey, data.ConnectorApiKeyRangeKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current API key data: %w", err)
 	}
@@ -341,7 +377,8 @@ func (e *ERPC) handleUpdateApiKey(ctx context.Context, nq *common.NormalizedRequ
 		return nil, fmt.Errorf("failed to parse current data: %w", err)
 	}
 
-	// Get the userId from current data to know the range key
+	// A record with no userId cannot authenticate anybody, so refuse to write
+	// one back rather than persist it in that state.
 	userId, ok := currentData["userId"].(string)
 	if !ok || userId == "" {
 		return nil, fmt.Errorf("missing or invalid userId in current data")
@@ -362,9 +399,15 @@ func (e *ERPC) handleUpdateApiKey(ctx context.Context, nq *common.NormalizedRequ
 		return nil, fmt.Errorf("failed to marshal updated data: %w", err)
 	}
 
-	if err := connector.Set(ctx, apiKey, userId, updatedBytes, nil); err != nil {
+	if err := connector.Set(ctx, apiKey, data.ConnectorApiKeyRangeKey, updatedBytes, nil); err != nil {
 		return nil, fmt.Errorf("failed to update API key: %w", err)
 	}
+
+	if err := deleteLegacyApiKeyRecord(ctx, connector, apiKey, userId); err != nil {
+		return nil, fmt.Errorf("failed to update API key: %w", err)
+	}
+
+	strategy.InvalidateCache(apiKey)
 
 	result := map[string]interface{}{
 		"success": true,
@@ -411,13 +454,16 @@ func (e *ERPC) handleDeleteApiKey(ctx context.Context, nq *common.NormalizedRequ
 		return nil, common.NewErrInvalidRequest(fmt.Errorf("apiKey is required and must be a string"))
 	}
 
-	connector, err := e.findDatabaseConnectorById(projectId, connectorId)
+	strategy, err := e.findDatabaseStrategyById(projectId, connectorId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find connector: %w", err)
 	}
+	connector := strategy.GetConnector()
 
-	// Get current data to find the userId (range key) for deletion
-	currentBytes, err := connector.Get(ctx, data.ConnectorMainIndex, apiKey, "*", nil)
+	// Read the record first, so the report can name the user whose access is
+	// being withdrawn, and so revoking a key that was never issued says so
+	// rather than reporting a revocation that did not happen.
+	currentBytes, err := connector.Get(ctx, data.ConnectorMainIndex, apiKey, data.ConnectorApiKeyRangeKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current API key data: %w", err)
 	}
@@ -427,16 +473,20 @@ func (e *ERPC) handleDeleteApiKey(ctx context.Context, nq *common.NormalizedRequ
 		return nil, fmt.Errorf("failed to parse current data: %w", err)
 	}
 
-	// Get the userId from current data to know the range key
 	userId, ok := currentData["userId"].(string)
 	if !ok || userId == "" {
 		return nil, fmt.Errorf("missing or invalid userId in current data")
 	}
 
-	err = connector.Delete(ctx, apiKey, userId)
-	if err != nil {
+	if err := connector.Delete(ctx, apiKey, data.ConnectorApiKeyRangeKey); err != nil {
 		return nil, fmt.Errorf("failed to delete API key: %w", err)
 	}
+
+	if err := deleteLegacyApiKeyRecord(ctx, connector, apiKey, userId); err != nil {
+		return nil, fmt.Errorf("failed to delete API key: %w", err)
+	}
+
+	strategy.InvalidateCache(apiKey)
 
 	result := map[string]interface{}{
 		"success": true,

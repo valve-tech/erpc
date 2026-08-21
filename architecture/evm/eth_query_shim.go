@@ -173,7 +173,10 @@ func shimQueryLogs(ctx context.Context, network common.Network, parentReqID inte
 	if err := sonic.Unmarshal(result, &logs); err != nil {
 		return nil, err
 	}
-	sortLogs(logs, req.Order)
+	blockNumbers, err := sortLogs(logs, req.Order)
+	if err != nil {
+		return nil, err
+	}
 
 	pageLogs := make([]map[string]interface{}, 0)
 	parentTransactions := make([]map[string]interface{}, 0)
@@ -181,14 +184,12 @@ func shimQueryLogs(ctx context.Context, network common.Network, parentReqID inte
 	var lastScanned *QueryCursorBlock
 	var hasMore bool
 
+	// Group by block off the numbers sortLogs already read. Re-reading the maps
+	// here was the second place one unreadable log could push a cursor of 0.
 	for i := 0; i < len(logs); {
-		blockNumber, _ := parseUint64Value(logs[i]["blockNumber"])
+		blockNumber := blockNumbers[i]
 		blockLogs := make([]map[string]interface{}, 0)
-		for i < len(logs) {
-			currentBlock, _ := parseUint64Value(logs[i]["blockNumber"])
-			if currentBlock != blockNumber {
-				break
-			}
+		for i < len(logs) && blockNumbers[i] == blockNumber {
 			blockLogs = append(blockLogs, logs[i])
 			i++
 		}
@@ -430,18 +431,30 @@ func fetchTransactionByHash(ctx context.Context, network common.Network, parentR
 }
 
 func fetchTracesForBlock(ctx context.Context, network common.Network, parentReqID interface{}, pinToUpstreamId string, block map[string]interface{}) ([]map[string]interface{}, error) {
-	blockNumber, _ := parseUint64Value(block["number"])
+	// A block whose number eRPC cannot read cannot be traced: the fallback
+	// below would ask the upstream for trace_block("0x0") and stamp every trace
+	// with block 0. Report it instead. See entry 132 in
+	// valve/upstream-bug-log.md.
+	blockNumber, err := parseUint64Value(block["number"])
+	if err != nil {
+		return nil, fmt.Errorf("block has an unreadable number: %w", err)
+	}
 	blockHashHex, _ := block["hash"].(string)
 	blockHash, _ := common.HexToBytes(blockHashHex)
 	blockNumberHex, _ := block["number"].(string)
 	if blockNumberHex == "" {
 		blockNumberHex = fmt.Sprintf("0x%x", blockNumber)
 	}
+	// An absent timestamp stays absent. A timestamp that is present and
+	// unreadable is a different event, and dropping it to nil would read
+	// downstream as a chain that does not report block times.
 	var blockTimestamp *uint64
 	if block["timestamp"] != nil {
-		if ts, err := parseUint64Value(block["timestamp"]); err == nil {
-			blockTimestamp = &ts
+		ts, err := parseUint64Value(block["timestamp"])
+		if err != nil {
+			return nil, fmt.Errorf("block %d has an unreadable timestamp: %w", blockNumber, err)
 		}
+		blockTimestamp = &ts
 	}
 
 	rawTransactions, _ := block["transactions"].([]interface{})
@@ -560,11 +573,26 @@ func protoTraceFromJSON(trace map[string]interface{}) (*bdsevm.Trace, error) {
 	output, _ := common.HexToBytes(decoded.Output)
 	txHash, _ := common.HexToBytes(decoded.TransactionHash)
 	blockHash, _ := common.HexToBytes(decoded.BlockHash)
-	gas, _ := parseUint64Value(decoded.Gas)
-	gasUsed, _ := parseUint64Value(decoded.GasUsed)
-	subtraces, _ := parseUint64Value(decoded.Subtraces)
-	transactionIndex, _ := parseUint64Value(decoded.TransactionIndex)
-	blockNumber, _ := parseUint64Value(decoded.BlockNumber)
+	gas, err := parseOptionalQuantity(decoded.Gas, "gas")
+	if err != nil {
+		return nil, err
+	}
+	gasUsed, err := parseOptionalQuantity(decoded.GasUsed, "gasUsed")
+	if err != nil {
+		return nil, err
+	}
+	subtraces, err := parseOptionalQuantity(decoded.Subtraces, "subtraces")
+	if err != nil {
+		return nil, err
+	}
+	transactionIndex, err := parseOptionalQuantity(decoded.TransactionIndex, "transactionIndex")
+	if err != nil {
+		return nil, err
+	}
+	blockNumber, err := parseOptionalQuantity(decoded.BlockNumber, "blockNumber")
+	if err != nil {
+		return nil, err
+	}
 	subtraces32, err := uint32FromUint64(subtraces, "subtraces")
 	if err != nil {
 		return nil, err
@@ -574,8 +602,14 @@ func protoTraceFromJSON(trace map[string]interface{}) (*bdsevm.Trace, error) {
 		return nil, err
 	}
 	var traceAddress []uint32
-	for _, idx := range decoded.TraceAddress {
-		value, _ := parseUint64Value(idx)
+	for i, idx := range decoded.TraceAddress {
+		// Every entry is present by construction, so an unreadable one is
+		// always garbage. A silent 0 would move the trace to a different
+		// position in the call tree.
+		value, err := parseUint64Value(idx)
+		if err != nil {
+			return nil, fmt.Errorf("unreadable traceAddress[%d]: %w", i, err)
+		}
 		value32, err := uint32FromUint64(value, "traceAddress")
 		if err != nil {
 			return nil, err
@@ -583,10 +617,12 @@ func protoTraceFromJSON(trace map[string]interface{}) (*bdsevm.Trace, error) {
 		traceAddress = append(traceAddress, value32)
 	}
 	var timestamp *uint64
-	if decoded.BlockTimestamp != nil {
-		if parsed, err := parseUint64Value(*decoded.BlockTimestamp); err == nil {
-			timestamp = &parsed
+	if decoded.BlockTimestamp != nil && *decoded.BlockTimestamp != "" {
+		parsed, err := parseUint64Value(*decoded.BlockTimestamp)
+		if err != nil {
+			return nil, fmt.Errorf("unreadable blockTimestamp: %w", err)
 		}
+		timestamp = &parsed
 	}
 
 	traceType := bdsevm.TraceType_TRACE_CALL

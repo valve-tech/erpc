@@ -41,17 +41,46 @@
     .excludeIf(any(all(samplesAbove(20), latencyAbove(3000), latencyDeviationAbove(3, { mode: 'majority' })), latencyAbove(10_000)))
     // Block-head lag: drop if behind tip by ≥16 blocks or ≥30s.
     .excludeIf(any(blockNumberLagAbove(16), blockSecondsLagAbove(30)))
-    // Outage safety net: if everyone failed the health excludes, fall
-    // back to the raw set rather than failing closed.
-    .whenEmpty(() => upstreams)
     // Tier split: prefer non-fallback; fall back to tier:fallback if no
     // primary survives.
-    .preferTag('!tier:fallback', { minHealthy: 1, fallback: 'tier:fallback' })
+    //
+    // `keepRest` is the per-request escape, driven by the network's
+    // `failover.onDefaultsExhausted`. Default OFF: preferTag is a hard
+    // filter, so one healthy primary removes the whole fallback tier
+    // from this tick and no request can reach a fallback until the next
+    // tick. Turn it ON and the fallback tier stays in the list, ranked
+    // behind every primary by `demoteTag` below — a request that
+    // exhausts the primaries then escalates to the fallback inside the
+    // same request. Cost warning: hedge and consensus pick further down
+    // the list, so with the escape on they can reach the fallback tier
+    // on a healthy request. That is why it is opt-in.
+    .preferTag('!tier:fallback', { minHealthy: 1, fallback: 'tier:fallback', keepRest: ctx.failoverOnDefaultsExhausted })
+    // Outage safety net: if everyone failed the health excludes, fall
+    // back to the raw set rather than failing closed.
+    //
+    // Runs AFTER the tier split on purpose. Before it, a tick where BOTH
+    // tiers failed the health excludes restored the raw set and preferTag
+    // then found the primaries present again and discarded the fallback
+    // tier — throwing a whole tier away at the worst possible moment.
+    // preferTag never empties a non-empty list, so this ordering only
+    // changes the total-outage case.
+    .whenEmpty(() => upstreams)
     // Rank survivors by p70 latency.
     .sortByScore(PREFER_FASTEST)
+    // Tier order beats score. sortByScore ranks on health alone, so with
+    // the escape on a fast fallback would take the head of the list.
+    // This runs BEFORE stickyPrimary so sticky tracks an actual primary:
+    // let it latch onto a fallback and it stops protecting the primary
+    // tier from flapping. A no-op whenever preferTag already dropped the
+    // fallback tier, and a no-op when EVERY survivor is a fallback.
+    .demoteTag('tier:fallback')
     // Hold the primary stable across ticks unless a meaningfully better
     // option exists for ≥30s.
     .stickyPrimary({ hysteresis: 0.30, minSwitchInterval: '30s' })
+    // Tier order has the last word. stickyPrimary can still hoist a
+    // fallback that another slot published to the shared primary
+    // register — e.g. a tick on which every primary was excluded.
+    .demoteTag('tier:fallback')
     // Shadow-mirror sampled real traffic to currently-excluded
     // upstreams in the background so they accumulate fresh tracker
     // samples without touching real user traffic. sampleRate=0.1

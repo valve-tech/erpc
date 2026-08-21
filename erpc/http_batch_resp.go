@@ -68,7 +68,10 @@ func (b *BatchResponseWriter) WriteTo(w io.Writer) (n int64, err error) {
 			return n + written, err
 		}
 		if written == 0 {
-			return n, fmt.Errorf("no bytes written for response %d error: %w", i, err)
+			// err is nil here — the line above returned on a non-nil one — so
+			// this reports a writer that took the entry and reported nothing.
+			// Wrapping err with %w only ever rendered "%!w(<nil>)".
+			return n, fmt.Errorf("no bytes written for response %d of type %T", i, resp)
 		}
 		n += written
 	}

@@ -19,6 +19,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ErrServerFailed marks an Init failure that came from one of the transports
+// eRPC exposes: the HTTP server, the gRPC server or the metrics server. Init is
+// library code, so it reports the failure instead of ending the process;
+// cmd/erpc matches this and exits with util.ExitCodeHttpServerFailed.
+var ErrServerFailed = errors.New("erpc server failed")
+
 func Init(
 	appCtx context.Context,
 	cfg *common.Config,
@@ -147,17 +153,21 @@ func Init(
 	//
 	// 4) Expose Transports
 	//
+	// Each transport serves in its own goroutine, so its failure has to travel
+	// back to whoever called Init. serverFailed carries it. The buffer holds
+	// one slot per transport, so a goroutine that fails after Init has already
+	// returned writes its error and exits instead of leaking.
+	serverFailed := make(chan error, 3)
 	logger.Info().Msg("initializing transports")
 	if cfg.Server != nil {
-		httpServer, err := NewHttpServer(appCtx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
+		httpServer, err := NewHttpServer(appCtx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
 		if err != nil {
 			return err
 		}
 		go func() {
 			if err := httpServer.Start(&logger); err != nil {
 				if err != http.ErrServerClosed {
-					logger.Error().Msgf("failed to start http server: %v", err)
-					util.OsExit(util.ExitCodeHttpServerFailed)
+					serverFailed <- fmt.Errorf("%w: http: %w", ErrServerFailed, err)
 				}
 			}
 		}()
@@ -169,8 +179,7 @@ func Init(
 		}
 		go func() {
 			if err := grpcServer.Start(&logger); err != nil {
-				logger.Error().Msgf("failed to start gRPC server: %v", err)
-				util.OsExit(util.ExitCodeHttpServerFailed)
+				serverFailed <- fmt.Errorf("%w: grpc: %w", ErrServerFailed, err)
 			}
 		}()
 	}
@@ -197,8 +206,7 @@ func Init(
 		}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Error().Msgf("error starting metrics server: %s", err)
-				util.OsExit(util.ExitCodeHttpServerFailed)
+				serverFailed <- fmt.Errorf("%w: metrics: %w", ErrServerFailed, err)
 			}
 		}()
 		go func() {
@@ -214,12 +222,24 @@ func Init(
 		}()
 	}
 
-	// Wait until the context is cancelled, then give the http server some time to finish draining.
-	<-appCtx.Done()
-	logger.Info().Msg("shutting down gracefully...")
+	// Wait until the context is cancelled, or a transport fails. A transport
+	// failure ends Init with the error: Init is library code, so the caller
+	// decides what a dead listener means. cmd/erpc exits with
+	// util.ExitCodeHttpServerFailed; an embedder can do something else.
+	var serverErr error
+	select {
+	case <-appCtx.Done():
+		logger.Info().Msg("shutting down gracefully...")
+	case serverErr = <-serverFailed:
+		logger.Error().Err(serverErr).Msg("a server failed, returning to the caller")
+	}
 	// Flush buffered integrity forensics before the process goes away; the S3
 	// exporter otherwise loses everything written since its last interval.
 	evm.CloseIntegrityExporters()
+	if serverErr != nil {
+		return serverErr
+	}
+	// Give the http server some time to finish draining.
 	if cfg.Server != nil && cfg.Server.WaitAfterShutdown != nil {
 		time.Sleep(cfg.Server.WaitAfterShutdown.Duration())
 	}

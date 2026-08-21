@@ -78,6 +78,9 @@ func (v *InfuraVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logg
 
 	if upstream.Endpoint == "" {
 		if apiKey, ok := settings["apiKey"].(string); ok && apiKey != "" {
+			if upstream.Evm == nil {
+				return nil, fmt.Errorf("infura vendor requires upstream.evm to be defined")
+			}
 			chainID := upstream.Evm.ChainId
 			if chainID == 0 {
 				return nil, fmt.Errorf("infura vendor requires upstream.evm.chainId to be defined")

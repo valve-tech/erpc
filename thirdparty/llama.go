@@ -51,6 +51,9 @@ func (v *LlamaVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logge
 	}
 	if upstream.Endpoint == "" {
 		if apiKey, ok := settings["apiKey"].(string); ok && apiKey != "" {
+			if upstream.Evm == nil {
+				return nil, fmt.Errorf("llama vendor requires upstream.evm to be defined")
+			}
 			chainID := upstream.Evm.ChainId
 			if chainID == 0 {
 				return nil, fmt.Errorf("llama vendor requires upstream.evm.chainId to be defined")

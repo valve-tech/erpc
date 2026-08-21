@@ -32,7 +32,11 @@ func (v *TenderlyVendor) Name() string {
 }
 
 const DefaultTenderlyRecheckInterval = 24 * time.Hour
-const tenderlyApiUrl = "https://api.tenderly.co/api/v1/supported-networks"
+
+// tenderlyApiUrl is the supported-networks list that fetchTenderlyNetworks
+// reads. Declared as a var so tests can point it at a mock server, the same
+// way alchemy, chainstack and drpc already do.
+var tenderlyApiUrl = "https://api.tenderly.co/api/v1/supported-networks"
 
 type tenderlySupportedNetwork struct {
 	ChainID      string `json:"chain_id"`

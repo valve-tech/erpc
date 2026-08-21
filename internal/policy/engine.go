@@ -273,6 +273,7 @@ func (e *Engine) RegisterNetwork(networkID, networkLabel string, upstreamsFn fun
 	if err := upgradeDefaultPolicy(cfg); err != nil {
 		return err
 	}
+	warnIfFailoverIgnored(e.logger, networkID, cfg)
 	if upstreamsFn == nil {
 		upstreamsFn = func() []common.Upstream { return nil }
 	}
