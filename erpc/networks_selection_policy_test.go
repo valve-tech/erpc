@@ -52,8 +52,9 @@ import (
 // hardened default selection policy. Unlike `setupTestNetworkWithScoring`
 // it does NOT pin the upstream order — the engine actually drives routing.
 // The ticker is frozen (EvalInterval=0); tests force ticks via
-// `policy.TickForTest`.
-func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConfigs []*common.UpstreamConfig) *Network {
+// `policy.TickForTest`. Each `opt` mutates the network config before the
+// network is built — used by the failover tests to set `failover`.
+func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConfigs []*common.UpstreamConfig, opts ...func(*common.NetworkConfig)) *Network {
 	t.Helper()
 
 	setupGockObserver(t)
@@ -116,6 +117,9 @@ func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConf
 			EvalInterval: 0, // frozen — tests drive ticks
 		},
 	}
+	for _, opt := range opts {
+		opt(networkConfig)
+	}
 
 	policyEngine := policy.NewEngine(ctx, &log.Logger, "test", metricsTracker, policystdlib.Install, nil)
 	network, err := NewNetwork(
@@ -130,8 +134,7 @@ func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConf
 	)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(50 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 
 	require.NoError(t, network.Bootstrap(ctx))
@@ -142,8 +145,7 @@ func setupSelectionPolicyNetwork(t *testing.T, ctx context.Context, upstreamConf
 	upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 	for _, ups := range upsList {
 		require.NoError(t, ups.Bootstrap(ctx))
-		ups.EvmStatePoller().SuggestLatestBlock(1000)
-		ups.EvmStatePoller().SuggestFinalizedBlock(900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, ups, 1000, 900)
 	}
 	expectedCount := len(upstreamConfigs)
 	// Wait until the registry returns every configured upstream — the
@@ -304,7 +306,115 @@ func upstreamHostFromID(id string) string { return "http://" + id + ".localhost"
 // `chainId` is the network's chain ID as hex (e.g. "0x7b" for 123).
 // All other returned blocks/state are dummy values — the test cares
 // about routing decisions, not block contents.
+// statePollerHeads pins the heads mockStatePollerForHost serves for one host.
+//
+// Set it BEFORE calling setupSelectionPolicyNetwork, and clear it in cleanup.
+//
+// A test that needs per-upstream heads must ALSO keep its Suggest*Block calls.
+// The two do different jobs. Suggest sets the value immediately, because the
+// poller may not poll again for the life of the test. The mock decides what a
+// poll that DOES land will write. If they disagree, the poll wins and the
+// seeded value is gone for good: the poller writes the lower number, and
+// SuggestFinalizedBlock then refuses to re-raise it because
+// evm_state_poller.go:541 drops anything not strictly newer. That is a flake no
+// timeout can fix — the value does not arrive late, it never arrives.
+//
+// These tests do not call t.Parallel, so a plain map is safe here.
+var statePollerHeads = map[string][2]int64{}
+
+// seedEvmHeads writes an upstream's latest and finalized heads and returns only
+// once both are readable. It is the deterministic replacement for
+// `Suggest*Block` followed by a sleep or an `Eventually`.
+//
+// A suggestion cannot be waited on. `SuggestFinalizedBlock` hands the write to
+// a goroutine and takes `finalizedUpdateInProgress` with TryLock, so a
+// suggestion issued while an earlier one is still in flight is DROPPED, not
+// queued. `SuggestLatestBlock` routes a major forward jump through an
+// out-of-band chain-identity check that drops on the same kind of contention.
+// When the drop happens the value does not arrive late — it never arrives, and
+// no ceiling on `Eventually` can rescue it. That is what timed the
+// fallback-tier test out at 20.26s under `make test-fast`.
+//
+// The shared counters the poller reads are ordinary registry objects keyed by
+// upstream, and `GetCounterInt64` returns the instance the poller already holds.
+// Writing them through `TryUpdate` is synchronous, so the caller can assert the
+// value instead of waiting for it. The read-back also pins the key formula: if
+// it ever drifts from the poller's, this fails at once and loudly rather than
+// seeding an orphan counter.
+//
+// Three entry points share one write:
+//
+//	seedEvmHeads         — both heads, each asserted
+//	seedEvmLatestHead    — latest only, asserted
+//	seedEvmFinalizedHead — finalized only, asserted
+//	writeEvmHeadCounter  — no assertion; returns the value the counter settled
+//	                       on, for a test that drives a retreat the counter is
+//	                       EXPECTED to reject
+//
+// Callers that also let a poll land must pin the mock heads to the SAME numbers
+// via `statePollerHeads`; otherwise the poll writes its own value over the seed.
+func seedEvmHeads(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, latest, finalized int64) {
+	t.Helper()
+	seedEvmLatestHead(t, ctx, reg, up, latest)
+	seedEvmFinalizedHead(t, ctx, reg, up, finalized)
+}
+
+// seedEvmLatestHead seeds only the latest head. Use it where the test says
+// nothing about the finalized head; seeding a finalized value the test never
+// asked for is an extra commitment the assertions do not cover.
+func seedEvmLatestHead(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, latest int64) {
+	t.Helper()
+	got := writeEvmHeadCounter(t, ctx, reg, up, evmLatestHeadCounter, latest)
+	require.Equal(t, latest, got,
+		"seeded latest head is not visible on %s — shared-counter key formula drifted?", up.Id())
+}
+
+// seedEvmFinalizedHead seeds only the finalized head.
+func seedEvmFinalizedHead(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, finalized int64) {
+	t.Helper()
+	got := writeEvmHeadCounter(t, ctx, reg, up, evmFinalizedHeadCounter, finalized)
+	require.Equal(t, finalized, got,
+		"seeded finalized head is not visible on %s — shared-counter key formula drifted?", up.Id())
+}
+
+const (
+	evmLatestHeadCounter    = "latestBlock"
+	evmFinalizedHeadCounter = "finalizedBlock"
+)
+
+// writeEvmHeadCounter writes one shared head counter and returns the value the
+// counter settled on. `TryUpdate` decides the write before it returns, so the
+// caller never waits. The counter is monotonic within its rollback tolerance,
+// so a retreat inside that tolerance settles on the OLD value — callers that
+// drive a deliberate retreat read the return value instead of asserting it.
+func writeEvmHeadCounter(t testing.TB, ctx context.Context, reg *upstream.UpstreamsRegistry, up common.EvmUpstream, kind string, value int64) int64 {
+	t.Helper()
+	require.NotNil(t, reg.SharedStateRegistry(), "upstreams registry has no shared state registry")
+	return setEvmHeadCounter(ctx, reg.SharedStateRegistry(), up, kind, value)
+}
+
+// setEvmHeadCounter is the same write for fixture builders that hold the shared
+// state registry directly and have no *testing.T to report through.
+func setEvmHeadCounter(ctx context.Context, ssr data.SharedStateRegistry, up common.EvmUpstream, kind string, value int64) int64 {
+	key := data.CounterValueSchemaVersion + "/" + kind + "/" + common.UniqueUpstreamKey(up)
+	ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback).TryUpdate(ctx, value)
+
+	sp := up.EvmStatePoller()
+	switch kind {
+	case evmLatestHeadCounter:
+		return sp.LatestBlock()
+	case evmFinalizedHeadCounter:
+		return sp.FinalizedBlock()
+	default:
+		panic("unknown evm head counter " + kind)
+	}
+}
+
 func mockStatePollerForHost(host string) {
+	latest, finalized := int64(1000), int64(900) // 0x3e8 / 0x384
+	if pinned, ok := statePollerHeads[host]; ok {
+		latest, finalized = pinned[0], pinned[1]
+	}
 	chainId := "0x7b" // chainId 123 — matches setupSelectionPolicyNetwork's networkConfig
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool { return strings.Contains(util.SafeReadBody(r), "eth_chainId") }).
@@ -316,14 +426,14 @@ func mockStatePollerForHost(host string) {
 			return strings.Contains(body, "eth_getBlockByNumber") && strings.Contains(body, "latest")
 		}).
 		Reply(200).
-		JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x3e8","timestamp":"0x6702a8f0"}}`))
+		JSON([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","timestamp":"0x6702a8f0"}}`, latest)))
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool {
 			body := util.SafeReadBody(r)
 			return strings.Contains(body, "eth_getBlockByNumber") && strings.Contains(body, "finalized")
 		}).
 		Reply(200).
-		JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x384","timestamp":"0x6702a8e0"}}`))
+		JSON([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x%x","timestamp":"0x6702a8e0"}}`, finalized)))
 	gock.New(host).Post("").Persist().
 		Filter(func(r *http.Request) bool {
 			return strings.Contains(util.SafeReadBody(r), "eth_syncing")
@@ -645,10 +755,11 @@ func TestNetworkPolicy_MixedDegraded_OnlyHealthyServed(t *testing.T) {
 // TestNetworkPolicy_FallbackTier_ActivatesWhenPrimaryAllBroken
 // reproduces the case where both primary upstreams are degraded and
 // the secondary tier (tag: tier:fallback) has to take over. The
-// hardened default does `keepHealthy → whenEmpty(() => upstreams) →
-// preferTag('!tier:fallback', {fallback:'tier:fallback'})`. When
-// primaries fail keepHealthy AND the safety net puts them back AND
-// preferTag sees no healthy primaries, it switches to the fallback tier.
+// hardened default does `keepHealthy → preferTag('!tier:fallback',
+// {fallback:'tier:fallback'}) → whenEmpty(() => upstreams)`. The health
+// filters drop both primaries, preferTag then finds no primary left and
+// switches to the fallback tier. The safety net does NOT fire here — the
+// healthy backup keeps the list non-empty, so `whenEmpty` never runs.
 func TestNetworkPolicy_FallbackTier_ActivatesWhenPrimaryAllBroken(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
@@ -977,19 +1088,169 @@ func setupSelectionPolicyNetworkWithEval(t *testing.T, ctx context.Context, upst
 		rateLimitersRegistry, upstreamsRegistry, metricsTracker, policyEngine)
 	require.NoError(t, err)
 
-	upstreamsRegistry.Bootstrap(ctx)
-	time.Sleep(50 * time.Millisecond)
+	_ = upstreamsRegistry.BootstrapAndWait(ctx)
 	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 
 	upsList := upstreamsRegistry.GetNetworkUpstreams(ctx, util.EvmNetworkId(123))
 	for _, ups := range upsList {
 		require.NoError(t, ups.Bootstrap(ctx))
-		ups.EvmStatePoller().SuggestLatestBlock(1000)
-		ups.EvmStatePoller().SuggestFinalizedBlock(900)
+		seedEvmHeads(t, ctx, upstreamsRegistry, ups, 1000, 900)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	resetGockHits()
 	return network
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Fallback-tier escape (failover.onDefaultsExhausted)
+// ──────────────────────────────────────────────────────────────────────
+
+// withFallbackEscape turns on `failover.onDefaultsExhausted` — the
+// operator-facing opt-in for the per-request escape to the fallback tier.
+func withFallbackEscape(cfg *common.NetworkConfig) {
+	on := true
+	cfg.Failover = &common.FailoverConfig{OnDefaultsExhausted: &on}
+}
+
+// mockRetryableError stages a 500 for `method` on `host`. A 500 is
+// retryable toward the network, so the request loop advances to the next
+// upstream in the policy's order instead of returning it to the client.
+func mockRetryableError(t *testing.T, host, method string) {
+	t.Helper()
+	gock.New(host).
+		Post("").
+		Persist().
+		Filter(func(r *http.Request) bool {
+			return strings.Contains(util.SafeReadBody(r), method)
+		}).
+		Reply(500).
+		JSON(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "error": map[string]interface{}{"code": -32603, "message": "internal error"}})
+}
+
+// TestNetworkPolicy_FallbackEscape_OffLeavesFallbackUnreachable pins the
+// gap the escape closes, and pins the DEFAULT while it does so.
+//
+// One healthy primary plus a healthy `tier:fallback` upstream is valve's
+// normal shape: a local node with a public endpoint behind it. Without
+// the escape, `preferTag` hands the request a list of length one. The
+// primary fails, there is no second entry to sweep to, and the client
+// gets an error while the public endpoint sits idle.
+func TestNetworkPolicy_FallbackEscape_OffLeavesFallbackUnreachable(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	setupGockObserver(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	network := setupSelectionPolicyNetwork(t, ctx, []*common.UpstreamConfig{
+		{Type: common.UpstreamTypeEvm, Id: "primary", Endpoint: upstreamHostFromID("primary"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+		{Type: common.UpstreamTypeEvm, Id: "backup", Tags: []string{"tier:fallback"}, Endpoint: upstreamHostFromID("backup"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+	})
+
+	for _, id := range []string{"primary", "backup"} {
+		seedDegraded(network.metricsTracker, upstreamByID(t, network, id), seedSpec{successful: 100, successAvgMs: 10})
+	}
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+
+	order := network.policyEngine.GetOrdered(network.networkId, "*", "*")
+	require.Len(t, order, 1, "default: the fallback tier is absent from the tick's list")
+	require.Equal(t, "primary", order[0].Id())
+
+	mockRetryableError(t, upstreamHostFromID("primary"), "eth_getBalance")
+	mockClean(t, upstreamHostFromID("backup"), "eth_getBalance", "0xbackup")
+
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xabc","latest"]}`))
+	_, err := network.Forward(ctx, req)
+	require.Error(t, err, "no escape: the failing primary is the whole list")
+	assert.Equal(t, 0, gockHits(upstreamHostFromID("backup")),
+		"the fallback must stay untouched while the escape is off")
+}
+
+// TestNetworkPolicy_FallbackEscape_ServesWithinOneRequest is the whole
+// point. Same shape as the test above, plus
+// `failover.onDefaultsExhausted: true`. The fallback tier now sits at
+// position two of the tick's list, the request loop sweeps into it when
+// the primary returns a retryable error, and the client gets an answer
+// on the SAME network.Forward call — no waiting for the next tick.
+func TestNetworkPolicy_FallbackEscape_ServesWithinOneRequest(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	setupGockObserver(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	network := setupSelectionPolicyNetwork(t, ctx, []*common.UpstreamConfig{
+		{Type: common.UpstreamTypeEvm, Id: "primary", Endpoint: upstreamHostFromID("primary"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+		{Type: common.UpstreamTypeEvm, Id: "backupA", Tags: []string{"tier:fallback"}, Endpoint: upstreamHostFromID("backupA"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+		{Type: common.UpstreamTypeEvm, Id: "backupB", Tags: []string{"tier:fallback"}, Endpoint: upstreamHostFromID("backupB"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+	}, withFallbackEscape)
+
+	for _, id := range []string{"primary", "backupA", "backupB"} {
+		seedDegraded(network.metricsTracker, upstreamByID(t, network, id), seedSpec{successful: 100, successAvgMs: 10})
+	}
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+
+	order := network.policyEngine.GetOrdered(network.networkId, "*", "*")
+	require.Len(t, order, 3, "escape on: every upstream stays reachable")
+	require.Equal(t, "primary", order[0].Id(), "the healthy primary still leads")
+	for _, u := range order[1:] {
+		require.True(t, u.Config().HasTag("tier:fallback"),
+			"the fallback tier must be ranked last, not interleaved")
+	}
+
+	mockRetryableError(t, upstreamHostFromID("primary"), "eth_getBalance")
+	mockClean(t, upstreamHostFromID("backupA"), "eth_getBalance", "0xbackupA")
+	mockClean(t, upstreamHostFromID("backupB"), "eth_getBalance", "0xbackupB")
+
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xabc","latest"]}`))
+	resp, err := network.Forward(ctx, req)
+	require.NoError(t, err, "the request must escape to the fallback tier")
+	require.NotNil(t, resp)
+
+	assert.GreaterOrEqual(t, gockHits(upstreamHostFromID("primary")), 1,
+		"the primary is still tried first")
+	served := gockHits(upstreamHostFromID("backupA")) + gockHits(upstreamHostFromID("backupB"))
+	assert.GreaterOrEqual(t, served, 1,
+		"a fallback upstream must serve the request within the same Forward call")
+}
+
+// TestNetworkPolicy_FallbackEscape_HealthyPrimaryKeepsAllTraffic is the
+// cost guard. Ranking the fallback tier last must not send it traffic
+// while the primary answers — the loop returns on the first success and
+// never reaches position two.
+func TestNetworkPolicy_FallbackEscape_HealthyPrimaryKeepsAllTraffic(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	setupGockObserver(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	network := setupSelectionPolicyNetwork(t, ctx, []*common.UpstreamConfig{
+		{Type: common.UpstreamTypeEvm, Id: "primary", Endpoint: upstreamHostFromID("primary"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+		{Type: common.UpstreamTypeEvm, Id: "backup", Tags: []string{"tier:fallback"}, Endpoint: upstreamHostFromID("backup"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+	}, withFallbackEscape)
+
+	// The fallback answers 100× faster. Tier order must still win.
+	seedDegraded(network.metricsTracker, upstreamByID(t, network, "primary"), seedSpec{successful: 100, successAvgMs: 1000})
+	seedDegraded(network.metricsTracker, upstreamByID(t, network, "backup"), seedSpec{successful: 100, successAvgMs: 10})
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+
+	mockClean(t, upstreamHostFromID("primary"), "eth_getBalance", "0xprimary")
+	mockClean(t, upstreamHostFromID("backup"), "eth_getBalance", "0xbackup")
+
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xabc","latest"]}`))
+	resp, err := network.Forward(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.GreaterOrEqual(t, gockHits(upstreamHostFromID("primary")), 1, "the primary serves")
+	assert.Equal(t, 0, gockHits(upstreamHostFromID("backup")),
+		"a faster fallback must not steal traffic from a healthy primary")
 }

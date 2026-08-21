@@ -189,7 +189,17 @@ func TestRace_TwoParticipants_CancelBetweenCompletions(t *testing.T) {
 	// Sequence: first completes → cancel → second completes.
 	<-firstStarted
 	close(releaseFirst)
-	time.Sleep(5 * time.Millisecond) // tiny gap for goroutine scheduling
+	// KEEP THIS GAP. It sequences the cancel AFTER participant 1 has handed its
+	// result to the collector. executeParticipant sends on responseChan right
+	// after the inner returns, and nothing outside the executor can observe
+	// that hand-off, so there is no predicate to wait on instead.
+	//
+	// Measured (2026-08, mutation: executeParticipant drops the result when the
+	// context is already cancelled at its post-execution check): with this gap
+	// the mutation fails the test; with the gap deleted the test passes 5/5,
+	// because the caller-abandoned path then returns context.Canceled, which
+	// this test legitimately accepts. Deleting the gap disarms the test.
+	time.Sleep(5 * time.Millisecond)
 	<-secondStarted
 	cancel()
 	close(releaseSecond)
@@ -647,7 +657,10 @@ func TestRace_ThreeParticipants_CancelAfterFirstComplete(t *testing.T) {
 	}()
 
 	<-firstDone
-	time.Sleep(5 * time.Millisecond) // let first response flow to analyzer
+	// KEEP THIS GAP — same reason as TestRace_TwoParticipants_CancelBetweenCompletions:
+	// it sequences the cancel after participant 1's hand-off, and the hand-off
+	// is not observable from here. The same mutation passes 5/5 without it.
+	time.Sleep(5 * time.Millisecond)
 	cancel()
 	close(releaseRest)
 

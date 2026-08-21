@@ -336,9 +336,10 @@ func newTestUpstreamsRegistry(t *testing.T, networkID, method string, upstreams 
 		networkID: upstreams,
 	})
 	// Also populate the atomic snapshot so GetNetworkUpstreams' fast path works.
-	atomicMap := &sync.Map{}
-	atomicMap.Store(networkID, upstreams)
-	setUnexportedField(t, registry, "networkUpstreamsAtomic", *atomicMap)
+	// Store INTO the registry's own sync.Map rather than copying a populated one
+	// over it: a sync.Map must not be copied after first use, and `go vet` fails
+	// the package for it.
+	storeInUnexportedSyncMap(t, registry, "networkUpstreamsAtomic", networkID, upstreams)
 	return registry
 }
 
@@ -366,4 +367,17 @@ func setUnexportedField(t *testing.T, target any, fieldName string, value any) {
 	require.True(t, field.IsValid(), "field %s must exist", fieldName)
 
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(value))
+}
+
+// storeInUnexportedSyncMap writes one entry into an unexported sync.Map field,
+// in place. The map the registry already owns is the one that gets the entry,
+// so no sync.Map is ever copied.
+func storeInUnexportedSyncMap(t *testing.T, target any, fieldName string, key, value any) {
+	t.Helper()
+
+	field := reflect.ValueOf(target).Elem().FieldByName(fieldName)
+	require.True(t, field.IsValid(), "field %s must exist", fieldName)
+
+	m := (*sync.Map)(unsafe.Pointer(field.UnsafeAddr()))
+	m.Store(key, value)
 }

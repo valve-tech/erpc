@@ -168,8 +168,7 @@ func setupBenchNetwork(b testing.TB, fsCfg []*common.FailsafeConfig, mocks []*be
 		ctx, &log.Logger, "benchProject",
 		upCfgs, ssr, rlr, vr, pr, nil, mt, nil,
 	)
-	upr.Bootstrap(ctx)
-	time.Sleep(300 * time.Millisecond)
+	_ = upr.BootstrapAndWait(ctx)
 	if err := upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)); err != nil {
 		cancel()
 		b.Fatalf("prepare upstreams: %v", err)

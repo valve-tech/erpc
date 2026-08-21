@@ -127,7 +127,7 @@ func TestEngine_PerBoundary_LaneSlotEvicted(t *testing.T) {
 	enabled := true
 	cfg := &common.SelectionPolicyConfig{
 		EvalInterval:         common.Duration(0),
-		EvalTimeout:          common.Duration(500 * time.Millisecond),
+		EvalTimeout:          testEvalTimeout,
 		EvalScope:            common.EvalScopeNetwork,
 		EvalPerBoundary:      &enabled,
 		EvalFunc:             "(ups, _ctx) => ups",

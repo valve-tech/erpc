@@ -45,22 +45,25 @@ func stringToReaderCloser(s string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(s))
 }
 
-// waitUntilAtLeastNoT waits until getter() returns a value >= want or the timeout elapses.
-// It returns the last observed value.
-func waitUntilAtLeastNoT(getter func() int64, want int64, timeout time.Duration) int64 {
-	if want <= 0 {
-		return getter()
+// seedFixtureEvmHeads pins a fixture upstream's latest and finalized heads.
+//
+// It writes the poller's shared counters directly instead of calling
+// Suggest*Block. A suggestion is best-effort: SuggestFinalizedBlock returns
+// without queueing anything when another update holds the lock, and a major
+// SuggestLatestBlock jump waits on an out-of-band chain-identity check. Neither
+// can be waited on, so the old sleep-then-poll loop here was a bet. The counter
+// write settles before it returns.
+//
+// These builders run before any *testing.T is in scope, so a drift in the key
+// formula panics rather than failing an assertion — either way the fixture is
+// unusable and the run must stop at once.
+func seedFixtureEvmHeads(ctx context.Context, ssr data.SharedStateRegistry, up *upstream.Upstream, latest, finalized int64) {
+	if got := setEvmHeadCounter(ctx, ssr, up, evmFinalizedHeadCounter, finalized); got != finalized {
+		panic(fmt.Sprintf("seeded finalized head %d not visible on %s (got %d)", finalized, up.Id(), got))
 	}
-	deadline := time.Now().Add(timeout)
-	val := getter()
-	for time.Now().Before(deadline) {
-		if val >= want {
-			return val
-		}
-		time.Sleep(5 * time.Millisecond)
-		val = getter()
+	if got := setEvmHeadCounter(ctx, ssr, up, evmLatestHeadCounter, latest); got != latest {
+		panic(fmt.Sprintf("seeded latest head %d not visible on %s (got %d)", latest, up.Id(), got))
 	}
-	return val
 }
 
 func createCacheTestFixtures(ctx context.Context, upstreamConfigs []upsTestCfg) ([]*data.MockConnector, *Network, []*upstream.Upstream, *evm.EvmJsonRpcCache) {
@@ -121,14 +124,8 @@ func createCacheTestFixtures(ctx context.Context, upstreamConfigs []upsTestCfg) 
 			panic(err)
 		}
 
-		poller := mockUpstream.EvmStatePoller()
-		time.Sleep(20 * time.Millisecond)
-		poller.SuggestFinalizedBlock(cfg.finBn)
-		poller.SuggestLatestBlock(cfg.lstBn)
-		// Wait until async suggestions are applied to counters to avoid races with test assertions
-		waitUntilAtLeastNoT(func() int64 { return poller.FinalizedBlock() }, cfg.finBn, 200*time.Millisecond)
-		waitUntilAtLeastNoT(func() int64 { return poller.LatestBlock() }, cfg.lstBn, 200*time.Millisecond)
-		poller.SetSyncingState(cfg.syncing)
+		seedFixtureEvmHeads(ctx, ssr, mockUpstream, cfg.lstBn, cfg.finBn)
+		mockUpstream.EvmStatePoller().SetSyncingState(cfg.syncing)
 
 		upstreams = append(upstreams, mockUpstream)
 	}
@@ -2742,14 +2739,8 @@ func createMockUpstream(t *testing.T, ctx context.Context, chainId int64, upstre
 	err = mockUpstream.Bootstrap(ctx)
 	require.NoError(t, err)
 
-	poller := mockUpstream.EvmStatePoller()
-	time.Sleep(20 * time.Millisecond)
-	poller.SuggestFinalizedBlock(finalizedBlock)
-	poller.SuggestLatestBlock(latestBlock)
-	// Wait until async suggestions are applied to counters
-	waitUntilAtLeastNoT(func() int64 { return poller.FinalizedBlock() }, finalizedBlock, 200*time.Millisecond)
-	waitUntilAtLeastNoT(func() int64 { return poller.LatestBlock() }, latestBlock, 200*time.Millisecond)
-	poller.SetSyncingState(syncState)
+	seedFixtureEvmHeads(ctx, ssr, mockUpstream, latestBlock, finalizedBlock)
+	mockUpstream.EvmStatePoller().SetSyncingState(syncState)
 
 	return mockUpstream
 }
@@ -3370,12 +3361,8 @@ func createCacheTestFixturesWithCompression(ctx context.Context, upstreamConfigs
 			panic(err)
 		}
 
-		poller := mockUpstream.EvmStatePoller()
-		time.Sleep(50 * time.Millisecond)
-		poller.SuggestFinalizedBlock(cfg.finBn)
-		poller.SuggestLatestBlock(cfg.lstBn)
-		time.Sleep(50 * time.Millisecond)
-		poller.SetSyncingState(cfg.syncing)
+		seedFixtureEvmHeads(ctx, ssr, mockUpstream, cfg.lstBn, cfg.finBn)
+		mockUpstream.EvmStatePoller().SetSyncingState(cfg.syncing)
 
 		upstreams = append(upstreams, mockUpstream)
 	}
