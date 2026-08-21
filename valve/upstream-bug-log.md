@@ -3634,7 +3634,30 @@ seconds. Now an `atomic.Int64`.
 ## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
 
 **Status:** open. **Severity: medium.** Found by `go test ./util/ -race
--count=2`.
+-count=2`. **The FIRST of the two halves below is now fixed; the second is
+not, so the entry stays open.**
+
+**Half 1 is fixed.** `Stop` no longer decides for the caller that a timeout is
+survivable. It returns `errors.Join(fmt.Errorf("stop abandoned tasks that were
+still running: %w", waitCtx.Err()), destroyErr)`. The test is `waitCtx.Err()`,
+NOT the wait error: since 157, `WaitForTasks` also reports tasks that FAILED,
+and a failed task is not an abandoned stop — the initializer stopped cleanly,
+the task simply did not succeed. Only the deadline means goroutines are still
+running. Pinned by `TestInitializer_StopReportsThatItAbandonedRunningTasks`,
+with `TestInitializer_StopReportsNoErrorWhenTasksActuallyFinished` as the
+control so the pin cannot pass by making every `Stop` fail. Mutation-proven.
+
+Reaching that branch needs a task whose `Fn` IGNORES its context, because a
+well-behaved one always ends inside `TaskTimeout` and `Stop` waits
+`TaskTimeout+100ms`. That is not a contrived test: it is precisely the
+misbehaving task this entry is about.
+
+**Half 2 is not fixed.** A task goroutine still outlives the logger's owner.
+Writing the pin proved it rather than fixing it — the first version used
+`zerolog.NewTestWriter(t)` and the leaked goroutine wrote to it after
+`tRunner` finished, exactly the race quoted below. The test now uses
+`io.Discard`, so pinning half 1 does not import half 2 into every run of the
+package. That is a containment, not a fix.
 
 **Update (entry 56's fix).** The fix for entry 56 does NOT fix this one, and
 the entry stays open. It does two things to the reproduction, and neither
@@ -5790,6 +5813,49 @@ premise unexamined.
 
 ---
 
+
+## 170. `waitForTasks` calls `task.Error()` twice and dereferences the second
+
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+high.** A nil-pointer SIGSEGV on the shutdown path.
+
+`util/initializer.go`, in `waitForTasks`:
+
+```go
+if state == TaskFailed && task.Error() != nil {
+    errs = append(errs, task.Error().Err)
+}
+```
+
+Two calls. `Error()` returns nil when `lastErr` holds no error, and the
+initializer stores `wrappedError{nil}` before EVERY attempt. A retry landing
+between the guard and the dereference therefore turns the second call into a
+nil deref, and the process dies:
+
+    panic: runtime error: invalid memory address or nil pointer dereference
+    [signal SIGSEGV: segmentation violation]
+    util.(*Initializer).waitForTasks(...)
+
+**Found by fixing 157, not by reading.** While `Wait` returned early for task
+errors this line was rarely reached, so the window almost never opened. Fixing
+157 made task errors fall through to it, and
+`TestInitializer_StopDoesNotDeadlockAgainstTheAutoRetryLoop` — which drives 400
+initializers with a 1µs retry delay — crashed on the first run.
+
+The fix is to call `Error()` once and keep the result.
+
+`BootstrapTask.Error()` had a second latent panic on the same path:
+`t.lastAttempt.Load().(time.Time)` is a bare type assertion, and `lastAttempt`
+is empty until `beginAttempt` runs. `Wait` can now record a reason for a
+terminal failure that never recorded its own, so an error without an attempt is
+reachable. It uses the comma-ok form; a zero `Timestamp` is the honest answer.
+
+**The lesson is about the ORDER.** This defect was always there. It was
+unreachable only because another defect (157) short-circuited the path. Fixing
+a bug can hand you the one it was hiding, so re-run the whole package after a
+fix, not just the test you wrote for it.
+
+---
 ## 169. `make test-fast` compiles to one shared path, so two checkouts overwrite each other
 
 **Status: FIXED in the fork.** Upstream still carries it.

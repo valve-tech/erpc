@@ -3,10 +3,12 @@ package util
 import (
 	"context"
 	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -95,4 +97,75 @@ func TestBootstrapTask_WaitDoesNotMistakeAnEndedAttemptForAnEndedTask(t *testing
 	case <-time.After(10 * time.Second):
 		t.Fatal("Wait never noticed the terminal state")
 	}
+}
+
+// Bug 109 pin, first half. Stop gives in-flight tasks one task-timeout to end.
+// When they do not, it used to log a warning and return only destroyFn's error,
+// so a caller could not tell a clean stop from an abandoned one — it freed
+// whatever the initializer was guarding while task goroutines were still
+// running and still holding the logger it lent them.
+//
+// The task below IGNORES its context on purpose. That is the only way to reach
+// the abandoned branch: a well-behaved Fn always ends within TaskTimeout, and
+// Stop waits TaskTimeout+100ms. A misbehaving Fn is exactly what bug 109 is
+// about — "a task goroutine whose Fn is still running when Stop gives up".
+//
+// ExecuteTasks therefore runs on its own goroutine. Called inline it would
+// never return, because Wait now waits for a TERMINAL state (bug 157) and this
+// task never reaches one until the test releases it.
+func TestInitializer_StopReportsThatItAbandonedRunningTasks(t *testing.T) {
+	t.Parallel()
+
+	appCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// io.Discard, NOT zerolog.NewTestWriter(t). This test deliberately leaves a
+	// task goroutine running past Stop, and that goroutine keeps the logger it
+	// was lent. A TestWriter would then be written to after tRunner finished,
+	// which the race detector flags — and it is right to: that IS bug 109's
+	// second half, still open. Pinning the first half must not import the
+	// second into every run of this package.
+	logger := zerolog.New(io.Discard)
+	init := NewInitializer(appCtx, &logger, &InitializerConfig{
+		TaskTimeout: 50 * time.Millisecond,
+		AutoRetry:   false,
+	})
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	task := NewBootstrapTask("ignores-its-context", func(ctx context.Context) error {
+		close(started)
+		<-block
+		return nil
+	})
+
+	executed := make(chan struct{})
+	go func() { defer close(executed); _ = init.ExecuteTasks(appCtx, task) }()
+	<-started
+
+	err := init.Stop(nil)
+	require.Error(t, err, "bug 109: an abandoned stop must not look like a clean one")
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"the caller must be able to see WHY the stop was abandoned")
+
+	close(block)
+	<-executed
+}
+
+// The control: a stop that really did wait for its tasks reports no error, so
+// the check above cannot pass by making every Stop fail.
+func TestInitializer_StopReportsNoErrorWhenTasksActuallyFinished(t *testing.T) {
+	t.Parallel()
+
+	appCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := zerolog.New(zerolog.NewTestWriter(t))
+	init := NewInitializer(appCtx, &logger, &InitializerConfig{
+		TaskTimeout: 5 * time.Second,
+		AutoRetry:   false,
+	})
+	_ = init.ExecuteTasks(appCtx, NewBootstrapTask("quick", func(context.Context) error { return nil }))
+
+	require.NoError(t, init.Stop(nil))
 }

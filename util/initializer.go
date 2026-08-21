@@ -79,10 +79,15 @@ func (t *BootstrapTask) Error() *TaskError {
 	if wr.err == nil {
 		return nil
 	}
+	// Comma-ok, not a bare type assertion. lastAttempt is empty until
+	// beginAttempt runs, and an error can be recorded without one — Wait
+	// substitutes a reason for a terminal failure that never recorded its own.
+	// A bare assertion panics there; a zero Timestamp is the honest answer.
+	ts, _ := t.lastAttempt.Load().(time.Time)
 	return &TaskError{
 		TaskName:  t.Name,
 		Err:       wr.err,
-		Timestamp: t.lastAttempt.Load().(time.Time),
+		Timestamp: ts,
 		Attempt:   int(t.attempts.Load()),
 	}
 }
@@ -275,10 +280,18 @@ func (i *Initializer) waitForTasks(ctx context.Context, tasks ...*BootstrapTask)
 				return err
 			}
 		}
-		// If task is failed, record that error
-		state := TaskState(task.state.Load())
-		if state == TaskFailed && task.Error() != nil {
-			errs = append(errs, task.Error().Err)
+		// If task is failed, record that error.
+		//
+		// Call Error() ONCE. It used to be called twice — a nil check and then a
+		// dereference — and the initializer stores wrappedError{nil} before every
+		// attempt, so a retry landing between the two turned the second call into
+		// a nil deref. That is a SIGSEGV on the shutdown path. It stayed hidden
+		// while Wait returned early for task errors and this line was rarely
+		// reached; fixing bug 157 made it reachable and it crashed at once.
+		if TaskState(task.state.Load()) == TaskFailed {
+			if te := task.Error(); te != nil {
+				errs = append(errs, te.Err)
+			}
 		}
 	}
 	if len(errs) > 0 {
@@ -596,6 +609,22 @@ func (i *Initializer) Stop(destroyFn func() error) error {
 	var err error
 	if destroyFn != nil {
 		err = destroyFn()
+	}
+
+	// Bug 109, first half. Stop used to log the timeout and return only
+	// destroyFn's error, so a caller could not tell a clean stop from an
+	// abandoned one. It now reports what happened and lets the caller decide,
+	// rather than deciding for the caller that a timeout is survivable.
+	//
+	// The test is waitCtx, NOT the wait error. Since bug 157 was fixed
+	// WaitForTasks also reports tasks that FAILED, and a failed task is not an
+	// abandoned stop — the initializer stopped cleanly, the task simply did not
+	// succeed. Only the deadline means goroutines are still running.
+	if waitCtx.Err() != nil {
+		return errors.Join(
+			fmt.Errorf("stop abandoned tasks that were still running: %w", waitCtx.Err()),
+			err,
+		)
 	}
 	return err
 }
