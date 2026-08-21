@@ -4,9 +4,33 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/erpc/erpc/common"
+	"github.com/rs/zerolog"
 )
+
+// failoverCtxKey is the JS name of the eval-context field that carries
+// `failover.onDefaultsExhausted` into the policy program.
+const failoverCtxKey = "failoverOnDefaultsExhausted"
+
+// warnIfFailoverIgnored tells the operator when `failover.onDefaultsExhausted`
+// cannot take effect on the HTTP path. The bundled default policy reads
+// `ctx.failoverOnDefaultsExhausted`; a hand-written evalFunc that never
+// mentions it silently ignores the key, and a config surface that
+// silently does nothing is worse than one that does not exist.
+func warnIfFailoverIgnored(logger *zerolog.Logger, networkID string, cfg *common.SelectionPolicyConfig) {
+	if logger == nil || cfg == nil || !cfg.FailoverOnDefaultsExhausted {
+		return
+	}
+	if strings.Contains(cfg.EvalFunc, failoverCtxKey) {
+		return
+	}
+	logger.Warn().
+		Str("networkId", networkID).
+		Msgf("failover.onDefaultsExhausted is set, but this network's custom selectionPolicy.evalFunc never reads ctx.%s. "+
+			"HTTP requests will not escalate to the tier:fallback upstreams. WebSocket subscribes are not affected", failoverCtxKey)
+}
 
 //go:embed default_policy.js
 var defaultPolicyJS string
@@ -22,10 +46,31 @@ func DefaultPolicySource() string {
 // (`common.DefaultSelectionPolicySource`) for the rich default-policy.js
 // at engine-register time. common/ can't reach this package, so the
 // upgrade must happen here.
+// upgradeDefaultPolicyMu serialises the rewrite below.
+//
+// The config it edits is SHARED. Networks bootstrap concurrently, and every
+// network that leaves selectionPolicy at the default reaches this function
+// with the same *SelectionPolicyConfig, so two goroutines wrote EvalFunc,
+// EvalFuncOriginal and CompiledProgram at once. `go test -race` reports it as
+// a write/write race at networks.go:259, and a torn CompiledProgram would
+// surface later as a selection policy that fails to evaluate.
+//
+// The early return below already makes the rewrite idempotent — the second
+// caller sees the replaced EvalFunc and stops — so serialising is all this
+// needs.
+//
+// Network.Bootstrap now hands RegisterNetwork a per-network COPY, so no two
+// production registrations reach here with one pointer any more (entry 131).
+// The mutex stays because RegisterNetwork is exported: it bounds what any
+// other caller can do to a config it shares, which the copy alone cannot.
+var upgradeDefaultPolicyMu sync.Mutex
+
 func upgradeDefaultPolicy(cfg *common.SelectionPolicyConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	upgradeDefaultPolicyMu.Lock()
+	defer upgradeDefaultPolicyMu.Unlock()
 	if strings.TrimSpace(cfg.EvalFunc) != strings.TrimSpace(common.DefaultSelectionPolicySource) {
 		return nil
 	}

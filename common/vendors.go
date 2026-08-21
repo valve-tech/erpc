@@ -2,7 +2,9 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/rs/zerolog"
 )
@@ -60,4 +62,52 @@ func ResolveCreditUnits(defaults, override map[string]int64, method string) int6
 		return units
 	}
 	return 1
+}
+
+// EvmChainId returns the EVM chain id the operator configured, or zero when
+// there is no `evm` block at all. Vendors read the chain id through this
+// method: a missing block then reaches the same "chainId is not defined"
+// config error every vendor already reports, instead of dereferencing a nil
+// pointer and killing the process at bootstrap.
+func (u *UpstreamConfig) EvmChainId() int64 {
+	if u == nil || u.Evm == nil {
+		return 0
+	}
+	return u.Evm.ChainId
+}
+
+// GenerateVendorConfigs calls one vendor's GenerateConfigs and converts a panic
+// into an error that names the vendor.
+//
+// A vendor reads config fields the operator may have left out, and every
+// caller runs at bootstrap. The vendors themselves report a missing field by
+// name, which is the message an operator wants. This guard is the fallthrough
+// under them: a vendor that forgets a check — including a vendor nobody has
+// written yet — reports a config error against its own name instead of
+// crashing the process. Both callers of GenerateConfigs go through here.
+func GenerateVendorConfigs(
+	ctx context.Context,
+	vendor Vendor,
+	logger *zerolog.Logger,
+	upstream *UpstreamConfig,
+	settings VendorSettings,
+) (cfgs []*UpstreamConfig, err error) {
+	// Read the name inside the guarded scope: a vendor that panics here is
+	// still a vendor that must not kill the process.
+	name := "unknown"
+	defer func() {
+		if rec := recover(); rec != nil {
+			cfgs = nil
+			err = fmt.Errorf("%s vendor failed to generate upstream configs: %v (check the upstream config for a missing block, e.g. `evm`)", name, rec)
+			if logger != nil {
+				logger.Error().
+					Str("vendor", name).
+					Interface("panic", rec).
+					Str("stack", string(debug.Stack())).
+					Msg("vendor panicked while generating upstream configs")
+			}
+		}
+	}()
+	name = vendor.Name()
+	return vendor.GenerateConfigs(ctx, logger, upstream, settings)
 }

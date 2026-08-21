@@ -111,15 +111,14 @@ type EvmStatePoller struct {
 
 	stateMu sync.RWMutex
 
-	// Track if updates are in progress to avoid goroutine pile-up
-	finalizedUpdateInProgress sync.Mutex
-
-	// Serializes the off-hot-path chain-identity verification for a MAJOR
-	// forward jump suggested out-of-band via SuggestLatestBlock. At most one
-	// verification is in flight per poller; a concurrent major suggestion is
-	// dropped and re-observed on the next suggestion (or verified poll). Small
-	// keep-fresh advances never touch this.
-	latestMajorVerifyInProgress sync.Mutex
+	// Serialize the off-hot-path chain-identity verification for a MAJOR
+	// forward jump suggested out-of-band via SuggestLatestBlock or
+	// SuggestFinalizedBlock. At most one verification is in flight per poller
+	// and per counter; a concurrent major suggestion is dropped, logged, and
+	// re-observed on the next suggestion (or verified poll). Small keep-fresh
+	// advances never touch these — they apply inline, so nothing can drop them.
+	latestMajorVerifyInProgress    sync.Mutex
+	finalizedMajorVerifyInProgress sync.Mutex
 
 	// Earliest per probe tracking
 	earliestByProbe              map[common.EvmAvailabilityProbeType]data.CounterInt64SharedVariable
@@ -578,6 +577,9 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 // most one verification is in flight per poller.
 func (e *EvmStatePoller) verifyThenSuggestLatestBlock(blockNumber int64) {
 	if !e.latestMajorVerifyInProgress.TryLock() {
+		e.logger.Debug().
+			Int64("blockNumber", blockNumber).
+			Msg("dropping major latest block suggestion: another verification is in progress")
 		return
 	}
 	go func() {
@@ -821,43 +823,70 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 }
 
 func (e *EvmStatePoller) SuggestFinalizedBlock(blockNumber int64) {
-	// Best-effort, non-blocking update to avoid goroutine pile-up
-	// If an update is already in progress, skip this one
-	if !e.finalizedUpdateInProgress.TryLock() {
-		// Another update is already in progress, skip this one
-		e.logger.Trace().
-			Int64("blockNumber", blockNumber).
-			Msg("skipping finalized block suggestion as another update is in progress")
-		return
-	}
-
-	// We acquired the lock, perform the update and release when done
-	go func() {
-		defer e.finalizedUpdateInProgress.Unlock()
-
-		// Check if this update is still relevant (not older than current value)
-		currentValue := e.finalizedBlockShared.GetValue()
-		if blockNumber <= currentValue {
-			e.logger.Trace().
-				Int64("blockNumber", blockNumber).
-				Int64("currentValue", currentValue).
-				Msg("skipping finalized block update as it's not newer")
-			return
-		}
+	// Non-blocking update, in the same shape SuggestLatestBlock uses.
+	//
+	// IMPORTANT:
+	// - This must be fast and MUST NOT be blocked by any refresh/thundering-herd coordination.
+	// - TryUpdate is local-only and schedules remote propagation asynchronously via the shared variable's
+	//   deduped publish-first background push.
+	// - The common path must take NO lock. A lock that outlives the publish
+	//   silently discards the next suggestion, including one from a caller that
+	//   simply reacted to the value it had just read.
+	currentValue := e.finalizedBlockShared.GetValue()
+	if blockNumber <= currentValue {
 		e.logger.Trace().
 			Int64("blockNumber", blockNumber).
 			Int64("currentValue", currentValue).
-			Msg("accepting finalized block suggestion")
+			Msg("skipping finalized block suggestion as it's not newer")
+		return
+	}
+
+	// Gate a major forward jump behind a fresh chain-identity check, the same
+	// protection the verified poll path and SuggestLatestBlock apply: a
+	// cross-wired endpoint reporting another chain's height must not enter the
+	// shared finalized counter. That check makes a live eth_chainId call, so it
+	// runs OFF the hot path and this function stays non-blocking.
+	if currentValue > 0 && blockNumber-currentValue > e.majorHeadMoveThreshold() {
+		e.verifyThenSuggestFinalizedBlock(blockNumber)
+		return
+	}
+
+	newValue := e.finalizedBlockShared.TryUpdate(e.appCtx, blockNumber)
+	e.logger.Trace().
+		Int64("blockNumber", blockNumber).
+		Int64("previousValue", currentValue).
+		Int64("newValue", newValue).
+		Msg("finalized block suggestion applied")
+}
+
+// verifyThenSuggestFinalizedBlock is the finalized twin of
+// verifyThenSuggestLatestBlock: it validates a MAJOR suggested forward jump
+// with a fresh chain-identity check and applies it to the shared counter only
+// if it passes. A proven cross-wired endpoint is cordoned by the check itself;
+// an unverifiable one drops the suggestion for now and it is re-observed on the
+// next suggestion or verified poll. Runs in its own goroutine so the caller
+// (response enrichment) never blocks, and at most one verification is in flight
+// per poller.
+func (e *EvmStatePoller) verifyThenSuggestFinalizedBlock(blockNumber int64) {
+	if !e.finalizedMajorVerifyInProgress.TryLock() {
+		e.logger.Debug().
+			Int64("blockNumber", blockNumber).
+			Msg("dropping major finalized block suggestion: another verification is in progress")
+		return
+	}
+	go func() {
+		defer e.finalizedMajorVerifyInProgress.Unlock()
 
 		// Create a timeout context to avoid blocking forever on Redis operations
 		ctx, cancel := context.WithTimeout(e.appCtx, 5*time.Second)
 		defer cancel()
 
-		// Gate a major forward jump behind a fresh chain-identity check, the same
-		// protection the verified poll path and SuggestLatestBlock apply: a
-		// cross-wired endpoint reporting another chain's height must not enter the
-		// shared finalized counter. Already off the hot path here (own goroutine),
-		// so the live eth_chainId call is safe to make.
+		// Re-read: another path may have advanced the head while this was queued,
+		// turning the jump into a small (or already-applied) one.
+		currentValue := e.finalizedBlockShared.GetValue()
+		if blockNumber <= currentValue {
+			return
+		}
 		if blockNumber-currentValue > e.majorHeadMoveThreshold() &&
 			!e.verifyChainIdOnMajorHeadMove(ctx, "finalized", currentValue, blockNumber) {
 			e.logger.Warn().
@@ -867,10 +896,12 @@ func (e *EvmStatePoller) SuggestFinalizedBlock(blockNumber int64) {
 			return
 		}
 
-		e.finalizedBlockShared.TryUpdate(ctx, blockNumber)
-		e.logger.Trace().
+		newValue := e.finalizedBlockShared.TryUpdate(ctx, blockNumber)
+		e.logger.Debug().
 			Int64("blockNumber", blockNumber).
-			Msg("finalized block suggestion applied")
+			Int64("previousValue", currentValue).
+			Int64("newValue", newValue).
+			Msg("verified major finalized block suggestion applied")
 	}()
 }
 
@@ -1301,7 +1332,13 @@ func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (int64
 	if err != nil {
 		return 0, 0, err
 	}
-	if jrr == nil || jrr.Error != nil {
+	// The upstream can end a request with no response and no error, in which
+	// case jrr is nil. Report no block number, exactly as a null result does:
+	// the caller already counts that as a failed poll.
+	if jrr == nil {
+		return 0, 0, nil
+	}
+	if jrr.Error != nil {
 		return 0, 0, jrr.Error
 	}
 
@@ -1366,7 +1403,16 @@ func (e *EvmStatePoller) fetchSyncingState(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	if jrr == nil || jrr.Error != nil {
+	// The upstream can end a request with no response and no error, in which
+	// case jrr is nil. This helper has no neutral value — false claims the node
+	// is fully synced — so report the empty answer as a failure.
+	if jrr == nil {
+		return false, &common.BaseError{
+			Code:    "ErrEvmStatePoller",
+			Message: "upstream ended the syncing state request with no response and no error",
+		}
+	}
+	if jrr.Error != nil {
 		return false, jrr.Error
 	}
 
@@ -1757,7 +1803,24 @@ func (e *EvmStatePoller) checkTraceDataProbe(ctx context.Context, block int64) (
 	return false, false, nil
 }
 
+var (
+	// errEarliestProbeUnsupported means the upstream does not implement the
+	// probe at all — every height answers "method not found". That is a missing
+	// capability, not a pruned history, so it must not become a block number.
+	errEarliestProbeUnsupported = errors.New("upstream does not support the availability probe")
+	// errEarliestBlockUnavailable means no block in the searched range answered
+	// the probe. Reporting a number here would claim the upstream retains
+	// history from that number upward, which the search did not observe.
+	errEarliestBlockUnavailable = errors.New("no block in the searched range answered the availability probe")
+)
+
 // binarySearchEarliest finds the first available block for the given probe in [low, high].
+//
+// It returns an error, rather than a block number, in the two cases where it
+// learned nothing: the upstream does not support the probe, and no probed block
+// answered. The caller treats an error as "bound unknown" and fails open. The
+// alternative — returning the converged value — reports the current tip as the
+// earliest retained block, which is the most restrictive bound possible.
 func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.EvmAvailabilityProbeType, low, high int64) (int64, error) {
 	eff := probe
 	if eff == "" {
@@ -1766,26 +1829,43 @@ func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.
 	if high < 0 {
 		return 0, nil
 	}
-	if low < 0 {
-		low = 0
+
+	// probeAt folds checkProbe's three-valued answer into (available, error).
+	// An unsupported probe is height-independent, so the first such answer
+	// settles the whole search and there is no point walking the range.
+	probeAt := func(block int64) (bool, error) {
+		ok, unsupported, err := e.checkProbe(ctx, eff, block)
+		if unsupported {
+			return false, fmt.Errorf("%w: probe=%s upstream=%s", errEarliestProbeUnsupported, eff, e.upstream.Config().Id)
+		}
+		// checkProbe's error is a pass-through: no probe implementation returns
+		// one today, each folding transport and JSON-RPC failures into
+		// "unavailable". The three `err != nil` checks below are therefore
+		// unreachable. They stay because checkProbe declares the error, and a
+		// probe that starts reporting one must abort the search rather than be
+		// read as "this height is pruned" — which is the bug this function had.
+		return ok, err
 	}
-	// Fast-path: block 0
-	if ok, _, err := e.checkProbe(ctx, eff, 0); err == nil && ok {
-		return 0, nil
-	} else if err != nil {
-		return 0, err
-	}
-	// Fast-path: block 1
-	if ok, _, err := e.checkProbe(ctx, eff, 1); err == nil && ok {
-		return 1, nil
-	} else if err != nil {
-		return 0, err
+
+	// Fast-path: block 0, then block 1.
+	for _, block := range []int64{0, 1} {
+		ok, err := probeAt(block)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return block, nil
+		}
 	}
 
 	l, r := low, high
+	// found records that r sits on a block the upstream answered for. The loop
+	// only ever moves r onto such a block, so found implies the converged value
+	// is available.
+	found := false
 	for l < r {
 		mid := l + (r-l)/2
-		ok, _, err := e.checkProbe(ctx, eff, mid)
+		ok, err := probeAt(mid)
 		if err != nil {
 			return 0, err
 		}
@@ -1799,8 +1879,22 @@ func (e *EvmStatePoller) binarySearchEarliest(ctx context.Context, probe common.
 			Msg("binary search iteration")
 		if ok {
 			r = mid
+			found = true
 		} else {
 			l = mid + 1
+		}
+	}
+	if !found {
+		// The loop never probes the value it converges on, so l is still
+		// unverified. An upstream that retains exactly the tip answers no
+		// midpoint, so this last probe is the only way to tell it apart from
+		// an upstream that answers nothing at all.
+		ok, err := probeAt(l)
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return 0, fmt.Errorf("%w: probe=%s upstream=%s range=[%d,%d]", errEarliestBlockUnavailable, eff, e.upstream.Config().Id, low, high)
 		}
 	}
 	return l, nil

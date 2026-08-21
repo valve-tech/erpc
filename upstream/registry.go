@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,23 @@ func (u *UpstreamsRegistry) Bootstrap(ctx context.Context) {
 	}()
 }
 
+// BootstrapAndWait registers the configured upstreams on the caller's own
+// goroutine and returns once every registration task has settled. It runs the
+// same work Bootstrap runs, minus the goroutine.
+//
+// Bootstrap is fire-and-forget by design, so no caller can tell when
+// registration finished — the only signal is a log line. A caller that must
+// observe a registered upstream before it does anything else has nothing to
+// wait on, and waiting a fixed duration instead is a guess. This is that
+// signal.
+//
+// The error is the initializer's: it reports the tasks that failed this
+// attempt. The auto-retry loop keeps retrying them afterwards either way, so a
+// caller that tolerates a partly-registered fleet may ignore it.
+func (u *UpstreamsRegistry) BootstrapAndWait(ctx context.Context) error {
+	return u.registerUpstreams(ctx, u.upsCfg...)
+}
+
 func (u *UpstreamsRegistry) NewUpstream(cfg *common.UpstreamConfig) (*Upstream, error) {
 	// Warn about deprecated upstream-level eth_getLogs hard limits that are ignored now
 	if cfg != nil && cfg.Evm != nil {
@@ -148,6 +166,10 @@ func (u *UpstreamsRegistry) GetInitializer() *util.Initializer {
 	return u.initializer
 }
 
+func (u *UpstreamsRegistry) SharedStateRegistry() data.SharedStateRegistry {
+	return u.sharedStateRegistry
+}
+
 func (u *UpstreamsRegistry) getNetworkMutex(networkId string) *sync.RWMutex {
 	mutex, _ := u.networkMu.LoadOrStore(networkId, &sync.RWMutex{})
 	return mutex.(*sync.RWMutex)
@@ -155,15 +177,6 @@ func (u *UpstreamsRegistry) getNetworkMutex(networkId string) *sync.RWMutex {
 
 func (u *UpstreamsRegistry) GetProvidersRegistry() *thirdparty.ProvidersRegistry {
 	return u.providersRegistry
-}
-
-// SharedStateRegistry exposes the registry's shared-state backing store so
-// that consumers (e.g., Network) can register their own counters/values for
-// strict-monotonic coordination across pods. The registry is owned here
-// because UpstreamsRegistry is constructed with it; surfacing it via an
-// accessor is cheaper than threading it through Network's constructor.
-func (u *UpstreamsRegistry) SharedStateRegistry() data.SharedStateRegistry {
-	return u.sharedStateRegistry
 }
 
 // NoUpstreamsAvailableAfter is how long a network may keep initializing with
@@ -423,6 +436,26 @@ func (u *UpstreamsRegistry) GetNetworkUpstreams(ctx context.Context, networkId s
 	u.networkUpstreamsAtomic.Store(networkId, cp)
 	u.upstreamsMu.RUnlock()
 	return cp
+}
+
+// GetWsUpstreams returns all WS-capable upstreams for a network (ws:// or wss:// endpoints).
+func (u *UpstreamsRegistry) GetWsUpstreams(ctx context.Context, networkId string) []*Upstream {
+	all := u.GetNetworkUpstreams(ctx, networkId)
+	var ws []*Upstream
+	for _, up := range all {
+		cfg := up.Config()
+		if cfg == nil {
+			continue
+		}
+		parsed, err := url.Parse(cfg.Endpoint)
+		if err != nil {
+			continue
+		}
+		if parsed.Scheme == "ws" || parsed.Scheme == "wss" {
+			ws = append(ws, up)
+		}
+	}
+	return ws
 }
 
 func (u *UpstreamsRegistry) GetAllUpstreams() []*Upstream {

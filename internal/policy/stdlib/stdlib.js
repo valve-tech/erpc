@@ -939,17 +939,38 @@
   //   .preferTag('!tier:fallback', { fallback: 'tier:fallback' })
   //   // primary tier = everything not tagged tier:fallback.
   //   // If primary tier is empty, fall back to upstreams tagged tier:fallback.
+  //
+  // `keepRest: true` turns the hard filter into a RANKING: the preferred
+  // subset still comes first, but the rest is appended instead of
+  // dropped. Use it when the loser tier must stay reachable within a
+  // single request — the request path sweeps the whole returned list on
+  // failure, so a demoted upstream is a per-request escape hatch rather
+  // than an upstream the tick made unreachable. Pair it with a trailing
+  // `demoteTag(...)` when later steps (`sortByScore`, `stickyPrimary`)
+  // would otherwise interleave the tiers again.
   define('preferTag', function (pat, opts) {
     opts = opts || {};
     const minHealthy = opts.minHealthy != null ? opts.minHealthy : 1;
     const fallback = opts.fallback;
+    const keepRest = !!opts.keepRest;
     const inTag = this.filter(u => hasMatchingTag(u, pat));
-    if (inTag.length >= minHealthy) return inTag;
+    if (inTag.length >= minHealthy) return keepRest ? inTag.union(this) : inTag;
     if (fallback) {
       const fb = this.filter(u => hasMatchingTag(u, fallback));
-      if (fb.length > 0) return fb;
+      if (fb.length > 0) return keepRest ? fb.union(this) : fb;
     }
     return this.slice();
+  });
+
+  // demoteTag moves every upstream matching `pat` to the END of the
+  // list. It is the soft counterpart of `excludeTag`: it drops nobody,
+  // and the relative order inside each group survives. Put it AFTER the
+  // ranking steps — `sortByScore` and `stickyPrimary` rank on health
+  // alone and would otherwise interleave the tiers again.
+  define('demoteTag', function (pat) {
+    const keep = [], demoted = [];
+    for (const u of this) (hasMatchingTag(u, pat) ? demoted : keep).push(u);
+    return keep.concat(demoted);
   });
   define('preferVendor', function (name, opts) {
     opts = opts || {};

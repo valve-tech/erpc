@@ -113,6 +113,12 @@ func (e *ERPC) Bootstrap(ctx context.Context) {
 	e.projectsRegistry.Bootstrap(ctx)
 }
 
+// BootstrapAndWait bootstraps every project on the caller's own goroutine and
+// returns once they have all settled. See UpstreamsRegistry.BootstrapAndWait.
+func (e *ERPC) BootstrapAndWait(ctx context.Context) error {
+	return e.projectsRegistry.BootstrapAndWait(ctx)
+}
+
 func (e *ERPC) GetNetwork(ctx context.Context, projectId string, networkId string) (*Network, error) {
 	prj, err := e.GetProject(projectId)
 	if err != nil {

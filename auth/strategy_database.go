@@ -169,7 +169,9 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 		skipCache bool
 	}
 	v, sfErr, _ := s.sf.Do(apiKey, func() (interface{}, error) {
-		rangeKey := "*"
+		// The caller presents an API key and nothing else, so the record has to
+		// be somewhere this lookup can name from the API key alone.
+		rangeKey := data.ConnectorApiKeyRangeKey
 		lookupCtx := ctx
 		if s.cfg != nil && s.cfg.MaxWait.Duration() > 0 {
 			var cancel context.CancelFunc
@@ -421,12 +423,24 @@ func (s *DatabaseStrategy) GetConnector() data.Connector {
 	return s.connector
 }
 
-// InvalidateCache removes an API key from the cache
+// InvalidateCache drops both cached decisions for one API key: the accepted
+// user in the positive cache, and the refusal in the negative cache.
+//
+// An operator who revokes a key expects it to stop working now. The positive
+// cache holds an accepted key for an hour by default, so a revoke that only
+// reaches storage leaves the key live on every instance that already saw it.
+// The negative cache is the mirror image: it would keep a key refused for five
+// seconds after the operator restored it.
+//
+// This drops a cached answer, not the record. The store stays the authority.
 func (s *DatabaseStrategy) InvalidateCache(apiKey string) {
 	if s.cache != nil {
 		s.cache.Del(apiKey)
-		s.logger.Debug().Str("apiKey", apiKey).Msg("invalidated API key cache entry")
 	}
+	if s.negCache != nil {
+		s.negCache.Del(apiKey)
+	}
+	s.logger.Debug().Str("apiKey", apiKey).Msg("invalidated API key cache entry")
 }
 
 // ClearCache clears all cached API keys

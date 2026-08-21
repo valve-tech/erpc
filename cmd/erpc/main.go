@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -244,7 +245,14 @@ func main() {
 	}
 	if err := cmd.Run(ctx, os.Args); err != nil {
 		logger.Error().Msgf("failed to start erpc: %v", err)
-		util.OsExit(util.ExitCodeERPCStartFailed)
+		// This is the one place that owns the process. erpc.Init reports a dead
+		// listener as a value; the binary turns it into the exit code operators
+		// already watch for.
+		code := util.ExitCodeERPCStartFailed
+		if errors.Is(err, erpc.ErrServerFailed) {
+			code = util.ExitCodeHttpServerFailed
+		}
+		util.OsExit(code)
 	}
 }
 

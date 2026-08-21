@@ -39,7 +39,7 @@ func StartSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) 
 
 // Create detailed spans for erpc internal operations as well as high-cardinality tags such as request params verbatim
 func StartDetailSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	if !IsTracingEnabled || !IsTracingDetailed {
+	if !IsTracingEnabled || !TracingDetailed() {
 		return ctx, defaultNoopSpan
 	}
 
@@ -169,7 +169,7 @@ func StartRequestSpan(ctx context.Context, req *NormalizedRequest) context.Conte
 		span.SetAttributes(attribute.String("erpc.forced_trace_reason", forceTraceReason))
 	}
 
-	if IsTracingDetailed {
+	if TracingDetailed() {
 		span.SetAttributes(
 			attribute.String("request.id", fmt.Sprintf("%v", req.ID())),
 		)
@@ -207,7 +207,7 @@ func EndRequestSpan(ctx context.Context, resp *NormalizedResponse, err interface
 		if ups := resp.Upstream(); ups != nil {
 			span.SetAttributes(attribute.String("upstream.id", ups.Id()))
 		}
-		if IsTracingDetailed {
+		if TracingDetailed() {
 			if jrpcResp, err := resp.JsonRpcResponse(); err == nil && jrpcResp != nil {
 				span.SetAttributes(attribute.Int("response.result_size", jrpcResp.ResultLength()))
 			}
