@@ -141,7 +141,7 @@ Streaming methods (`QueryBlocks`, `QueryTransactions`, `QueryLogs`, `QueryTraces
 }]`}
 />
 
-**2. Enabling the gRPC server on a separate port.** When you need the gRPC API isolated from HTTP traffic (e.g. different load-balancer rules or TLS termination), set `grpcPortV4` to a distinct value. eRPC starts a standalone TCP listener and exit code 1002 is fatal if it fails:
+**2. Enabling the gRPC server on a separate port.** When you need the gRPC API isolated from HTTP traffic (e.g. different load-balancer rules or TLS termination), set `grpcPortV4` to a distinct value. eRPC starts a standalone TCP listener and exit code 12 is fatal if it fails:
 
 <ConfigTabs
   path="server"
@@ -268,7 +268,7 @@ Streaming methods (`QueryBlocks`, `QueryTransactions`, `QueryLogs`, `QueryTraces
 8. **Port sharing bypasses HTTP timeout and gzip layers.** gRPC frames on the shared port are handled by the `*grpc.Server` directly; the HTTP `TimeoutHandler` and `gzipHandler` never run for gRPC traffic. <SourceLink file="erpc/http_server.go" lines="161-177" />
 9. **Dual-replacement dedup prevents pool thrashing.** When many concurrent callers hit `bdsStuckCallThreshold` simultaneously, the 5s dedup guard ensures only the first watchdog replacement executes. <SourceLink file="clients/grpc_bds_resilience.go" lines="213-216" />
 10. **Dial-fail leaves old connection in place.** If the watchdog cannot dial a replacement (DNS failure, etc.), the broken slot is kept so grpc-go can continue its own reconnect backoff. <SourceLink file="clients/grpc_bds_resilience.go" lines="218-227" />
-11. **Standalone gRPC server failure exits with code 1002.** Port conflict, permission denied, or TLS cert failure all call `util.OsExit(ExitCodeHttpServerFailed)` = 1002. Same exit code as HTTP server failure — process supervisors should treat it as fatal. <SourceLink file="erpc/init.go" lines="125-136" />
+11. **Standalone gRPC server failure exits with code 12.** Port conflict, permission denied, or TLS cert failure all call `util.OsExit(ExitCodeHttpServerFailed)` = 12. Same exit code as HTTP server failure — process supervisors should treat it as fatal. <SourceLink file="erpc/init.go" lines="125-136" />
 12. **Failsafe policy timeout shorter than 20s also feeds the watchdog.** Both the BDS hard cap and failsafe timeout policy use the same `ErrDynamicTimeoutExceeded` sentinel. If the outer policy fires first, its cause matches the sentinel and the watchdog fires too. Set policy timeouts &gt; 20s to keep the BDS hard cap as the outer bound. <SourceLink file="common/errors.go" lines="1981-1984" />
 13. **Do not revive `evm.ExtractGrpcError`.** A legacy dead copy at `architecture/evm/error_normalizer.go:L660-L876` has divergent semantics: BDS `TIMEOUT_ERROR` maps to `ErrEndpointServerSideException` (wrong), gRPC `DeadlineExceeded` maps to `ErrEndpointServerSideException` (wrong), and there is no `Canceled` branch. Use only `common.ExtractGrpcErrorFromGrpcStatus`.
 14. **`trustedIPHeaders` values are lowercased at server init.** A YAML entry `X-Forwarded-For` is normalized to `x-forwarded-for`. gRPC metadata keys are always lowercase on the wire, so lookups via `firstMD` use the pre-lowercased value. <SourceLink file="erpc/grpc_server.go" lines="89-95" />
@@ -320,7 +320,7 @@ OTel gRPC instrumentation (`otelgrpc.NewServerHandler()` / `otelgrpc.NewClientHa
 - [`common/defaults.go:L669-L693`](https://github.com/erpc/erpc/blob/main/common/defaults.go#L669-L693) — gRPC server config defaults
 - [`common/errors.go:L1981-L1984`](https://github.com/erpc/erpc/blob/main/common/errors.go#L1981-L1984) — `ErrDynamicTimeoutExceeded` sentinel definition
 - [`common/config.go:L1096-L1118`](https://github.com/erpc/erpc/blob/main/common/config.go#L1096-L1118) — `GrpcUpstreamConfig` struct definition
-- [`util/exit.go:L8-L9`](https://github.com/erpc/erpc/blob/main/util/exit.go#L8-L9) — `ExitCodeERPCStartFailed` (1001) and `ExitCodeHttpServerFailed` (1002) constants
+- [`util/exit.go:L8-L9`](https://github.com/erpc/erpc/blob/main/util/exit.go#L8-L9) — `ExitCodeERPCStartFailed` (11) and `ExitCodeHttpServerFailed` (12) constants
 - [`architecture/evm/error_normalizer.go:L660-L876`](https://github.com/erpc/erpc/blob/main/architecture/evm/error_normalizer.go#L660-L876) — dead legacy `evm.ExtractGrpcError`; do not revive (diverges from live path)
 
 ### Related pages

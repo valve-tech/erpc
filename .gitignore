@@ -25,3 +25,5 @@ temp/**
 erpc-bin
 erpc.yml
 .claude/**
+# compiled test binary from `make test-fast` (per worktree)
+.erpc.test
