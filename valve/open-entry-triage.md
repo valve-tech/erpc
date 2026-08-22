@@ -73,7 +73,7 @@ result. Treat a bucket as a proposal with a stated reason, not as a verdict.
 
 | Bucket | Count | What to do |
 |---|---|---|
-| **Edge** | 10 | One defect, ten entries. One patch at the config edge. |
+| **Edge** | 10 | One defect, ten entries. Nine are fixed; 18 is the last, and it needs a decision. |
 | **Fix** | 47 | Carry a fork patch. Ranked below. |
 | **Close** | 14 | Dead or unreachable. Change no code. |
 | **Document** | 4 | True, and a patch would make it worse. |
@@ -82,8 +82,10 @@ result. Treat a bucket as a proposal with a stated reason, not as a verdict.
 
 ## The headline: ten entries obey one rule, at ten sites
 
-Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** share one property
-(53, 64, 121 and 125 are now fixed):
+Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** share one property.
+Nine are fixed — 25, 36, 53, 64, 117, 121, 125, 126, 127. Entry 18 is the last,
+and its own text says the behaviour "may be intended", so it needs a decision
+before it needs a patch:
 
 > eRPC collapses three different operator events into one outcome — "did not
 > say", "said this", and "said something I cannot read".
@@ -108,11 +110,22 @@ one rule, not one patch:
 | Mechanism | Entries | Where |
 |---|---|---|
 | A fallback decode's shadow struct has not grown with the real type, and its error masks the real one | **53, 64** | `common/config.go` `UnmarshalYAML` |
-| Defaulting cannot tell "unset" from "set wrong" — a nil check stands in for "the user did not specify" | **18, 25, 36** | `common/defaults.go` |
+| Defaulting cannot tell "unset" from "set wrong" — a nil check stands in for "the user did not specify" | **18**, ~~25, 36~~ | `common/defaults.go` |
 | ~~A parse failure becomes a silent zero or silence~~ — FIXED | ~~**121, 125**~~ | `internal/policy/stdlib/install.go`, `cmd/erpc/` |
-| A value marshals out and will not parse back | **117** | `common/architecture_evm.go` |
-| A guard tests the wrong thing (`len(s) > 1`, not `s != ""`) | **127** | `cmd/erpc/main.go` |
-| The warning list covers project-level keys only | **126** | `common/legacy/translate.go` |
+| ~~A value marshals out and will not parse back~~ — FIXED | ~~**117**~~ | `common/architecture_evm.go` |
+| ~~A guard tests the wrong thing (`len(s) > 1`, not `s != ""`)~~ — FIXED | ~~**127**~~ | `cmd/erpc/main.go` |
+| ~~The warning list covers project-level keys only~~ — FIXED | ~~**126**~~ | `common/legacy/translate.go` |
+
+Each fix follows the same rule, and both halves of it are load-bearing: **an
+unreadable value must cost what an absent value costs, AND must be reported.**
+Mutations that removed only the report passed the fallback assertions and failed
+the reporting ones, in three of the five entries. Falling back without saying so
+leaves the two events indistinguishable to the operator, which is the defect
+itself.
+
+Two of the five deleted structure rather than adding it. Entry 36 removed a
+defaults pass instead of adding an "explicitly set" flag; entry 117 removed a
+hand-written parse table so the parser reads the printer's own names.
 
 It is still the item to do first, for a different reason than claimed. The
 sites are small, two pairs genuinely share a fix (53 with 64, 121 with 125), and
@@ -227,9 +240,11 @@ is low alone and high next to 99.
 
 ## Suggested order
 
-1. **The config edge (10 entries, ten small patches under one rule).** Best
-   value, lowest carry cost. Four done — 53, 64, 121, 125. Six left: 18, 25, 36,
-   117, 126, 127, and 18 needs a decision before it needs a patch.
+1. ~~**The config edge (10 entries, ten small patches under one rule).**~~
+   **Nine done** — 53, 64, 121, 125, then 25, 36, 117, 126, 127. Only **18** is
+   left, and it needs a decision, not a patch: its own text says the
+   last-block-wins inference "may be intended". If it is, validation should
+   reject the ambiguous shape rather than silently pick one.
 2. **The fork's own code (4 entries).** No rebase debt.
 3. **Rank 1 and rank 2 (16 entries).** Wrong answers and crashes.
 4. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.

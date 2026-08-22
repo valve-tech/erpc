@@ -92,6 +92,24 @@ func NewDynamoDBConnector(
 	lg := logger.With().Str("connector", id).Logger()
 	lg.Debug().Interface("config", cfg).Msg("creating dynamodb connector")
 
+	// time.NewTicker panics on any interval that is not positive, and the
+	// connector does not choose this value — it is handed one. A negative
+	// duration therefore used to crash the process the first time a shared
+	// counter was watched, which is during startup.
+	//
+	// An unusable interval costs what an absent one costs: the default. The
+	// warning is what keeps "did not say" and "said something I cannot use"
+	// apart for the operator. Config load rejects this value before it gets
+	// here (see DynamoDBConnectorConfig.Validate); this guard covers every
+	// other caller, because the panic belongs to the ticker's contract, not
+	// to the config path.
+	statePollInterval := cfg.StatePollInterval.Duration()
+	if statePollInterval <= 0 {
+		lg.Warn().Msgf("cannot use statePollInterval %s, polling every %s instead",
+			statePollInterval, common.DefaultDynamoDBStatePollInterval.Duration())
+		statePollInterval = common.DefaultDynamoDBStatePollInterval.Duration()
+	}
+
 	connector := &DynamoDBConnector{
 		id:                id,
 		logger:            &lg,
@@ -103,7 +121,7 @@ func NewDynamoDBConnector(
 		initTimeout:       cfg.InitTimeout.Duration(),
 		getTimeout:        cfg.GetTimeout.Duration(),
 		setTimeout:        cfg.SetTimeout.Duration(),
-		statePollInterval: cfg.StatePollInterval.Duration(),
+		statePollInterval: statePollInterval,
 		lockRetryInterval: cfg.LockRetryInterval.Duration(),
 	}
 

@@ -1,6 +1,7 @@
 package data
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -419,58 +420,110 @@ func TestDynamoDBConnector_NotInitializedRefusesEveryCall(t *testing.T) {
 	}, "an unconnected connector must report errors, not crash")
 }
 
-// TestDynamoDBConnector_WatchCounterNonPositivePollInterval PINS A LIVE
-// DEFECT. It asserts today's crashing behaviour, not the desired behaviour.
+// A poll interval the connector cannot use costs what an absent one costs,
+// and config load says so before the process ever gets there.
 //
-// Defect: data/dynamodb.go:723 calls time.NewTicker(d.statePollInterval)
-// without checking the interval. time.NewTicker panics on any interval that is
-// not positive. common/defaults.go:1332 only substitutes a default when
-// StatePollInterval is exactly 0, so a negative value in the operator's YAML
-// survives config load and reaches the ticker unchecked.
+// time.NewTicker panics on any interval that is not positive. SetDefaults
+// fills in only a value that is exactly zero, so a negative duration used
+// to survive config load untouched and crash the process the first time a
+// shared counter was watched — during startup, with no line naming the
+// field.
 //
-// What an operator observes: writing `statePollInterval: -1s` under a DynamoDB
-// shared-state connector makes eRPC panic — "non-positive interval for
-// NewTicker" — the first time any shared counter is watched, which is during
-// startup. There is no validation error and no log line pointing at the
-// offending field.
-//
-// This test locks the behaviour in place. Do not "fix" the test — add a guard
-// in WatchCounterInt64 or validation in SetDefaults.
-func TestDynamoDBConnector_WatchCounterNonPositivePollInterval(t *testing.T) {
+// The sub-tests measure the unusable value against the absent one, so the
+// test fails if the guard disappears AND if the two stop agreeing.
+func TestDynamoDBConnector_ANonPositivePollIntervalCostsWhatAnAbsentOneCosts(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
-	logger := zerolog.New(io.Discard)
-	cfg := &common.DynamoDBConnectorConfig{
-		Endpoint:          "http://127.0.0.1:9876",
-		Region:            "us-west-2",
-		Table:             "never_created",
-		PartitionKeyName:  "pk",
-		RangeKeyName:      "rk",
-		ReverseIndexName:  "rk-pk-index",
-		TTLAttributeName:  "ttl",
-		InitTimeout:       common.Duration(500 * time.Millisecond),
-		GetTimeout:        common.Duration(500 * time.Millisecond),
-		SetTimeout:        common.Duration(500 * time.Millisecond),
-		StatePollInterval: common.Duration(-1 * time.Second), // survives SetDefaults
-		Auth: &common.AwsAuthConfig{
-			Mode:            "secret",
-			AccessKeyID:     "fakeKey",
-			SecretAccessKey: "fakeSecret",
-		},
+	badIntervalConfig := func(interval common.Duration) *common.DynamoDBConnectorConfig {
+		return &common.DynamoDBConnectorConfig{
+			Endpoint:          "http://127.0.0.1:9876",
+			Region:            "us-west-2",
+			Table:             "never_created",
+			PartitionKeyName:  "pk",
+			RangeKeyName:      "rk",
+			ReverseIndexName:  "rk-pk-index",
+			TTLAttributeName:  "ttl",
+			InitTimeout:       common.Duration(500 * time.Millisecond),
+			GetTimeout:        common.Duration(500 * time.Millisecond),
+			SetTimeout:        common.Duration(500 * time.Millisecond),
+			StatePollInterval: interval,
+			Auth: &common.AwsAuthConfig{
+				Mode:            "secret",
+				AccessKeyID:     "fakeKey",
+				SecretAccessKey: "fakeSecret",
+			},
+		}
 	}
 
-	// SetDefaults leaves a negative interval untouched — it only fills in a
-	// value that is exactly zero. Confirm that before relying on it.
-	require.NoError(t, cfg.SetDefaults(""))
-	require.Equal(t, common.Duration(-1*time.Second), cfg.StatePollInterval,
-		"SetDefaults must be shown to leave a negative poll interval in place")
+	// SetDefaults substitutes only for an absent value. That is what lets a
+	// negative one reach validation, which is where the operator is told.
+	t.Run("SetDefaultsFillsAnAbsentIntervalAndLeavesANegativeOne", func(t *testing.T) {
+		t.Parallel()
+		absent := badIntervalConfig(0)
+		require.NoError(t, absent.SetDefaults(""))
+		require.Equal(t, common.DefaultDynamoDBStatePollInterval, absent.StatePollInterval)
 
-	connector, err := NewDynamoDBConnector(ctx, &logger, "ddb-bad-interval", cfg)
-	require.NoError(t, err)
+		negative := badIntervalConfig(common.Duration(-1 * time.Second))
+		require.NoError(t, negative.SetDefaults(""))
+		require.Equal(t, common.Duration(-1*time.Second), negative.StatePollInterval,
+			"SetDefaults must leave a negative interval for validation to catch")
+	})
 
-	assert.PanicsWithValue(t, "non-positive interval for NewTicker", func() {
-		_, _, _ = connector.WatchCounterInt64(ctx, "any-counter")
-	}, "DEFECT PINNED: a negative statePollInterval crashes the process instead of being rejected")
+	t.Run("ValidateRejectsANegativeIntervalAndNamesTheField", func(t *testing.T) {
+		t.Parallel()
+		cfg := badIntervalConfig(common.Duration(-1 * time.Second))
+		require.NoError(t, cfg.SetDefaults(""))
+		err := cfg.Validate()
+		require.Error(t, err, "a negative statePollInterval must not load")
+		require.Contains(t, err.Error(), "statePollInterval", "the error must name the field")
+		require.Contains(t, err.Error(), "-1s", "the error must quote the value it refused")
+	})
+
+	t.Run("ValidateAcceptsTheDefaultedInterval", func(t *testing.T) {
+		t.Parallel()
+		cfg := badIntervalConfig(0)
+		require.NoError(t, cfg.SetDefaults(""))
+		require.NoError(t, cfg.Validate(), "an absent interval defaults and validates")
+	})
+
+	// Validation covers the config path. This covers every other caller:
+	// the connector is HANDED a duration, and must not crash the process
+	// with one it cannot use.
+	t.Run("TheConnectorPollsAtTheDefaultRatherThanPanicking", func(t *testing.T) {
+		// Not parallel: the warning has to clear zerolog's global floor,
+		// and the floor is process-wide state.
+		previous := zerolog.GlobalLevel()
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+		t.Cleanup(func() { zerolog.SetGlobalLevel(previous) })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		var logs bytes.Buffer
+		logger := zerolog.New(&logs).Level(zerolog.TraceLevel)
+		cfg := badIntervalConfig(common.Duration(-1 * time.Second))
+		require.NoError(t, cfg.SetDefaults(""))
+
+		connector, err := NewDynamoDBConnector(ctx, &logger, "ddb-bad-interval", cfg)
+		require.NoError(t, err)
+		require.Equal(t, common.DefaultDynamoDBStatePollInterval.Duration(), connector.statePollInterval,
+			"an unusable interval must cost what an absent one costs")
+		// Match the warn line, not the word. The debug line above it dumps
+		// the whole config, so "statePollInterval" alone appears whether or
+		// not the connector says anything about refusing the value.
+		require.Contains(t, logs.String(), `"level":"warn"`,
+			"falling back silently would leave the two events indistinguishable")
+		require.Contains(t, logs.String(), "cannot use statePollInterval -1s",
+			"the warning must quote the value it could not use")
+		require.Contains(t, logs.String(), "polling every 5s instead",
+			"the warning must say what it used instead")
+
+		require.NotPanics(t, func() {
+			_, cleanup, err := connector.WatchCounterInt64(ctx, "any-counter")
+			require.NoError(t, err)
+			if cleanup != nil {
+				cleanup()
+			}
+		}, "a negative interval must not reach time.NewTicker")
+	})
 }
