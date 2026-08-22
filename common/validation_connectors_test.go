@@ -111,7 +111,11 @@ func TestDynamoDBConnectorConfig_Validate_EveryFieldIsRequired(t *testing.T) {
 		{"initTimeout", func(d *DynamoDBConnectorConfig) { d.InitTimeout = 0 }, "initTimeout is required"},
 		{"getTimeout", func(d *DynamoDBConnectorConfig) { d.GetTimeout = 0 }, "getTimeout is required"},
 		{"setTimeout", func(d *DynamoDBConnectorConfig) { d.SetTimeout = 0 }, "setTimeout is required"},
-		{"statePollInterval", func(d *DynamoDBConnectorConfig) { d.StatePollInterval = 0 }, "statePollInterval is required"},
+		{"statePollInterval", func(d *DynamoDBConnectorConfig) { d.StatePollInterval = 0 }, "statePollInterval must be positive"},
+		// The negative case is the live one: SetDefaults fills an absent
+		// interval, so a negative value is the only one that reaches
+		// validation, and time.NewTicker panics on it.
+		{"negativeStatePollInterval", func(d *DynamoDBConnectorConfig) { d.StatePollInterval = Duration(-time.Second) }, "statePollInterval must be positive, got -1s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

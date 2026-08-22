@@ -304,8 +304,15 @@ func getConfig(
 	endpoints := cmd.StringSlice("endpoint")
 	// configOverrides := cmd.StringMap("set")
 
-	// Check for the config flag, if present, use that file
-	if configFile := cmd.String("config"); len(configFile) > 1 {
+	// Check for the config flag, if present, use that file.
+	//
+	// The test is for emptiness, not for length. It used to read `> 1`, which
+	// dropped a one-character path and fell through to auto-discovery — so
+	// `erpc --config a dump` read ./erpc.yaml and the operator saw a dump of
+	// a file they did not name. Every other unreadable --config is fatal, so
+	// the length bound made the shortest path the one case that silently ran
+	// the wrong config. Nothing about a file name supports that bound.
+	if configFile := cmd.String("config"); configFile != "" {
 		configPath = configFile
 		requireConfig = true // Since a config path is provided, we enforce it
 	} else if len(cmd.Args().Slice()) > 0 { // Check for positional arg, if present, use that file

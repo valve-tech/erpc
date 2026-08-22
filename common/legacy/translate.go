@@ -67,6 +67,11 @@ func Translate(
 		return warnings, nil
 	}
 
+	// A message describes a key, not a network, so one line covers every
+	// network that carries the key. Without this a hundred networks share
+	// one config block and produce a hundred identical lines.
+	var warned seenWarnings
+
 	for i := range networkConfigs {
 		nwCfg := networkConfigs[i]
 		var legacyNw WidenedNetwork
@@ -78,12 +83,30 @@ func Translate(
 		// `selectionPolicy.eval` (new field), we leave it alone — even if
 		// they ALSO wrote legacy fields, the new eval takes precedence.
 		if nwCfg.SelectionPolicy != nil && strings.TrimSpace(nwCfg.SelectionPolicy.EvalFunc) != "" {
+			// Say so. The legacy function is being discarded here, not
+			// translated, and the operator has no other way to learn that
+			// the code they wrote does not run.
+			if hasLegacyEvalFunction(legacyNw) {
+				warned.once(&warnings, warnDiscardedEvalFunction())
+			}
 			continue
 		}
 
 		evalSrc := synthesizeEval(prj, upstreams, legacyNw)
 		if evalSrc == "" {
 			continue
+		}
+
+		// Report what the rewrite did. Both keys below change selection
+		// behaviour, and both used to translate in silence — the operator
+		// got a different policy with no line in the log that said so.
+		// The project-level keys above have always warned; these two are
+		// the same event at the network level.
+		if hasLegacyEvalFunction(legacyNw) {
+			warned.once(&warnings, WarnLegacySelectionPolicy())
+		}
+		if legacyNw.SelectionPolicy != nil && legacyNw.SelectionPolicy.ResampleExcluded {
+			warned.once(&warnings, WarnResampleExcluded())
 		}
 
 		if nwCfg.SelectionPolicy == nil {
@@ -109,6 +132,27 @@ func Translate(
 	}
 
 	return warnings, nil
+}
+
+// seenWarnings appends a message the first time it is offered and drops
+// every repeat.
+type seenWarnings map[string]struct{}
+
+func (s *seenWarnings) once(out *[]string, msg string) {
+	if *s == nil {
+		*s = seenWarnings{}
+	}
+	if _, dup := (*s)[msg]; dup {
+		return
+	}
+	(*s)[msg] = struct{}{}
+	*out = append(*out, msg)
+}
+
+// hasLegacyEvalFunction reports whether the network wrote the legacy
+// `selectionPolicy.evalFunction` key.
+func hasLegacyEvalFunction(nw WidenedNetwork) bool {
+	return nw.SelectionPolicy != nil && strings.TrimSpace(nw.SelectionPolicy.EvalFunction) != ""
 }
 
 // hasSemanticLegacy returns true if the user wrote ANY legacy field that
