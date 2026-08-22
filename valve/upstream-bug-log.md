@@ -6245,3 +6245,50 @@ Enabling actual rules was considered and rejected. Nothing forces it: there is
 no observed defect a rule would have caught, and a rule set applied to 50
 unlinted files blocks unrelated work on the day it lands, which is how this
 entry started.
+
+## 176. The fork's whole-tree pre-commit CI job is red on `main`, and always was
+
+**Status:** open. **Severity: medium for the fork's gates**, none for the
+product. Needs a decision, not a patch.
+
+The fork added a `pre-commit` job to `.github/workflows/test.yml` (upstream's
+copy of that file has no pre-commit step). Its comment states the reason
+exactly:
+
+> The pre-commit hooks are the local gate. This job is the backstop for a clone
+> where nobody ran `pre-commit install`, and for anyone who reaches for
+> `--no-verify`. A gate that only runs on the machines that chose to install it
+> is not a gate.
+
+`pre-commit/action@v3` runs `pre-commit run --all-files`. That fails on `main`
+today. Measured on 2026-08-21, after entry 175 landed:
+
+    end-of-file-fixer     49 files
+    trailing-whitespace   24 files
+    (63 unique files, including LICENSE, README.md, CLA.md, .goreleaser.yaml)
+
+None of them are fork files. Upstream ships both hooks in
+`.pre-commit-config.yaml` and ships a tree that violates them, because upstream
+never runs them over everything. The fork added the whole-tree run without
+checking that the tree passes it. Entry 175 removed a third failing hook from
+this list; it did not cause the other two.
+
+A permanently red job teaches people to ignore the job, which is the same
+failure `--no-verify` causes and the same one this job was added to prevent.
+
+**Two ways out, and they are not equivalent.**
+
+Running the fixers costs 63 whitespace-only diffs against upstream, replayed on
+every rebase for as long as the fork exists. The fork's whole triage rests on
+not paying that for zero behaviour change.
+
+Narrowing the job to the changed files costs one edit to a fork-owned block.
+`pre-commit/action` takes `extra_args`, so `--from-ref`/`--to-ref` over the
+pull-request range enforces exactly what the local hooks enforce — which is
+what the job's own comment says it is for. It commits to nothing about the 63
+files. The `push` trigger on `main` needs its own answer, because a push has no
+natural base ref.
+
+The second is the weaker commitment and matches the stated intent. Recorded
+rather than applied: changing when a CI job runs is a decision about the
+pipeline, and the person who added the job should make it.
