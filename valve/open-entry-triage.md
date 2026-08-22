@@ -202,15 +202,28 @@ alone.
 
 ## The 43 to fix, ranked
 
-Ranked by what a client or an operator loses, not by how hard each is.
+Ranked by what a client or an operator loses, not by how hard each is. Struck
+ids are fixed. Do not add up the per-rank counts to get a total — entry 109
+appears in two lists, and the config-edge entries are spread across ranks.
 
-**1 — a client gets a wrong or broken answer (11).**
-7, 24, 29, 39, 48, 74, 76, 77, 86, 87, 136.
-A corrupt cache entry answered as HTTP 200 (86), a truncated request body
-answered 200 and blamed on the server (29), `"0x"` normalised to the zero hash
-(7), a released response that reads exactly like a nil one (76, 77), a listing
-that never hands out its next-page token so the caller believes it saw
-everything (24).
+**1 — a client gets a wrong or broken answer (7 left of 11).**
+~~7~~, ~~24~~, **29**, **39**, **48**, **74**, ~~76~~, ~~77~~, **86**, **87**,
+**136**.
+Entries 7, 24, 76 and 77 are fixed. Each fix DELETED something: 7 moves one
+check instead of adding a second, and 24 removes a probe the scan loop had
+already made impossible.
+
+Two of them turned up work the entry did not name. Entry 24 was pinned in two
+places, and the second pin's message cited "bug 61" — a vendor defect with
+nothing to do with pagination. Entry 76's fix broke a consensus fixture that
+was itself asserting the defect: it released a parsed response and then
+required no error on the next read. `resultToJsonRpcResponse`
+(`consensus/analysis.go`) still discards the new sentinel, so consensus keeps
+filing a released response as a generic infrastructure error. That is a
+candidate for its own entry.
+
+Still open: a corrupt cache entry answered as HTTP 200 (86), and a truncated
+request body answered 200 and blamed on the server (29).
 
 **2 — a crash or a leak (2 left of 5).**
 ~~9~~, **26**, **45**, ~~58~~, ~~109~~.
@@ -253,6 +266,8 @@ is low alone and high next to 99.
 2. **The fork's own code (4 entries).** No rebase debt.
 3. **Rank 2 (2 left).** ~~9, 58, 109~~ done. 26 cannot be pinned by a test;
    45 is the chainstack half of 42.
-4. **Rank 1 (11 entries).** A client gets a wrong or broken answer.
+4. **Rank 1 (7 left).** ~~7, 24, 76, 77~~ done. The cheap four went first;
+   what remains — 29, 39, 48, 74, 86, 87, 136 — is where a client is handed a
+   wrong answer with a 200 beside it.
 5. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.
 6. Ranks 3 to 5 as capacity allows.

@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -51,6 +52,12 @@ type NormalizedResponse struct {
 
 	// releaseOnce ensures Release() is idempotent — safe to call multiple times
 	releaseOnce sync.Once
+
+	// released marks a response Release() already freed. The readers below
+	// report ErrResponseReleased when they find nothing cached and this flag
+	// is set. Release sets it BEFORE it clears the cached pointer, so a reader
+	// that finds nothing cached after a completed release always sees it.
+	released atomic.Bool
 }
 
 var _ ResponseMetadata = &NormalizedResponse{}
@@ -306,6 +313,18 @@ func (r *NormalizedResponse) WithFinality(f DataFinalityState) *NormalizedRespon
 	return r
 }
 
+// ErrResponseReleased says a reader reached a response that Release() already
+// freed. Before this sentinel the readers below answered a released response
+// exactly like an absent one: JsonRpcResponse and MarshalJSON both returned
+// (nil, nil), and WriteTo returned a generic "unexpected empty response".
+// Release stores nil over the cached pointer, and parseOnce has already run, so
+// nothing said the body went away. That cost two callers a wrong diagnosis:
+// classifyAndHashResponse filed the nil as an infrastructure error with no
+// cause (bug 69), and the state poller dereferenced it (bug 66). The sentinel
+// makes the released state answer the reader's question, so every existing
+// "if err != nil" guard catches it.
+var ErrResponseReleased = errors.New("response already released")
+
 func (r *NormalizedResponse) JsonRpcResponse(ctx ...context.Context) (*JsonRpcResponse, error) {
 	if len(ctx) > 0 {
 		_, span := StartDetailSpan(ctx[0], "Response.ResolveJsonRpc")
@@ -319,6 +338,14 @@ func (r *NormalizedResponse) JsonRpcResponse(ctx ...context.Context) (*JsonRpcRe
 	// Check if already parsed
 	if jrr := r.jsonRpcResponse.Load(); jrr != nil {
 		return jrr, nil
+	}
+
+	// A release that already completed left nothing to return. Say so instead
+	// of answering (nil, nil) like an absent response. The cached-pointer check
+	// above stays first: a reader that races a release still gets the live
+	// pointer it loaded.
+	if r.released.Load() {
+		return nil, ErrResponseReleased
 	}
 
 	// Ensure parsing happens only once
@@ -470,6 +497,13 @@ func (r *NormalizedResponse) MarshalJSON() ([]byte, error) {
 		return SonicCfg.Marshal(jrr)
 	}
 
+	// Same rule as JsonRpcResponse. This returned (nil, nil) for a released
+	// response, so a marshaller could not tell an empty response from one that
+	// Release() freed under it.
+	if r.released.Load() {
+		return nil, ErrResponseReleased
+	}
+
 	return nil, nil
 }
 
@@ -480,6 +514,13 @@ func (r *NormalizedResponse) WriteTo(w io.Writer) (n int64, err error) {
 
 	if jrr := r.jsonRpcResponse.Load(); jrr != nil {
 		return jrr.WriteTo(w)
+	}
+
+	// Same rule as JsonRpcResponse. This reported "unexpected empty response"
+	// for a released response, which sent a reader hunting for a missing body
+	// instead of the release that freed it.
+	if r.released.Load() {
+		return 0, ErrResponseReleased
 	}
 
 	return 0, fmt.Errorf("unexpected empty response when calling NormalizedResponse.WriteTo")
@@ -494,6 +535,10 @@ func (r *NormalizedResponse) Release() {
 		// Wait for all pending background operations (e.g., cache set) to complete
 		// before freeing heavy buffers.
 		r.pendingOps.Wait()
+
+		// Mark the release BEFORE the cached pointer goes away, so a reader
+		// that finds nothing cached after this point always sees the flag.
+		r.released.Store(true)
 
 		// Clear these synchronously (fast, no I/O)
 		r.Lock()
