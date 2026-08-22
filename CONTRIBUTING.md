@@ -27,6 +27,14 @@ go straight through.
 CI runs the same hooks over the whole tree, so a clone that skipped
 `pre-commit install` fails there instead.
 
+`.eslintrc.json` at the repository root exists so the `eslint` hook can run at
+all. Without a config eslint exits 2 on every JavaScript or TypeScript file, so
+anyone touching one had to pass `--no-verify` — which skips the conflict-marker
+check too. The config enables no rules. It sets a parser, which makes the hook
+report syntax errors and nothing else. That is worth having on its own:
+`internal/policy/stdlib/stdlib.js` is embedded and evaluated at run time, so a
+syntax error there reaches production rather than the build.
+
 To install the hooks into every repository you clone from now on:
 
 ```sh

@@ -363,11 +363,21 @@ func getConfig(
 		// Allow overriding the log level from the environment variable
 		level, err := zerolog.ParseLevel(lvl)
 		if err != nil {
-			logger.Warn().Msgf("invalid log level '%s', defaulting to 'debug': %s", lvl, err)
+			// Do NOT install the level on this path. ParseLevel returns
+			// NoLevel with its error, and NoLevel is 6 — above error. As the
+			// global floor it drops every line the process would write,
+			// including this warning, so one typo blinds the operator at the
+			// moment their config is wrong.
+			//
+			// An unreadable override is ignored instead. It leaves exactly
+			// what an unset LOG_LEVEL leaves, which is what the same file
+			// already does at the other end (see init), and the warning is
+			// what separates the two events for the operator.
+			logger.Warn().Msgf("invalid log level '%s', keeping '%s': %s", lvl, cfg.LogLevel, err)
 		} else {
 			cfg.LogLevel = level.String()
+			zerolog.SetGlobalLevel(level)
 		}
-		zerolog.SetGlobalLevel(level)
 	}
 
 	return cfg, nil

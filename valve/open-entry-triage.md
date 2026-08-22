@@ -5,6 +5,32 @@ open, 4 not a bug.
 
 ## Progress since this triage was written
 
+**2026-08-21, later still.** Entries **121** and **125** are fixed, and they
+went together for the reason the family predicts: both turned a value the
+process could not read into a silent number. `durationMs` returned 0 ms, which
+switched the sticky cooldown off; `LOG_LEVEL` installed `NoLevel`, which
+switched logging off. Both now land where an ABSENT value lands, and both say
+so. The log reads **88 fixed, 62 open, 18 not a bug** across 168 entries.
+
+Fixing them added two entries. **173** records that `docs/pages/` pins 622
+source line numbers with nothing checking them, and that a hand-check of ten on
+one page found four pointing at unrelated code. The fork's rebase makes that
+worse: an upstream commit that inserts a line above a citation moves the target
+and leaves the citation resolving. **174** is the same family as 125, one file
+over — `erpc.Init` promises debug for an unreadable `logLevel` and assigns to a
+variable nothing reads. It goes in the "document, do not patch" bucket: the
+behaviour is already right, and two lines in the startup path are not worth a
+permanent conflict. **175** is fixed rather than opened: upstream's `eslint`
+commit hook has never run, because nothing in the tree configures eslint, so
+every JavaScript edit forced `--no-verify` — which skips the conflict-marker
+check too.
+
+The rule generalised cleanly, which is the argument for taking the rest of the
+family together: **an unreadable value must cost what an absent value costs,
+and must be reported.** Falling back is half of it. Without the report the two
+events stay indistinguishable to the operator, so the test idiom needs both
+halves — and in both fixes a mutation that removed only the report still failed.
+
 **2026-08-21, later.** The closures are applied: 14 entries moved to `not a
 bug`, and 4 of the proposed 18 were rejected on review because they had live
 effects the one-line summaries did not show. The log now reads **86 fixed, 63
@@ -56,7 +82,8 @@ result. Treat a bucket as a proposal with a stated reason, not as a verdict.
 
 ## The headline: ten entries obey one rule, at ten sites
 
-Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** share one property:
+Entries **18, 25, 36, 53, 64, 117, 121, 125, 126, 127** share one property
+(53, 64, 121 and 125 are now fixed):
 
 > eRPC collapses three different operator events into one outcome — "did not
 > say", "said this", and "said something I cannot read".
@@ -82,7 +109,7 @@ one rule, not one patch:
 |---|---|---|
 | A fallback decode's shadow struct has not grown with the real type, and its error masks the real one | **53, 64** | `common/config.go` `UnmarshalYAML` |
 | Defaulting cannot tell "unset" from "set wrong" — a nil check stands in for "the user did not specify" | **18, 25, 36** | `common/defaults.go` |
-| A parse failure becomes a silent zero or silence | **121, 125** | `internal/policy/stdlib/install.go`, `cmd/erpc/` |
+| ~~A parse failure becomes a silent zero or silence~~ — FIXED | ~~**121, 125**~~ | `internal/policy/stdlib/install.go`, `cmd/erpc/` |
 | A value marshals out and will not parse back | **117** | `common/architecture_evm.go` |
 | A guard tests the wrong thing (`len(s) > 1`, not `s != ""`) | **127** | `cmd/erpc/main.go` |
 | The warning list covers project-level keys only | **126** | `common/legacy/translate.go` |
@@ -200,7 +227,9 @@ is low alone and high next to 99.
 
 ## Suggested order
 
-1. **The config edge (10 entries, one patch).** Best value, lowest carry cost.
+1. **The config edge (10 entries, ten small patches under one rule).** Best
+   value, lowest carry cost. Four done — 53, 64, 121, 125. Six left: 18, 25, 36,
+   117, 126, 127, and 18 needs a decision before it needs a patch.
 2. **The fork's own code (4 entries).** No rebase debt.
 3. **Rank 1 and rank 2 (16 entries).** Wrong answers and crashes.
 4. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.
