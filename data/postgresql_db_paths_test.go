@@ -279,9 +279,13 @@ func TestPostgreSQLConnector_DatabasePaths(t *testing.T) {
 		})
 	})
 
-	// List asks for one row more than the caller wants so it can tell whether a
-	// next page exists. Pin what it actually returns.
-	t.Run("List truncates at the limit and never offers a next page", func(t *testing.T) {
+	// List asks for one row more than the caller wants so it can tell whether
+	// a next page exists. It used to consume that extra row inside the scan
+	// loop and then probe for another one, which the query never fetched — so
+	// the token was always empty and the caller stopped after one page. This
+	// is the second place that defect was pinned; the other pin lives in
+	// postgresql_crud_test.go, and this one cited the wrong entry number.
+	t.Run("List offers a next page while rows remain", func(t *testing.T) {
 		lg := zerolog.New(io.Discard)
 		c := newConnector(t, ctx, &lg, "pg-list", uri, "paged_items", false)
 
@@ -292,18 +296,31 @@ func TestPostgreSQLConnector_DatabasePaths(t *testing.T) {
 		items, token, err := c.List(ctx, ConnectorMainIndex, 3, "")
 		require.NoError(t, err)
 		assert.Len(t, items, 3, "the caller's limit is respected")
-		// Bug 61: the extra probe row was already consumed by the scan loop, so
-		// the has-more check always fails and the caller is told the listing is
-		// complete when four rows remain.
-		assert.Empty(t, token, "bug 61: no next-page token is ever produced")
+		require.NotEmpty(t, token, "four of seven rows are still unread, so List must say so")
 
-		// A supplied token still works, which is how a caller would page if a
-		// token were ever handed out.
-		second, _, err := c.List(ctx, ConnectorMainIndex, 3, encodeOffsetToken(t, 3))
+		// Follow the connector's OWN token, not a hand-built one. A token the
+		// caller cannot use is the same failure as a token that never arrives.
+		second, secondToken, err := c.List(ctx, ConnectorMainIndex, 3, token)
 		require.NoError(t, err)
 		require.Len(t, second, 3)
 		assert.NotEqual(t, items[0].PartitionKey, second[0].PartitionKey,
-			"the offset token must move the window")
+			"the token must move the window")
+		require.NotEmpty(t, secondToken, "one row of seven is still unread")
+
+		// The seventh row is the last. A token here would send the caller
+		// round again for nothing.
+		third, thirdToken, err := c.List(ctx, ConnectorMainIndex, 3, secondToken)
+		require.NoError(t, err)
+		require.Len(t, third, 1, "seven rows at three per page leaves one on the last page")
+		assert.Empty(t, thirdToken, "the walk must end when the table does")
+
+		// An explicit offset token still works, which is how a caller built
+		// one before List handed any out.
+		fromOffset, _, err := c.List(ctx, ConnectorMainIndex, 3, encodeOffsetToken(t, 3))
+		require.NoError(t, err)
+		require.Len(t, fromOffset, 3)
+		assert.Equal(t, second[0].PartitionKey, fromOffset[0].PartitionKey,
+			"a hand-built offset token must reach the same page as the connector's own")
 	})
 }
 
