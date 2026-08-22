@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -372,24 +375,92 @@ func TestLogLevelEnv_OverridesTheConfigFile(t *testing.T) {
 	require.Equal(t, zerolog.WarnLevel, run.logLevel, "LOG_LEVEL must set the global log level")
 }
 
-// Bug 125: an unparseable LOG_LEVEL warns "defaulting to 'debug'" and
-// then sets the global level to zerolog's NoLevel, which SILENCES every
-// debug, info, warn and error line. The operator gets a quieter process,
-// not a debug one.
+// loadConfigForTest calls getConfig the way a command does, and returns
+// both the config and everything getConfig logged. It exists because the
+// LOG_LEVEL block cannot be observed through a whole command: `dump` and
+// `validate` silence logging before they load the config, and `start` on
+// a loadable config never returns.
+func loadConfigForTest(t *testing.T, cfgPath string) (*common.Config, string, error) {
+	t.Helper()
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+
+	var cfg *common.Config
+	var cfgErr error
+	app := &cli.Command{
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "config"},
+			&cli.BoolFlag{Name: "require-config"},
+			&cli.StringSliceFlag{Name: "endpoint"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			cfg, cfgErr = getConfig(logger, cmd)
+			return nil
+		},
+	}
+	require.NoError(t, app.Run(context.Background(), []string{"erpc-test", "--config", cfgPath}))
+	return cfg, logs.String(), cfgErr
+}
+
+// Bug 125. LOG_LEVEL is an override, and an override the process cannot
+// read must cost the operator nothing but the override itself.
 //
-// This test pins today's behaviour. When the fix lands, expect
-// zerolog.DebugLevel here.
-func TestLogLevelEnv_InvalidValueSilencesLogging(t *testing.T) {
-	t.Setenv("LOG_LEVEL", "not-a-level")
+// It used to cost them every log line. zerolog.ParseLevel returns NoLevel
+// with its error, NoLevel is 6, and the code installed it as the global
+// floor on the failure path — above error, so debug, info, warn and error
+// all stopped. The warning that explained it was suppressed by the level
+// it had just installed.
+//
+// So this asserts the rule the whole family shares: a value the process
+// cannot read must land where an ABSENT value lands, and must say so.
+// Both halves matter. Without the fallback the typo is destructive;
+// without the warning the operator cannot tell they made one.
+func TestLogLevelEnv_AnUnreadableValueCostsNothingButTheOverride(t *testing.T) {
 	cfgPath := writeConfig(t, "erpc.yaml", oneUpstreamConfig(deadEndpoint))
 
-	run := runCLI(t, "dump", cfgPath)
-	require.Empty(t, run.exitCodes)
-	require.Contains(t, run.stdout, "logLevel: debug", "an invalid LOG_LEVEL must not overwrite the config value")
-	require.Equal(t, zerolog.NoLevel, run.logLevel,
-		"bug 125: an invalid LOG_LEVEL silences logging instead of defaulting to debug")
-	require.NotEqual(t, zerolog.DebugLevel, run.logLevel,
-		"bug 125: the warning promises debug, the code delivers NoLevel")
+	// Pin the level the run starts from, and put it back afterwards. The
+	// success path of the block under test sets the global level, so an
+	// unrestored run would change what every later test measures.
+	ambient := zerolog.GlobalLevel()
+	defer zerolog.SetGlobalLevel(ambient)
+
+	// The absent case, measured rather than assumed. It is the yardstick
+	// for the unreadable one.
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	cfg, _, err := loadConfigForTest(t, cfgPath)
+	require.NoError(t, err)
+	absentLevel := zerolog.GlobalLevel()
+	require.Equal(t, zerolog.InfoLevel, absentLevel,
+		"no LOG_LEVEL must leave the level the process started with")
+	require.Equal(t, "debug", cfg.LogLevel)
+
+	t.Setenv("LOG_LEVEL", "not-a-level")
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	cfg, logs, err := loadConfigForTest(t, cfgPath)
+	require.NoError(t, err)
+
+	require.Equal(t, absentLevel, zerolog.GlobalLevel(),
+		"an unreadable LOG_LEVEL must leave the level exactly where no LOG_LEVEL leaves it")
+	require.NotEqual(t, zerolog.NoLevel, zerolog.GlobalLevel(),
+		"NoLevel is what ParseLevel returns WITH its error; installing it is the bug")
+	require.Equal(t, "debug", cfg.LogLevel,
+		"an unreadable LOG_LEVEL must not overwrite the config value either")
+
+	require.Contains(t, logs, "not-a-level",
+		"the warning must quote the value the operator actually typed")
+	require.NotContains(t, logs, "defaulting to 'debug'",
+		"the message must not promise a level the code does not install")
+
+	// The control. A LOG_LEVEL the process CAN read still takes effect, so
+	// the fallback above is not the code ignoring the variable.
+	t.Setenv("LOG_LEVEL", "warn")
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	cfg, _, err = loadConfigForTest(t, cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, zerolog.WarnLevel, zerolog.GlobalLevel(),
+		"a readable LOG_LEVEL must still set the global level")
+	require.Equal(t, "warn", cfg.LogLevel,
+		"a readable LOG_LEVEL must still override the config file")
 }
 
 /* -------------------------------------------------------------------------- */

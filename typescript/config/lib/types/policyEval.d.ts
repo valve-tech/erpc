@@ -593,8 +593,17 @@ declare global {
     function methodMatches(pat: Pattern): boolean;
     /** True iff `ctx.finality === 'finalized'`. */
     function isFinalityRequest(): boolean;
-    /** Convert a `Duration` to milliseconds. Installed by the engine. */
-    function durationMs(d: Duration): number;
+    /**
+     * Convert a `Duration` to milliseconds, or `null` when the value names no
+     * duration at all. Installed by the engine.
+     *
+     * `null` is not `0`. A knob the parser cannot read and a cooldown of zero
+     * are different instructions, and zero is the riskier of the two — it
+     * switches the behaviour the knob guards off entirely. Decide what an
+     * unreadable value costs at the call site, and prefer whatever an absent
+     * value costs.
+     */
+    function durationMs(d: Duration): number | null;
     /** One primary per network; max cohesion across methods + finalities. */
     const NETWORK: "network";
     /** One primary per `(network, method)`; finalities share. */
