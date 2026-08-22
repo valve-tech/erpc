@@ -330,8 +330,8 @@ func (p *PostgreSQLConnector) applySchema(ctx context.Context, conn *pgxpool.Poo
 	// Migrate existing TEXT column to BYTEA if needed
 	var dataType string
 	err := conn.QueryRow(ctx, `
-		SELECT data_type 
-		FROM information_schema.columns 
+		SELECT data_type
+		FROM information_schema.columns
 		WHERE table_name = $1 AND column_name = 'value'
 	`, cfg.Table).Scan(&dataType)
 
@@ -1306,7 +1306,7 @@ func (p *PostgreSQLConnector) Delete(ctx context.Context, partitionKey, rangeKey
 	defer cancel()
 
 	_, err = pool.Exec(ctx, fmt.Sprintf(`
-		DELETE FROM %s 
+		DELETE FROM %s
 		WHERE partition_key = $1 AND range_key = $2
 	`, p.table), partitionKey, rangeKey)
 
@@ -1356,8 +1356,8 @@ func (p *PostgreSQLConnector) List(ctx context.Context, index string, limit int,
 	}
 
 	query := fmt.Sprintf(`
-		SELECT partition_key, range_key, value 
-		FROM %s 
+		SELECT partition_key, range_key, value
+		FROM %s
 		WHERE expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'UTC'
 		ORDER BY partition_key, range_key
 		LIMIT $1 OFFSET $2
@@ -1374,11 +1374,22 @@ func (p *PostgreSQLConnector) List(ctx context.Context, index string, limit int,
 	defer rows.Close()
 
 	results := make([]KeyValuePair, 0, limit)
-	count := 0
+	// hasMore is decided INSIDE the loop, because that is the only place the
+	// limit+1-th row is ever seen. This used to be probed below the loop with
+	// a second rows.Next(), which needs a limit+2-th row the query never
+	// fetched — the break here had already consumed the extra one. So the
+	// probe always answered false, nextToken was always empty, and a caller
+	// looping until the token is empty stopped after the first page believing
+	// it had seen everything.
+	hasMore := false
 
 	for rows.Next() {
-		if count >= limit {
-			break // We got the extra record, so there are more results
+		if len(results) >= limit {
+			// The extra row the query asked for. Seeing it IS the answer:
+			// there is another page. Do not record it — it belongs to that
+			// page, not this one.
+			hasMore = true
+			break
 		}
 
 		var partitionKey, rangeKey string
@@ -1394,7 +1405,6 @@ func (p *PostgreSQLConnector) List(ctx context.Context, index string, limit int,
 			RangeKey:     rangeKey,
 			Value:        value,
 		})
-		count++
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1403,24 +1413,18 @@ func (p *PostgreSQLConnector) List(ctx context.Context, index string, limit int,
 		return nil, "", err
 	}
 
-	// Prepare next token
+	// Prepare next token. It names the offset to resume at, so it is only
+	// issued when this page actually advanced past something. A non-positive
+	// limit asks for no rows and would otherwise get a token naming the
+	// offset the caller just asked for — a loop that never ends.
 	nextToken := ""
-	if count == limit {
-		// Check if there's a next page by seeing if we got more than limit records
-		hasMore := false
-		for rows.Next() {
-			hasMore = true
-			break
+	if hasMore && len(results) > 0 {
+		tokenData := map[string]int{"offset": offset + len(results)}
+		tokenBytes, err := json.Marshal(tokenData)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create pagination token: %w", err)
 		}
-
-		if hasMore {
-			tokenData := map[string]int{"offset": offset + limit}
-			tokenBytes, err := json.Marshal(tokenData)
-			if err != nil {
-				return nil, "", fmt.Errorf("failed to create pagination token: %w", err)
-			}
-			nextToken = base64.StdEncoding.EncodeToString(tokenBytes)
-		}
+		nextToken = base64.StdEncoding.EncodeToString(tokenBytes)
 	}
 
 	return results, nextToken, nil

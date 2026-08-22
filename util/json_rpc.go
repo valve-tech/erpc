@@ -17,6 +17,7 @@ func RandomID() int64 {
 // NormalizeBlockHashHexString normalizes a hex string intended to represent a block hash.
 // Rules:
 // - Accepts with/without 0x prefix
+// - Rejects a value with no hex digits at all ("", "0x", "   ")
 // - Trims spaces
 // - Lowercases hex
 // - Pads odd-length by adding a leading '0'
@@ -24,13 +25,20 @@ func RandomID() int64 {
 // - Left-pads with zeros to exactly 64 hex digits
 // Returns a string with 0x prefix and exactly 64 hex digits.
 func NormalizeBlockHashHexString(s string) (string, error) {
-	if s == "" {
-		return "", fmt.Errorf("empty block hash")
-	}
 	trimmed := strings.TrimSpace(s)
 	// Strip 0x/0X if present
 	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
 		trimmed = trimmed[2:]
+	}
+	// Count the DIGITS, not the input string. This check used to read
+	// `s == ""` at the top of the function, before the spaces and the
+	// prefix came off — so "0x", "0X" and "   " each got past it with no
+	// digits left, padded to 64 zeros and returned the zero hash with no
+	// error. A client-supplied blockHash of "0x" then became a
+	// valid-looking cache key for a block that does not exist, and
+	// afterwards "0x" and "0x0" were indistinguishable.
+	if trimmed == "" {
+		return "", fmt.Errorf("empty block hash")
 	}
 	trimmed = strings.ToLower(trimmed)
 	// Ensure only hex chars

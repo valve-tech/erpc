@@ -7,7 +7,7 @@ Next.js documentation site, and it changes on most merges.
 
 | Document | What it is |
 |---|---|
-| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 174 entries: 98 fixed in the fork, 58 open, 18 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
+| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 174 entries: 102 fixed in the fork, 54 open, 18 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
 | [open-entry-triage.md](open-entry-triage.md) | What to do with the log's open entries, now that the fork rebases instead of sending pull requests. Ten of them obey one rule at ten different sites, and two of those are now fixed; fourteen were dead code and are now closed. |
 | [polyglot-feasibility.md](polyglot-feasibility.md) | Can the fork serve non-EVM chains from configuration rather than new Go code? Verdict and evidence. |
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |

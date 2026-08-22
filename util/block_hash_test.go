@@ -80,23 +80,35 @@ func TestNormalizeBlockHashHexString_RejectsWhatItCannotNormalise(t *testing.T) 
 	}
 }
 
-func TestNormalizeBlockHashHexString_BareZeroPrefixBecomesTheZeroHash(t *testing.T) {
-	// Observed behaviour, pinned as a hazard rather than asserted away.
-	// The empty-string guard runs BEFORE the "0x" prefix is stripped, so
-	// "0x" survives it, normalises to 64 zeros and becomes a valid-looking
-	// cache key. A caller that reads `blockHash` from a client request and
-	// passes it through gets a hash for a block that does not exist,
-	// silently, instead of an error. The zero hash is a legitimate padding
-	// target for "0x0", so the two cases are indistinguishable downstream.
+func TestNormalizeBlockHashHexString_APrefixWithNoDigitsIsNotAHash(t *testing.T) {
+	// "0x" names no block. The emptiness check used to run BEFORE the spaces
+	// and the prefix came off, so "0x" got past it with nothing left,
+	// padded to 64 zeros and returned the zero hash with no error — a
+	// valid-looking cache key for a block that does not exist. The three
+	// spellings below all reach that state, and each must be rejected.
+	for _, in := range []string{"0x", "0X", "   ", "  0x  "} {
+		_, err := NormalizeBlockHashHexString(in)
+		require.Error(t, err, "input %q names no digits and must be rejected, not padded", in)
+	}
+
+	// "0x0" DOES name a hash: zero, padded. It is the case the rejection
+	// above must not swallow, and the reason "0x" cannot simply share its
+	// answer — the two would be indistinguishable downstream.
 	zero := "0x" + strings.Repeat("0", 64)
-
-	got, err := NormalizeBlockHashHexString("0x")
-	require.NoError(t, err)
-	require.Equal(t, zero, got)
-
 	fromZero, err := NormalizeBlockHashHexString("0x0")
 	require.NoError(t, err)
-	require.Equal(t, zero, fromZero, "\"0x\" and \"0x0\" are indistinguishable after normalisation")
+	require.Equal(t, zero, fromZero)
+
+	// So does a hash written out in full, and so does an over-long spelling
+	// of it. Trimming leading zeros must not turn a real zero hash into no
+	// digits at all.
+	fromFull, err := NormalizeBlockHashHexString(zero)
+	require.NoError(t, err)
+	require.Equal(t, zero, fromFull)
+
+	fromLong, err := NormalizeBlockHashHexString("0x" + strings.Repeat("0", 70))
+	require.NoError(t, err)
+	require.Equal(t, zero, fromLong)
 }
 
 func TestNormalizeBlockHashHexString_IsIdempotent(t *testing.T) {
