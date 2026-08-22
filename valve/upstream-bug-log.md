@@ -6,7 +6,7 @@ a candidate to report or to send back as a patch.
 The fork tracks upstream by rebasing on it. It does NOT send these back as
 pull requests — that was considered and ruled out. So every fix here is a patch
 that must survive each rebase, or be retired when upstream fixes the same
-defect its own way. The 73 entries reading "FIXED in the fork" are therefore a
+defect its own way. The 102 entries reading "FIXED in the fork" are therefore a
 rebase risk register, not a pull-request backlog.
 
 **Status key.** Every entry carries exactly one of four statuses.
@@ -229,17 +229,30 @@ Pinned by
 
 ## 7. `"0x"` normalises to the zero hash instead of erroring
 
-**Status:** open. **Severity: medium.** Silent bad cache key.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Silent bad cache key.
 
-`util/json_rpc.go` checks `s == ""` **before** stripping the `0x` prefix. So
-`"0x"` survives the guard, becomes an empty digit string, and left-pads to 64
-zeros.
+`util/json_rpc.go` checked `s == ""` **before** it trimmed the spaces and
+stripped the `0x` prefix. So `"0x"` survived the guard, became an empty digit
+string, and left-padded to 64 zeros. A caller that passed a client-supplied
+`blockHash` straight through got a valid-looking cache key for a block that
+does not exist, with no error, and afterwards `"0x"` and `"0x0"` were
+indistinguishable.
 
-A caller that passes a client-supplied `blockHash` straight through gets a
-valid-looking cache key for a block that does not exist, with no error.
-Afterwards `"0x"` and `"0x0"` are indistinguishable.
+The fix MOVES the check rather than adding one. It now reads the digits, not
+the input string, so it runs after the trim and the prefix strip. One check
+covers `""`, `"0x"`, `"0X"` and `"   "` — three of which used to reach the
+padding. The function's doc comment states the rule, because the rejection is
+part of its contract.
 
-Pinned by `TestNormalizeBlockHashHexString_BareZeroPrefixBecomesTheZeroHash`.
+The three legitimate zero-hash spellings are what keep the rejection honest:
+`"0x0"`, the hash written out in full, and an over-long spelling whose leading
+zeros get trimmed. Each still normalises to 64 zeros. `"0x"` is the one value
+that names no block at all.
+
+Pinned by `TestNormalizeBlockHashHexString_APrefixWithNoDigitsIsNotAHash`,
+which replaced the pin that recorded the defect. Mutation: restoring the
+`s == ""` form fails the test on `"0x"`.
 
 ---
 
@@ -640,25 +653,48 @@ background poller, and it is still open.
 
 ## 24. `PostgreSQLConnector.List` never issues a pagination token
 
-**Status:** open. **Severity: medium.** A caller believes it enumerated
-everything.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** A caller believed it enumerated everything.
 
-`data/postgresql.go:1321`. The query at `:1368` asks for `limit+1` rows so it
-can detect a next page. The scan loop at `:1379` calls `rows.Next()` a
-`limit+1`-th time and breaks at `:1381` **without recording that row** — so the
-extra row is already consumed. The probe at `:1411` then calls `rows.Next()`
-again, which would need a `limit+2`-th row the query never fetched. It always
-returns false, and `nextToken` stays empty.
+`data/postgresql.go`. The query asks for `limit+1` rows so it can detect a next
+page. The scan loop called `rows.Next()` a `limit+1`-th time and broke
+**without recording that row** — so the extra row was already consumed. The
+probe below the loop then called `rows.Next()` again, which would need a
+`limit+2`-th row the query never fetched. It always returned false, and
+`nextToken` stayed empty.
 
-Measured against a live container: 30 rows, `limit 1` returns 1 row and an empty
-token; `limit 5` returns 5 rows and an empty token.
+Measured against a live container before the fix: 30 rows, `limit 1` returned 1
+row and an empty token; `limit 5` returned 5 rows and an empty token.
+`erpc_listApiKeys` (`erpc/admin.go`) on PostgreSQL therefore returned at most
+one page and always reported "no more pages".
 
-`erpc_listApiKeys` (`erpc/admin.go:270`) on PostgreSQL therefore returns
-at most one page and always reports "no more pages". A caller looping until the
-token is empty stops after one page believing it saw everything.
+The fix DELETES the probe. `hasMore` is now set inside the loop, at the one
+place the `limit+1`-th row is ever seen. Nothing is added: the loop already had
+to look at that row to know it must stop.
 
-Pinned by `TestPostgreSQLConnector_CRUD/List never issues a pagination token
-(defect pinned)`.
+One guard came with it. A token names the offset to resume at, so it is issued
+only when the page returned something. A non-positive `limit` asks for no rows
+and would otherwise get a token naming the offset the caller just asked for —
+a walk that never ends. `erpc/admin.go` reads `limit` from a JSON parameter
+with no floor, so a client can send `0`. Reading nothing once beats reading
+nothing forever.
+
+**The defect was pinned twice, and the second pin cited the wrong entry.**
+`postgresql_db_paths_test.go` carried
+`List truncates at the limit and never offers a next page`, whose assertion
+message read "bug 61: no next-page token is ever produced". Entry 61 is a pair
+of `thirdparty` vendor divergences and has nothing to do with pagination. The
+number drifted at some point and nothing catches a wrong number inside a
+string. Both pins now assert the fixed behaviour, and the second one follows
+the connector's OWN token rather than a hand-built offset — a token the caller
+cannot use is the same failure as a token that never arrives.
+
+Pinned by four sub-tests in `TestPostgreSQLConnector_CRUD` (a full page hands
+out a token; following the token walks every row exactly once; the last page
+reports that it is the last; a non-positive limit ends the walk) and by
+`TestPostgreSQLConnector_DatabasePaths/List offers a next page while rows
+remain`. Mutations: restoring the post-loop probe fails three sub-tests;
+dropping the empty-page guard fails the non-positive-limit one.
 
 ---
 
@@ -3314,42 +3350,76 @@ should derive cache hit-rate from `upstream="n/a"`.
 
 ## 76. A released `NormalizedResponse` reads as `(nil, nil)`, exactly like a nil one
 
-**Status:** open. **Severity: medium.** `common/response.go:309` and `:488`.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Silent wrong answer on the read path. Pinned by
+`common/response_released_test.go`.
 
-`NormalizedResponse.JsonRpcResponse` returns `(nil, nil)` for a nil receiver.
-It returns the same pair for a NON-nil receiver that has been released:
+`NormalizedResponse.JsonRpcResponse` returned `(nil, nil)` for a nil receiver.
+It returned the same pair for a NON-nil receiver that had been released:
 
     r.releaseOnce.Do(func() {
         ...
-        r.jsonRpcResponse.Store(nil)      // response.go:503
+        r.jsonRpcResponse.Store(nil)      // response.go
         ...
     })
 
-`Release` stores nil over the cached pointer. A later read finds nothing
-cached, and `parseOnce` has already run, so `parseOnce.Do` is a no-op and the
-function returns `r.jsonRpcResponse.Load(), nil` — nil, and no error saying
+`Release` stores nil over the cached pointer. A later read found nothing
+cached, and `parseOnce` had already run, so `parseOnce.Do` was a no-op and the
+function returned `r.jsonRpcResponse.Load(), nil` — nil, and no error saying
 why.
 
-Two callers therefore cannot tell "no response" from "the response was freed
-under me". `classifyAndHashResponse` (`consensus/analysis.go`) files it as an
+Two callers therefore could not tell "no response" from "the response was freed
+under me". `classifyAndHashResponse` (`consensus/analysis.go`) filed it as an
 infrastructure error with no error attached, which is the shape that produced
 bug 69. The state poller dereferenced it, which was bug 66.
 
-The ordering matters: releasing BEFORE the first parse leaves `parseOnce`
-armed, so the next read parses a nil body and gets a real "no body available to
-parse" JSON-RPC error. Releasing AFTER the first parse produces the silent nil.
-The same object answers differently depending on when it was released.
+The ordering mattered too. Releasing BEFORE the first parse left `parseOnce`
+armed, so the next read parsed a nil body and got a real "no body available to
+parse" JSON-RPC error. Releasing AFTER the first parse produced the silent nil.
+The same object answered differently depending on when it was released.
 
-Weaken it by making the released state say so: return a typed
-"response already released" error instead of `(nil, nil)`. Then every existing
-`if err != nil` guard catches it, and no caller has to add a nil check it
-currently forgets.
+The fix adds one sentinel and one flag, and applies one rule at three sites.
+`common.ErrResponseReleased` is a plain `errors.New` value, in the style the
+package already uses for `ErrDynamicTimeoutExceeded`. A `released atomic.Bool`
+on the struct records the release. `Release` sets it INSIDE `releaseOnce.Do`
+and BEFORE it clears the cached pointer, so a reader that finds nothing cached
+after a completed release always sees the flag.
+
+Three readers answered a released response as if it were merely empty, and all
+three now name it. `JsonRpcResponse` returned `(nil, nil)`. `MarshalJSON`
+returned `(nil, nil)`. `WriteTo` returned a generic "unexpected empty response",
+which sent a reader hunting for a missing body instead of the release that freed
+it. Each one keeps its cached-pointer fast path first, so a reader that races a
+release still gets the live pointer it loaded, and each one checks the flag
+before it falls through to its old answer.
+
+The release-order split closes as a side effect. The flag check sits ahead of
+`parseOnce`, so a release before the first parse no longer parses a body that
+`Release` already closed. Both orders now report `ErrResponseReleased`.
+
+`IsObjectNull` drops the error on purpose (`jrr, _ :=`) and is unchanged: a
+released response still has no object, so it still answers true.
+
+Four mutations on 2026-08-22 proved the fix. Removing the flag check from
+`JsonRpcResponse` failed three tests. Removing it from `MarshalJSON` failed one.
+Removing it from `WriteTo` failed one. Removing `r.released.Store(true)` from
+`Release` failed five.
+
+One existing test pinned the defect and needed a correction, not a workaround.
+`unreadableResponse` in `consensus/executor_nil_winner_test.go` builds the
+payload-free participant that bug 69 needs, and it did so by releasing a parsed
+response and asserting the next read returned `(nil, nil)`. That assertion was
+the defect. The fixture now asserts `ErrResponseReleased`. The bug-69 shape
+survives, because `resultToJsonRpcResponse` (`consensus/analysis.go`) drops the
+error and hands the nil payload straight to `classifyAndHashResponse`.
 
 Found while fixing bugs 66 and 69, which are both consequences of this.
 
 ## 77. `(*executor).Run` still has one silent `(nil, nil)` route
 
-**Status:** open. **Severity: low.** `consensus/executor.go:164-166`.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** No test pins this fix. The branch is unreachable without a mutation, so
+a test could only reach it by changing the code it tests.
 
     out := e.executeConsensus(...)
     if out == nil {
@@ -3357,17 +3427,21 @@ Found while fixing bugs 66 and 69, which are both consequences of this.
     }
 
 `executeConsensus` returns `outcome.winner`, and `runAnalyzer` assigns
-`winner` on the same two lines that assign `analysis`
-(`executor.go:545-546` and `:578-579`). `determineWinner` never returns nil —
-every rule action builds a `slotResult`, and the unmatched fallthrough builds a
-dispute error. So the branch cannot fire today.
+`winner` on the same two lines that assign `analysis`. `determineWinner` never
+returns nil — every rule action builds a `slotResult`, and the unmatched
+fallthrough builds a dispute error. So the branch cannot fire today.
 
-It is worth deleting anyway. It is the last route by which `Run` can hand the
-network layer an empty body with no explanation, and it converts a future
-regression — one new rule action that returns nil — into exactly the silent
-outcome bug 69 was. Every other no-winner case in this package produces a named
-error. An `ErrConsensusLowParticipants` here would cost nothing and would fail
-loud instead.
+It stays anyway, and it stays loud. It was the last route by which `Run` could
+hand the network layer an empty body with no explanation, which is exactly the
+silent outcome bug 69 was. Deleting it would drop the guard; keeping it silent
+would keep the trap. A named error does neither: one future rule action that
+returns nil becomes a loud failure instead of a silent wrong answer.
+
+The branch now returns `common.NewErrConsensusDispute("consensus produced no
+result", nil, nil)`. That is the same constructor the package's own no-winner
+fallthrough uses at the end of `determineWinner`, so `Run` commits to no new
+error shape. A comment on the branch records that it is unreachable today and
+says why it stays.
 
 Found while fixing bug 69.
 
