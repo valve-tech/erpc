@@ -212,13 +212,18 @@ answered 200 and blamed on the server (29), `"0x"` normalised to the zero hash
 that never hands out its next-page token so the caller believes it saw
 everything (24).
 
-**2 — a crash or a leak (5).**
-9, 26, 45, 58, 109.
-Entries 9 and 58 are one-line nil dereferences, and both are cheap: 9's two
-sibling constructors already carry the guard it lacks, and 58 only has to check
-its error before it uses the client. Entry 26 is a real send-on-closed panic
-that **cannot be pinned by a test** — a panic in a background goroutine kills
-the test binary. Entry 109's second half is still open.
+**2 — a crash or a leak (2 left of 5).**
+~~9~~, **26**, **45**, ~~58~~, ~~109~~.
+Entries 9, 58 and 109 are fixed. 58 turned out to hold FOUR panics in one
+expression, not the three the entry named — the fourth (`Proxy` returns
+`(nil, nil)` for "send this one direct", and the result was dereferenced) came
+out of writing the test. Entry 109's second half is fixed by ownership rather
+than lifetime: nothing can end a task that ignores its context, so the
+initializer stops lending it the caller's logger instead.
+
+Entry 26 is a real send-on-closed panic that **cannot be pinned by a test** — a
+panic in a background goroutine kills the test binary. Entry 45 is the
+chainstack half of 42.
 
 **3 — a control is silently not applied, or gives a wrong verdict (9).**
 8, 31, 44, 49, 59, 73, 97, 114, 128.
@@ -246,6 +251,8 @@ is low alone and high next to 99.
    last-block-wins inference "may be intended". If it is, validation should
    reject the ambiguous shape rather than silently pick one.
 2. **The fork's own code (4 entries).** No rebase debt.
-3. **Rank 1 and rank 2 (16 entries).** Wrong answers and crashes.
-4. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.
-5. Ranks 3 to 5 as capacity allows.
+3. **Rank 2 (2 left).** ~~9, 58, 109~~ done. 26 cannot be pinned by a test;
+   45 is the chainstack half of 42.
+4. **Rank 1 (11 entries).** A client gets a wrong or broken answer.
+5. ~~Decide on the closures.~~ **Done** — 14 applied, 4 rejected on review.
+6. Ranks 3 to 5 as capacity allows.
