@@ -893,6 +893,18 @@ type ErrUpstreamMalformedResponse struct {
 }
 
 var NewErrUpstreamMalformedResponse = func(cause error, upstream Upstream) error {
+	// Guard the upstream, the way the two sibling constructors already do
+	// (NewErrEndpointMissingData, NewErrEndpointContentValidation). This one
+	// called upstream.Id() unguarded, so building an error to describe a
+	// malformed response would itself panic when the upstream is not known.
+	//
+	// An error constructor is the worst place to crash: it runs on the path
+	// that is ALREADY going wrong, so the panic replaces the diagnosis of the
+	// original fault with a stack trace about the reporting of it.
+	details := map[string]interface{}{}
+	if upstream != nil {
+		details["upstreamId"] = upstream.Id()
+	}
 	return &ErrUpstreamMalformedResponse{
 		UpstreamAwareError: UpstreamAwareError{
 			upstream: upstream,
@@ -901,9 +913,7 @@ var NewErrUpstreamMalformedResponse = func(cause error, upstream Upstream) error
 			Code:    "ErrUpstreamMalformedResponse",
 			Message: "malformed response from upstream",
 			Cause:   cause,
-			Details: map[string]interface{}{
-				"upstreamId": upstream.Id(),
-			},
+			Details: details,
 		},
 	}
 }
