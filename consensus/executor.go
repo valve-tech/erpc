@@ -162,7 +162,15 @@ func (e *executor) Run(
 		consensusSpan,
 	)
 	if out == nil {
-		return nil, nil
+		// Unreachable today: determineWinner always builds a slotResult, and
+		// its unmatched fallthrough builds a dispute error. The branch used to
+		// return (nil, nil), which was the last route by which Run could hand
+		// the network layer an empty body with no explanation — the silent
+		// shape that produced bug 69. It stays, and it stays loud: a future
+		// rule action that returns nil becomes a named failure here instead of
+		// a silent wrong answer. It uses the same constructor as the package's
+		// own no-winner fallthrough.
+		return nil, common.NewErrConsensusDispute("consensus produced no result", nil, nil)
 	}
 	return out.Result, out.Error
 }

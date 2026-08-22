@@ -242,38 +242,97 @@ func TestPostgreSQLConnector_CRUD(t *testing.T) {
 		assert.Equal(t, total, listed, "a large enough limit must return every row")
 	})
 
-	// TestPostgreSQL List pagination token — PINS A LIVE DEFECT.
+	// List pagination — the token is the ONLY way a caller learns there is
+	// more to read. It used to always come back empty: the query asked for
+	// limit+1 rows so the scan loop could detect a next page, the loop's
+	// break consumed that extra row without recording it, and the probe
+	// below the loop then called rows.Next() a second time — which needs a
+	// limit+2-th row the query never fetched. So erpc_listApiKeys on a
+	// PostgreSQL store returned one page and reported "no more pages", and
+	// a caller looping until the token is empty stopped there believing it
+	// had seen everything.
 	//
-	// Defect: data/postgresql.go:1194 List never returns a pagination token.
-	// The query at :1241 asks for limit+1 rows to detect whether a next page
-	// exists. The scan loop at :1252 calls rows.Next() a (limit+1)-th time and
-	// breaks at :1254 without recording that row — so the extra row is already
-	// consumed. The "is there more?" probe at :1284 then calls rows.Next()
-	// again, which would need a (limit+2)-th row that the query never fetched.
-	// It therefore always returns false and nextToken stays empty.
-	//
-	// What an operator observes: erpc_admin_listApiKeys (erpc/admin.go:240) on
-	// a PostgreSQL store returns at most `limit` keys and always reports "no
-	// more pages". An operator with more keys than the page size cannot
-	// enumerate the rest, and a caller that loops until the token is empty
-	// stops after one page while silently believing it saw everything.
-	//
-	// This test locks today's behaviour in place. Do not "fix" the test — fix
-	// the extra-row probe in List.
-	t.Run("List never issues a pagination token (defect pinned)", func(t *testing.T) {
-		total := 0
+	// Each sub-test below measures one page against the whole table, so a
+	// token that stops arriving is caught, and so is one that never stops.
+	t.Run("List hands out a token whenever a page is full", func(t *testing.T) {
 		all, _, err := connector.List(ctx, ConnectorMainIndex, 1000, "")
 		require.NoError(t, err)
-		total = len(all)
+		total := len(all)
 		require.Greater(t, total, 5, "test setup: the table must hold more rows than the page limit below")
 
 		for _, limit := range []int{1, 2, 5} {
 			results, next, err := connector.List(ctx, ConnectorMainIndex, limit, "")
 			require.NoError(t, err)
 			require.Len(t, results, limit, "the page must be full, so a next page certainly exists")
-			assert.Equal(t, "", next,
-				"DEFECT PINNED: %d of %d rows returned, yet List reports no next page", limit, total)
+			assert.NotEmpty(t, next,
+				"%d of %d rows returned, so List must hand out a token for the rest", limit, total)
 		}
+	})
+
+	t.Run("following the token walks every row exactly once", func(t *testing.T) {
+		all, _, err := connector.List(ctx, ConnectorMainIndex, 1000, "")
+		require.NoError(t, err)
+		total := len(all)
+		require.Greater(t, total, 5, "test setup: the table must hold more rows than the page size")
+
+		// A caller's real loop: read a page, follow the token, stop when it
+		// is empty. The page size does not divide the row count evenly, so
+		// the last page is partial — that is the case that must end the walk.
+		const pageSize = 3
+		seen := make(map[string]int, total)
+		token := ""
+		pages := 0
+		for {
+			results, next, err := connector.List(ctx, ConnectorMainIndex, pageSize, token)
+			require.NoError(t, err)
+			pages++
+			require.LessOrEqual(t, pages, total+2, "the walk does not terminate — the token keeps naming a next page")
+			for _, kv := range results {
+				seen[kv.PartitionKey+"/"+kv.RangeKey]++
+			}
+			if next == "" {
+				break
+			}
+			require.NotEqual(t, token, next, "the token must advance, or the caller reads the same page forever")
+			token = next
+		}
+
+		assert.Len(t, seen, total, "the walk must reach every row the unpaged read returned")
+		for key, times := range seen {
+			assert.Equal(t, 1, times, "row %s was handed out %d times", key, times)
+		}
+		assert.Greater(t, pages, 1, "test setup: %d rows at %d per page must take more than one page", total, pageSize)
+	})
+
+	t.Run("the last page reports that it is the last", func(t *testing.T) {
+		all, _, err := connector.List(ctx, ConnectorMainIndex, 1000, "")
+		require.NoError(t, err)
+		total := len(all)
+
+		// Ask for exactly the whole table. There is no limit+1-th row, so
+		// there is no next page, and a token here would send the caller
+		// round again for nothing.
+		results, next, err := connector.List(ctx, ConnectorMainIndex, total, "")
+		require.NoError(t, err)
+		require.Len(t, results, total)
+		assert.Empty(t, next, "a page that exhausted the table must not name a next one")
+
+		// One row short of the table IS a full page with more behind it.
+		results, next, err = connector.List(ctx, ConnectorMainIndex, total-1, "")
+		require.NoError(t, err)
+		require.Len(t, results, total-1)
+		assert.NotEmpty(t, next, "one row is still unread, so the token must say so")
+	})
+
+	t.Run("a non-positive limit ends the walk instead of repeating it", func(t *testing.T) {
+		// A limit of 0 asks for no rows. A token here would name the offset
+		// the caller just asked for, so a caller looping until the token is
+		// empty would never stop. Reading nothing forever is worse than
+		// reading nothing once.
+		results, next, err := connector.List(ctx, ConnectorMainIndex, 0, "")
+		require.NoError(t, err)
+		assert.Empty(t, results)
+		assert.Empty(t, next, "an empty page must not hand out a token")
 	})
 
 	t.Run("List rejects a malformed pagination token", func(t *testing.T) {

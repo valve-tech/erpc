@@ -29,11 +29,17 @@ import (
 // Logged as upstream bug 69. This test drives the whole executor, because
 // (nil, nil) at the Run boundary is the fault an operator meets.
 
-// unreadableResponse returns a NormalizedResponse whose JsonRpcResponse is
-// (nil, nil). Release() frees the parsed payload and clears the cached
-// pointer, so a later read finds nothing to report and nothing to fail on.
-// The consensus executor releases responses itself, so this is a shape the
-// analysis really can meet.
+// unreadableResponse returns a NormalizedResponse that carries no readable
+// payload. Release() frees the parsed payload and clears the cached pointer,
+// so a later read has nothing to hand back. The consensus executor releases
+// responses itself, so this is a shape the analysis really can meet.
+//
+// This fixture used to assert that the read after the release returned
+// (nil, nil). That assertion pinned bug 76: a released response answered
+// exactly like an absent one. The read now reports ErrResponseReleased. The
+// bug-69 shape survives, because resultToJsonRpcResponse (analysis.go) drops
+// the error and passes the nil payload straight to classifyAndHashResponse,
+// which files it under ResponseTypeInfrastructureError with no FirstError.
 func unreadableResponse(t *testing.T) *common.NormalizedResponse {
 	t.Helper()
 	r := common.NewNormalizedResponse().WithBody(
@@ -44,8 +50,9 @@ func unreadableResponse(t *testing.T) *common.NormalizedResponse {
 	r.Release()
 
 	jrr, err := r.JsonRpcResponse(context.Background())
-	require.NoError(t, err)
-	require.Nil(t, jrr, "the fixture must really produce a payload-free, error-free response")
+	require.ErrorIs(t, err, common.ErrResponseReleased,
+		"a released response must name the release")
+	require.Nil(t, jrr, "the fixture must really produce a payload-free response")
 	return r
 }
 
