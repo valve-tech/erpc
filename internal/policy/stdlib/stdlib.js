@@ -273,6 +273,35 @@
     return neg ? !m : m;
   }
 
+  // durationOr reads a duration knob and falls back to `fallback` when the
+  // operator wrote something the parser cannot read. An unreadable knob must
+  // never buy LESS protection than an absent one: `minSwitchInterval: '30 s'`
+  // used to become a 0 ms cooldown, which switches stickiness off entirely,
+  // while omitting the key gave 30 seconds.
+  //
+  // Falling back is only half of it. The two events must stay distinguishable,
+  // so the operator learns which one they caused. The eval runs on every tick,
+  // though, and a line per tick buries the message it carries.
+  //
+  // So remember the LAST spelling warned about, not the set of them. A policy
+  // names its knobs in a static expression, so one string suppresses the repeat
+  // that matters. A set would do no better on that case and would grow without
+  // a bound whenever a policy computes its knob from the request — which it
+  // may: `minSwitchInterval` is an expression, not a literal.
+  let _lastDurationWarning = '';
+  function durationOr(value, fallback, knob) {
+    const ms = durationMs(value);
+    if (ms != null) return ms;
+    if (value == null) return fallback;
+    const seen = knob + '=' + String(value);
+    if (_lastDurationWarning !== seen) {
+      _lastDurationWarning = seen;
+      console.warn('[policy] cannot read ' + knob + ' ' + JSON.stringify(value) +
+                   ', using ' + fallback + 'ms');
+    }
+    return fallback;
+  }
+
   // matchAny tests value against a pattern, an array of patterns (OR), or null.
   function matchAny(pat, value) {
     if (pat == null) return true;
@@ -812,7 +841,7 @@
   define('stickyPrimary', function (opts) {
     opts = opts || {};
     const hysteresis  = (opts.hysteresis != null) ? opts.hysteresis : 0.10;
-    const minSwitchMs = (opts.minSwitchInterval != null) ? durationMs(opts.minSwitchInterval) : 30_000;
+    const minSwitchMs = durationOr(opts.minSwitchInterval, 30_000, 'minSwitchInterval');
     const scope       = opts.scope || 'network';
     if (this.length === 0) return this.slice();
 

@@ -4361,15 +4361,14 @@ here shows a client sending `0X`.
 
 ## 121. A typo in `minSwitchInterval` silently disables the anti-flap cooldown
 
-**Status:** open. **Severity: medium.** It turns a one-character config mistake
-into fleet-wide primary flapping, with no log line and no metric. Pinned by
-`internal/policy/stdlib/duration_knob_test.go:TestStickyPrimary_MinSwitchInterval_DecidesTheHandover`,
-whose `UnparseableString` and `WrongType` cases assert today's handover.
+**Status: FIXED in the fork.** **Severity: medium.** It turned a one-character
+config mistake into fleet-wide primary flapping, with no log line and no
+metric.
 
-`internal/policy/stdlib/install.go` — the `durationMs` global returns 0 for
-every value it cannot read: a string `time.ParseDuration` refuses, an empty
-string, a boolean, an object. `internal/policy/stdlib/stdlib.js` feeds it the operator's
-`minSwitchInterval` and uses the result as the sticky cooldown:
+`internal/policy/stdlib/install.go` — the `durationMs` global returned 0 for
+every value it could not read: a string `time.ParseDuration` refuses, an empty
+string, a boolean, an object. `internal/policy/stdlib/stdlib.js` fed it the
+operator's `minSwitchInterval` and used the result as the sticky cooldown:
 
     const minSwitchMs = (opts.minSwitchInterval != null) ? durationMs(opts.minSwitchInterval) : 30_000;
 
@@ -4377,25 +4376,64 @@ A cooldown of 0 makes the elapsed-time guard `(ctx.now - lastSwitchAt) <
 minSwitchMs` always false, so every tick re-decides the primary on the score
 gap alone. During an incident that gap is large, which is exactly the case the
 cooldown exists for. `stickyPrimary({ minSwitchInterval: '30 s' })` and
-`stickyPrimary({ minSwitchInterval: '30sec' })` therefore behave as if sticky
+`stickyPrimary({ minSwitchInterval: '30sec' })` therefore behaved as if sticky
 were switched off.
 
-The absent-value default is 30 seconds, so an operator who writes the knob
-wrongly gets LESS protection than one who omits it. That is the part worth
-fixing. Parse failure is not the same event as absence, and the code collapses
-the two. Report the failure — the engine already has a logger on the eval path
-— or fall back to the same 30 seconds absence gets. Silent zero is the one
-answer that cannot be right.
+The absent-value default is 30 seconds, so an operator who wrote the knob
+wrongly got LESS protection than one who omitted it. Parse failure is not the
+same event as absence, and the code collapsed the two.
+
+**The fix.** `durationMs` now answers `null` for a value that names no
+duration, and a number when it can read one. Null is not zero: a knob the
+parser cannot read and a cooldown of zero are different instructions, and zero
+is the riskier of the two. Deciding what an unreadable value COSTS is left to
+the caller, because only the caller knows what absence means for its own knob.
+The helper stopped inventing a number, and that is all it changed.
+
+`stdlib.js` gained one helper, `durationOr(value, fallback, knob)`, and
+`stickyPrimary` now reads its cooldown through it. An unreadable spelling lands
+where an absent key lands — 30 seconds — and `console.warn` names the knob and
+quotes what the operator typed. The warning does not repeat: the eval runs on
+every tick, and a line per tick buries the message it carries.
+
+The suppression remembers the LAST spelling warned about, not the set of them.
+A set reads as the obvious choice and is the wrong one here. It would do no
+better on the case that matters — a policy names its knobs in a static
+expression, so there is one spelling — and it would grow without a bound
+whenever a policy computes its knob from the request, which it may:
+`minSwitchInterval` is an expression, not a literal.
+
+NaN and ±Inf are unreadable too. They are ordinary JS numbers, `durationMs(a /
+b)` produces one whenever `b` is 0, and converting them to `int64` is undefined
+in Go — so they must not become a cooldown of whatever the conversion happens
+to produce.
+
+An explicit `0` still means what it says. It is readable, so it survives as a
+zero cooldown and every tick reconsiders the primary. That distinction is the
+whole point of the entry, and a test asserts it.
+
+The pinning test `TestStickyPrimary_MinSwitchInterval_DecidesTheHandover` kept
+its name and changed its expectations, which is the change: its
+`UnparseableString`, `EmptyString` and `WrongType` rows used to assert the
+handover and now assert the hold. `SpaceInTheUnit`, `NotANumber` and `Infinity`
+are new. A second test,
+`TestStickyPrimary_MinSwitchInterval_ReportsASpellingItCannotRead`, asserts the
+other half — that an unreadable knob and an absent knob stay distinguishable to
+the operator even though they now route the same traffic. Three mutations
+verified it: an unreadable string returning 0 again, the warning removed, and
+the once-per-spelling guard removed. Each failed the tests that name it.
+
+The public TypeScript declaration changed with the code:
+`durationMs(d: Duration): number | null` in
+`typescript/config/src/types/policyEval.ts`. `docs/pages/config/projects/selection-policies.mdx`
+carries the behaviour as edge case 17.
 
 ## 125. An unreadable `LOG_LEVEL` silences the process instead of defaulting to debug
 
-**Status:** open. Pinned by
-`cmd/erpc/cli_test.go:TestLogLevelEnv_InvalidValueSilencesLogging`.
-**Severity: medium.** The operator loses every log line at the moment the
-config is wrong.
+**Status: FIXED in the fork.** **Severity: medium.** The operator lost every
+log line at the moment their config was wrong.
 
-`cmd/erpc/main.go:354` reads the `LOG_LEVEL` environment variable on every
-command:
+`cmd/erpc/main.go` read the `LOG_LEVEL` environment variable on every command:
 
     level, err := zerolog.ParseLevel(lvl)
     if err != nil {
@@ -4406,18 +4444,35 @@ command:
     zerolog.SetGlobalLevel(level)
 
 `zerolog.ParseLevel` returns `NoLevel` with the error. The `SetGlobalLevel`
-call sits OUTSIDE the else branch, so the failure path installs `NoLevel` as
-the global floor. `NoLevel` is 6. Debug, info, warn and error are all below
-it, so eRPC drops every one of them. The message promises debug and the code
-delivers silence.
+call sat OUTSIDE the else branch, so the failure path installed `NoLevel` as
+the global floor. `NoLevel` is 6. Debug, info, warn and error are all below it,
+so eRPC dropped every one of them. The message promised debug and the code
+delivered silence — including the silence of that warning.
 
-The same file gets this right at `main.go:59`, where the identical parse only
-calls `SetGlobalLevel` in the else branch. One `LOG_LEVEL=warining` typo
-therefore blinds the operator, and the warning that explains it is itself
-suppressed on any writer that respects the global level.
+**The fix.** `SetGlobalLevel` moved into the else branch. `LOG_LEVEL` is an
+override, and an override the process cannot read now costs the operator
+nothing but the override itself: the level stays exactly where an unset
+`LOG_LEVEL` leaves it, which is what the same file already did in `init`. The
+message stopped promising a level the code does not install, and names the one
+that stays in force instead.
 
-Fix: move `SetGlobalLevel(level)` into the else branch, or set
-`zerolog.DebugLevel` on the error path so the code does what the message says.
+Note what the fix did NOT do. `erpc/init.go` answers the same question a
+different way, by installing `zerolog.DebugLevel` on the failure path. Matching
+that here would have flipped an operator whose config says `warn` into debug
+because they mistyped an environment variable. Falling back to what absence
+gives commits to less and surprises less.
+
+`cmd/erpc/cli_test.go:TestLogLevelEnv_InvalidValueSilencesLogging` asserted the
+defect and is replaced by
+`TestLogLevelEnv_AnUnreadableValueCostsNothingButTheOverride`, which asserts the
+rule instead: an unreadable value lands where an absent value lands, says so,
+and a readable value still overrides. It measures the three cases against each
+other rather than against a constant.
+
+The test calls `getConfig` directly. Neither `dump` nor `validate` can observe
+this block — both silence logging before they load the config — and `start` on
+a loadable config never returns. A mutation restoring the old code fails the
+test.
 
 ## 126. The legacy translator rewrites network-level keys with no warning
 
@@ -6076,3 +6131,117 @@ to run the `erpc` package directly to get a result it could trust.
 
 Fix: `ERPC_TEST_BIN := $(CURDIR)/.erpc.test`. Unique per worktree, stable
 across repeat runs in the same worktree, and added to `.gitignore`.
+
+# Found while fixing the config-edge family, 2026-08-21
+
+## 173. The docs pin source line numbers, and a rebase moves them in silence
+
+**Status:** open. **Severity: low for the product, medium for anyone who
+trusts the docs.** No operator gets a wrong answer from eRPC. A reader
+following a citation lands on unrelated code and has no way to tell.
+
+`docs/pages/` carries **622** permalinks with a line anchor, in the form
+`https://github.com/erpc/erpc/blob/main/<file>#L<n>`. They are the docs'
+evidence: `CONTRIBUTING.md` requires every claim to be grounded in code and
+cited this way. Nothing checks them.
+
+Two failure modes, and only the first is mechanical. A line past the end of its
+file is detectable, and there is exactly one today:
+`docs/pages/operation/cordoning.mdx:279` cites `upstream/upstream.go:L1568-1580`
+in a file with 1527 lines. The other 621 are in range, which proves nothing —
+an in-range anchor still points wherever the file has drifted to.
+
+Measured on one page. `docs/pages/config/projects/selection-policies.mdx` was
+being edited for entry 121, so its citations were checked by hand: of 10, four
+land on unrelated code. `internal/policy/eval.go:L442`, cited for
+`resolveScoreMultipliers`, is a bare `//`. `common/errors.go:L1823`, cited for
+`ErrUpstreamExcludedByPolicy`, is `} else {`. The page's own "Defaults from
+`stdlib.js:L725-727`" pointed at score-weight code, not the `stickyPrimary`
+defaults it names; that one is now corrected, and the other three are not.
+
+The fork makes this worse, not better. It rebases onto `erpc/erpc`, so every
+upstream commit that inserts a line above a cited one moves the target without
+touching the citation. The anchor keeps resolving, and the reader keeps
+believing it.
+
+The rot is faster than that argument needs. The corrected citation above went
+stale again inside the same session: a later edit to `durationOr` added five
+lines above it, so `L837-839` became `L843-845` between one commit and the
+next. It was corrected a second time. Nothing would have caught it.
+
+The cheap gate catches the past-EOF case only. The durable fix is to stop
+pinning lines: cite the SYMBOL, as
+`internal/policy/eval.go:resolveScoreMultipliers`, which the page's own
+edge-case list already does in places and which a rebase cannot move. That
+weakens the citation to what the docs actually need — where to look, not which
+line to look at.
+
+## 174. `erpc.Init` promises debug for an unreadable `logLevel` and assigns to a dead variable
+
+**Status:** open. **Severity: low.** The behaviour is right. The message that
+describes it is wrong, and the line that would have made it right does nothing.
+
+Found while fixing 125, in the file that entry cites as getting it right.
+`erpc/init.go:35`:
+
+    level, err := zerolog.ParseLevel(cfg.LogLevel)
+    if err != nil {
+        logger.Warn().Msgf("invalid log level '%s', defaulting to 'debug': %s", cfg.LogLevel, err)
+        level = zerolog.DebugLevel
+    } else {
+        logger = logger.Level(level)
+    }
+
+`level` is never read after this block — `grep -n '\blevel\b' erpc/init.go`
+returns those five lines and nothing else. So `level = zerolog.DebugLevel` is a
+dead store. The failure path leaves `logger` at whatever level the caller
+handed it, which is the same "an unreadable value costs what an absent value
+costs" outcome 125 now has in `cmd/erpc/main.go`. The behaviour is the one
+worth having.
+
+The message is the defect. It tells the operator to expect debug output, and
+debug output is exactly what they will not get. They then go looking for a
+second cause.
+
+**Do not patch this.** Two lines in `erpc/init.go` buy a permanent rebase
+conflict in the fork's startup path, and the product behaves correctly today.
+Recorded so the next reader does not "fix" the dead store by wiring it up,
+which would turn a mistyped `logLevel` into a debug firehose. If upstream ever
+touches this block, correct the message then: it keeps the level it already
+has, and should say so.
+
+## 175. The `eslint` commit hook has never run, because nothing configures eslint
+
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: medium
+for the fork's other gates**, none for the product.
+
+`.pre-commit-config.yaml` has installed `mirrors-eslint` since `ad6d32d2`
+("apply security best practices"). No eslint configuration exists anywhere in
+the tree — no `.eslintrc*`, no `eslint.config.*`, not in `docs/`, not in
+`typescript/config/`. eslint 8 treats a missing config as a fatal error and
+exits 2.
+
+So the hook fails on every commit that touches a `.js` or `.ts` file, and it
+has always failed. It was found the ordinary way: this session edited
+`internal/policy/stdlib/stdlib.js` for entry 121 and could not commit.
+
+The damage is not the missing lint. It is that the only way past the hook is
+`--no-verify`, which skips **every** hook — including the conflict-marker
+check this repository added after three merges left markers in a tracked file
+and a reviewer, not the author, found them twice. A gate that fails on day one
+does not get fixed. It gets bypassed, and it takes the working gates with it.
+
+**The fix.** `.eslintrc.json` at the root, enabling **no rules**. It sets
+`ecmaVersion: 2022` and `sourceType: module`, which is enough for eslint to
+parse. The hook now reports syntax errors and nothing else.
+
+That is not a placeholder. `stdlib.js` is `//go:embed`-ed and evaluated by
+sobek at run time, so a syntax error in it reaches production instead of
+failing a build — this is the one file in the tree where a parse check earns
+its place. Verified both ways: the hook passes on all 50 tracked JS and TS
+files, and fails on a file containing `const x = {;`.
+
+Enabling actual rules was considered and rejected. Nothing forces it: there is
+no observed defect a rule would have caught, and a rule set applied to 50
+unlinted files blocks unrelated work on the day it lands, which is how this
+entry started.

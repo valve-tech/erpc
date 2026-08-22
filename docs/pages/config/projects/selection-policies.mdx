@@ -429,12 +429,12 @@ Defaults from [`internal/policy/eval.go:L793-799`](https://github.com/erpc/erpc/
 
 #### `stickyPrimary` options (JS)
 
-Defaults from [`internal/policy/stdlib/stdlib.js:L725-727`](https://github.com/erpc/erpc/blob/main/internal/policy/stdlib/stdlib.js#L725-L727).
+Defaults from [`internal/policy/stdlib/stdlib.js:L843-845`](https://github.com/erpc/erpc/blob/main/internal/policy/stdlib/stdlib.js#L843-L845).
 
 | Option | Default | Notes |
 |---|---|---|
 | `hysteresis` | `0.10` (default policy uses `0.30`) | Challenger must exceed incumbent score by this fraction to trigger switch. |
-| `minSwitchInterval` | `"30s"` | Cooldown after a switch. No switching during cooldown regardless of score gap. |
+| `minSwitchInterval` | `"30s"` | Cooldown after a switch. No switching during cooldown regardless of score gap. A value the parser cannot read falls back to this default and logs one `WARN` — see edge case 17. |
 | `scope` | `"network"` | `"network"` \| `"network-method"` \| `"network-finality"` \| `"network-method-finality"`. Coarser scopes share the sticky register across slots. |
 
 #### `latencyDeviationAbove` options (JS)
@@ -735,6 +735,8 @@ reserve upstreams to also keep shadow-probe traffic off them while benched:
 15. **`ErrUpstreamExcludedByPolicy` error code exists but has no production call site.** Defined at [`common/errors.go:L1823-L1836`](https://github.com/erpc/erpc/blob/main/common/errors.go#L1823-L1836); error code string: `"ErrUpstreamExcludedByPolicy"`. The health tracker silently ignores it (does NOT penalize the upstream's error rate). The policy engine achieves exclusion structurally — upstreams absent from the ordered list are never attempted by `NextUpstream` — rather than by returning this error. The error type is forward-compatible scaffolding.
 
 16. **Idle slot eviction sweep runs every 1 minute.** The engine's `sweepIdleSlots` fires every `engineSweepInterval = 1 minute`. A narrow slot with `idleEvictionAfter = 1 h` may persist for up to 1 h + 1 min after its last access. The health tracker's own idle eviction threshold is separate and shorter: `DefaultIdleEvictionAfter = 30 minutes` for per-`(upstream, method, finality)` metric entries. [`internal/policy/engine.go:engineSweepInterval:L208`](https://github.com/erpc/erpc/blob/main/internal/policy/engine.go#L208)
+
+17. **An unreadable duration knob falls back to the default, it does not become zero.** `durationMs` answers `null` for a value that names no duration — a string `time.ParseDuration` refuses (`'30 s'`, `'30sec'`), an empty string, a boolean, `NaN`, `±Inf` — and `stickyPrimary` then uses its own `30s` default and logs `WARN [policy] cannot read minSwitchInterval …` once per spelling, not once per tick. An explicit `0` is readable and still means "reconsider the primary every tick". Before this, an unreadable value became `0 ms`, which switched stickiness off entirely: writing the knob wrongly bought LESS protection than leaving it out. [`internal/policy/stdlib/install.go:durationMs`](https://github.com/erpc/erpc/blob/main/internal/policy/stdlib/install.go), [`internal/policy/stdlib/stdlib.js:durationOr`](https://github.com/erpc/erpc/blob/main/internal/policy/stdlib/stdlib.js)
 
 ### Observability
 

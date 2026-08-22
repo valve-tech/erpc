@@ -1,13 +1,17 @@
 package stdlib_test
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/health"
 	"github.com/erpc/erpc/internal/policy"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,9 +74,17 @@ func degradeIncumbent(tracker *health.Tracker, ups []common.Upstream) {
 }
 
 // TestStickyPrimary_MinSwitchInterval_DecidesTheHandover walks every spelling an
-// operator can write. A spelling the Go parser understands buys the incumbent a
-// cooldown; a spelling it does not understand becomes 0 ms, and the challenger
-// takes the traffic on the next tick.
+// operator can write. A spelling the Go parser can read buys the incumbent the
+// cooldown it names; a spelling it cannot read buys the same cooldown that
+// omitting the key buys, which is 30 seconds.
+//
+// Bug 121. That last row used to read differently. An unreadable spelling
+// became 0 ms, the elapsed-time guard `(ctx.now - lastSwitchAt) < minSwitchMs`
+// was then always false, and every tick re-decided the primary on the score gap
+// alone — during an incident the gap is large, which is the exact case the
+// cooldown exists for. So `minSwitchInterval: '30 s'` switched stickiness off,
+// and the operator who wrote the knob wrongly got LESS protection than the one
+// who left it out.
 func TestStickyPrimary_MinSwitchInterval_DecidesTheHandover(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -97,24 +109,36 @@ func TestStickyPrimary_MinSwitchInterval_DecidesTheHandover(t *testing.T) {
 			why: "a fractional millisecond count truncates, it does not degrade to no cooldown",
 		},
 		{
-			name: "EmptyString", js: `''`, primary: "bbb",
-			why: "an empty duration is no cooldown, so the challenger takes over at once",
-		},
-		{
-			name: "UnparseableString", js: `'banana'`, primary: "bbb",
-			why: "a typo becomes 0 ms — the cooldown silently disappears",
-		},
-		{
-			name: "WrongType", js: `true`, primary: "bbb",
-			why: "a value that is neither a string nor a number becomes 0 ms",
-		},
-		{
-			name: "AbsentKnobReadThroughDurationMs", js: `durationMs(ctx.noSuchKnob)`, primary: "bbb",
-			why: "reading a knob the context does not carry yields 0 ms rather than throwing",
-		},
-		{
 			name: "ZeroMilliseconds", js: `0`, primary: "bbb",
-			why: "an explicit zero cooldown lets every tick reconsider the primary",
+			why: "an explicit zero is readable, and it means what it says: reconsider every tick",
+		},
+		{
+			name: "SpaceInTheUnit", js: `'30 s'`, primary: "aaa",
+			why: "bug 121: an unreadable spelling must cost the default cooldown, not all of it",
+		},
+		{
+			name: "UnparseableString", js: `'banana'`, primary: "aaa",
+			why: "a typo is not an instruction to switch stickiness off",
+		},
+		{
+			name: "EmptyString", js: `''`, primary: "aaa",
+			why: "an empty string names no duration, so it lands where an absent key lands",
+		},
+		{
+			name: "WrongType", js: `true`, primary: "aaa",
+			why: "a value that is neither a string nor a number names no duration either",
+		},
+		{
+			name: "NotANumber", js: `0 / 0`, primary: "aaa",
+			why: "NaN is an ordinary JS number and converting it to int64 is undefined in Go",
+		},
+		{
+			name: "Infinity", js: `1 / 0`, primary: "aaa",
+			why: "an infinite cooldown is unreadable, not a cooldown of whatever int64 produces",
+		},
+		{
+			name: "AbsentKnobReadThroughDurationMs", js: `durationMs(ctx.noSuchKnob)`, primary: "aaa",
+			why: "reading a knob the context does not carry is absence, and absence is 30 seconds",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +151,57 @@ func TestStickyPrimary_MinSwitchInterval_DecidesTheHandover(t *testing.T) {
 			got := engine.GetOrdered("evm:1", "*", "*")
 			require.NotEmpty(t, got)
 			require.Equal(t, tc.primary, got[0].Id(), tc.why)
+		})
+	}
+}
+
+// A knob the parser cannot read and a knob the operator did not write now
+// route the same traffic, which is the point of the fix. The warning is what
+// keeps them distinguishable, so it is not decoration — without it the
+// operator has no way to learn that their spelling did nothing.
+func TestStickyPrimary_MinSwitchInterval_ReportsASpellingItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		js    string
+		warns bool
+	}{
+		{name: "Unreadable", js: `'30 s'`, warns: true},
+		{name: "Absent", js: `undefined`, warns: false},
+		{name: "Readable", js: `'30s'`, warns: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			restoreLogger, restoreLevel := log.Logger, zerolog.GlobalLevel()
+			log.Logger = zerolog.New(&logs).Level(zerolog.TraceLevel)
+			zerolog.SetGlobalLevel(zerolog.TraceLevel)
+			defer func() {
+				log.Logger = restoreLogger
+				zerolog.SetGlobalLevel(restoreLevel)
+			}()
+
+			engine, tracker, ups, stop := stickyCooldownFixture(t, tc.js)
+			defer stop()
+			degradeIncumbent(tracker, ups)
+			policy.TickForTest(engine, "evm:1", "*")
+
+			if !tc.warns {
+				require.NotContains(t, logs.String(), "minSwitchInterval",
+					"a knob the parser can read, or one nobody wrote, must stay silent")
+				return
+			}
+			require.Contains(t, logs.String(), "minSwitchInterval",
+				"the warning must name the knob the operator got wrong")
+			require.Contains(t, logs.String(), "30 s",
+				"the warning must quote the spelling the operator actually typed")
+
+			// The eval runs on every tick. A line per tick would bury the one
+			// line that carries the message.
+			before := strings.Count(logs.String(), "minSwitchInterval")
+			for i := 0; i < 5; i++ {
+				policy.TickForTest(engine, "evm:1", "*")
+			}
+			require.Equal(t, before, strings.Count(logs.String(), "minSwitchInterval"),
+				"the warning must be written once per spelling, not once per tick")
 		})
 	}
 }
