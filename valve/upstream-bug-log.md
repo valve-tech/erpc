@@ -268,16 +268,29 @@ Pinned by `TestValidateUpstreamEndpoints_MisparsesTheChainIdItJustFetched`.
 
 ## 9. `NewErrUpstreamMalformedResponse` panics on a nil upstream
 
-**Status:** open. **Severity: low.** Latent.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low**
+by reachability, high by consequence. Pinned by
+`TestUpstreamAwareErrorConstructors_ANilUpstreamIsNotAPanic`.
 
-`common/errors.go:895` calls `upstream.Id()` with no nil guard. Its siblings
-`NewErrEndpointMissingData` (`:2323`) and `NewErrEndpointContentValidation`
-(`:3094`) both guard.
+`NewErrUpstreamMalformedResponse` called `upstream.Id()` with no nil guard. Its
+two siblings, `NewErrEndpointMissingData` and `NewErrEndpointContentValidation`,
+both guard, and the fix copies their exact shape: build the details map, add
+`upstreamId` only when there is an upstream to name.
 
-The single call site (`clients/http_json_rpc_client.go:626`) passes a live
-upstream today.
+**Why a low-reachability entry was worth a patch.** An error constructor runs
+on the path that is ALREADY going wrong. A panic there replaces the diagnosis
+of the original fault with a stack trace about the reporting of it, so the one
+thing the operator needed is the one thing they lose. The single call site
+(`clients/http_json_rpc_client.go`) passes a live upstream today; the cost of
+being wrong about that tomorrow is a crash instead of a log line.
 
----
+The key is left OUT when the upstream is unknown, rather than set to an empty
+string. An absent upstream and an upstream with an empty id are different
+events — the same rule as the config-edge family (see 121).
+
+The test drives all three constructors from one table, so the next one added
+beside them is measured against the rule rather than against a habit. Restoring
+the unguarded call fails only the sub-test that names it.
 
 ## 10. `TestIntegrity_Network_ConfigLevelDrivesCorroboration` is flaky
 
@@ -1671,43 +1684,57 @@ maintainer's read of it, and `-race` said so. Pinned by
 
 ## 58. `getHttpClient` uses the proxy client before checking the error
 
-**Status:** open. **Severity: low.** Latent; not reachable through today's
-config path.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low**
+by reachability. Pinned by
+`TestGetHttpClient_AnEmptyPoolFallsBackAtEveryLogLevel` and
+`TestProxyLabel_AnswersEmptyForWhatItCannotRead`.
 
-`clients/http_json_rpc_client.go:213-221`:
+`clients/http_json_rpc_client.go`:
 
 ```go
 client, err := c.proxyPool.GetClient()
 if c.isLogLevelTrace {
-    proxy, _ := client.Transport.(*http.Transport).Proxy(nil)   // :215
+    proxy, _ := client.Transport.(*http.Transport).Proxy(nil)
     c.logger.Trace()....Msgf("using client from proxy pool")
 }
-if err != nil {                                                  // :218
+if err != nil {
     ...
     return c.httpClient
 }
 ```
 
-`GetClient` returns `(nil, err)` when the pool holds no clients
-(`clients/proxy_pool_registry.go:24`). At trace level, line 215 dereferences
-that nil `*http.Client` before line 218 ever looks at `err`, and the request
-goroutine panics.
+`GetClient` returns `(nil, err)` when the pool holds no clients. At trace level
+the log line dereferenced that nil `*http.Client` before anything looked at
+`err`, and the request goroutine panicked. **Raising the log level to
+investigate a problem was itself the thing that killed the process.**
 
-Line 215 also asserts the transport type without the `, ok` form and calls
-`Proxy` without checking it is set, so a pool built with a plain
-`http.Client` panics there too.
+**That one expression held four separate panics, not one.** The entry named
+three; the fourth turned up while writing the test.
 
-Today `createProxyPool` (`:70`) refuses a pool with no URLs, and
-`NewProxyPoolRegistry` propagates that error, so no empty pool ever reaches
-`GetClient`. The defect is the ordering, not the reachability: any future
-caller that builds a `ProxyPool` directly, or any pool that can empty at
-runtime, turns a logged error into a panic. Move the trace block below the
-error check.
+1. `client` is nil on the error path — the ordering defect.
+2. `client.Transport.(*http.Transport)` is a bare type assertion, so any other
+   `RoundTripper` panics.
+3. `.Proxy` may be nil, and calling a nil func panics.
+4. `proxy.String()` dereferences the returned `*url.URL` — and `Proxy` returns
+   `(nil, nil)` to mean "send this one direct", which is an ordinary answer,
+   not an error.
 
-`TestProxyPool_GetClientOnAnEmptyPoolErrorsAndNamesThePool` pins the
-`GetClient` contract this depends on.
+**The fix** checks `err` first, then hands the label to a new `proxyLabel`
+helper that answers `""` for anything it cannot read. A label on a log line
+must never be able to kill the request it describes.
 
----
+`proxyLabel` also stops passing `nil` to `Proxy`. The pool builds every client
+with `http.ProxyURL`, which ignores its argument, but Go's own caller always
+passes the real request and a transport this package did not build may read it.
+A bare request keeps an arbitrary `Proxy` func on a defined path; the result is
+a label, not a routing decision.
+
+Today `createProxyPool` refuses a pool with no URLs, so no empty pool reaches
+`GetClient`. The defect was the ordering, not the reachability.
+
+Three mutations were run. Moving the trace block back above the error check
+fails **only at trace level**, which is the defect's exact signature; restoring
+the bare assertion and the unguarded URL fails four sub-tests.
 
 ## 59. Three vendors probe the wrong endpoint when one vendor serves two providers
 
@@ -3776,9 +3803,11 @@ seconds. Now an `atomic.Int64`.
 
 ## 109. `Initializer.Stop` returns while its task goroutines are still running and still logging
 
-**Status:** open. **Severity: medium.** Found by `go test ./util/ -race
--count=2`. **The FIRST of the two halves below is now fixed; the second is
-not, so the entry stays open.**
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Found by `go test ./util/ -race -count=2`. **Both halves are now
+fixed.** Half 1 is pinned by
+`TestInitializer_StopReportsThatItAbandonedRunningTasks`; half 2 by
+`TestInitializer_AnAbandonedTaskStopsWritingToTheCallersLogger`.
 
 **Half 1 is fixed.** `Stop` no longer decides for the caller that a timeout is
 survivable. It returns `errors.Join(fmt.Errorf("stop abandoned tasks that were
@@ -3795,12 +3824,49 @@ well-behaved one always ends inside `TaskTimeout` and `Stop` waits
 `TaskTimeout+100ms`. That is not a contrived test: it is precisely the
 misbehaving task this entry is about.
 
-**Half 2 is not fixed.** A task goroutine still outlives the logger's owner.
-Writing the pin proved it rather than fixing it — the first version used
-`zerolog.NewTestWriter(t)` and the leaked goroutine wrote to it after
-`tRunner` finished, exactly the race quoted below. The test now uses
-`io.Discard`, so pinning half 1 does not import half 2 into every run of the
-package. That is a containment, not a fix.
+**Half 2 is now fixed, and the fix is about ownership, not lifetime.**
+
+Nothing can end a task whose `Fn` ignores its context — that is why `Stop`
+gives up and returns. So the fix does not try to. It stops the initializer
+from USING the caller's logger once `Stop` is over, which is the half the
+initializer actually owns.
+
+`Stop` sets a `stopped` flag once its wait is finished, and the three log
+sites inside the task goroutine now go through `taskLogger()`, which hands
+back a discard logger after that point. The goroutine still runs; it simply
+stops writing to a component the operator has torn down.
+
+Harmless when the wait succeeded, because no task goroutine is left to
+silence. The flag is atomic, and `i.logger` is never reassigned, so nothing
+new races.
+
+**The pin needed a third rewrite, and the first two are the interesting part.**
+
+The first version called `ExecuteTasks` inline and hung for the full test
+timeout: `ExecuteTasks` blocks until its tasks END, and the whole point of
+this test is a task that has not ended.
+
+The second version moved it to a detached goroutine and then failed — but on
+a DIFFERENT write, `"initialization failed: 1/1 tasks failed"`, which
+`ExecuteTasks` emits through `i.logger` on its way out. That write is
+legitimate: in production the caller of `ExecuteTasks` is alive and blocked
+inside the call, so its own logger is still its own. The detached goroutine
+was a test artefact, and asserting against it would have pinned a defect that
+does not exist.
+
+The third version registers the task and calls `attemptRemainingTasks`
+directly, which launches the goroutine without the blocking wait. Only the
+task goroutine outlives its caller, and only it is under test.
+
+That failure also explains a detail worth keeping: it appeared under
+`-count=2` and not `-count=1`. At `-count=1` the process exits before the
+leaked goroutine writes. **A leak that the process outruns looks exactly like
+no leak.**
+
+Restoring `i.logger` at the three sites fails the pin with the entry's own
+line: `{"level":"warn","task":"ignores-its-context","error":"context deadline
+exceeded","message":"initialization task failed"}` — written after `Stop`
+returned. `go test ./util/ -race -count=2` is green with the fix.
 
 **Update (entry 56's fix).** The fix for entry 56 does NOT fix this one, and
 the entry stays open. It does two things to the reproduction, and neither
@@ -3813,12 +3879,11 @@ touches the defect:
 - The two `util` tests that reproduced it were themselves at fault and are
   fixed (entries 155 and 156). `go test -race ./util/ -count=4` is green.
 
-Both halves named below survive. `Stop` still reports a timeout as a log line
-and returns `destroyFn`'s error, so a caller still cannot tell a clean stop
-from an abandoned one. And a task goroutine whose `Fn` is still running when
-`Stop` gives up still holds the caller's logger, so it can still write to a
-component the operator has torn down. A green race run means the tests no
-longer trip it, not that `Stop` now stops.
+Neither of entry 56's changes touched either half; both survived it, and both
+are fixed here instead. A green race run at that point meant the tests no
+longer tripped the defect, not that `Stop` had started stopping — which is why
+the containment above was recorded as a containment. The paragraphs below
+describe the code as it stood before this entry was closed.
 
 `util/initializer.go:506-512`:
 
