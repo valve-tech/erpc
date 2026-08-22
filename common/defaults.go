@@ -1330,7 +1330,7 @@ func (d *DynamoDBConnectorConfig) SetDefaults(scope connectorScope) error {
 		d.SetTimeout = Duration(2 * time.Second)
 	}
 	if d.StatePollInterval == 0 {
-		d.StatePollInterval = Duration(5 * time.Second)
+		d.StatePollInterval = DefaultDynamoDBStatePollInterval
 	}
 
 	return nil
@@ -1711,11 +1711,21 @@ func (n *NetworkDefaults) SetDefaults() error {
 			return fmt.Errorf("failed to set defaults for svm: %w", err)
 		}
 	}
-	if n.DirectiveDefaults != nil {
-		if err := n.DirectiveDefaults.SetDefaults(); err != nil {
-			return fmt.Errorf("failed to set defaults for directive defaults: %w", err)
-		}
-	}
+	// DirectiveDefaults is NOT defaulted here, on purpose.
+	//
+	// A nil field in this block means "the operator did not say", and the
+	// legacy `evm.integrity` migration in NetworkConfig.SetDefaults reads
+	// exactly that to decide whether it may write. Filling the block in at
+	// the defaults level put `true` in every field before the migration ran,
+	// so the migration found a value already there and did nothing — and
+	// `networkDefaults.evm.integrity.enforceHighestBlock: false` stopped
+	// working the moment ANY unrelated key appeared beside it under
+	// `networkDefaults.directiveDefaults`.
+	//
+	// Each network copies this block and then defaults it itself, AFTER the
+	// migration. That pass fills whatever is still nil, so nothing is lost
+	// by leaving it alone here — and the network level and the defaults
+	// level stop disagreeing about the same config.
 
 	return nil
 }
@@ -2399,6 +2409,12 @@ func migrateLegacyIntegrityChecks(n *NetworkConfig) {
 		}
 	}
 }
+
+// DefaultDynamoDBStatePollInterval is how often a DynamoDB shared-counter
+// watch polls for a new value. The connector names the same constant when
+// it is handed an interval it cannot use, so an absent value and an
+// unusable one cost the same.
+const DefaultDynamoDBStatePollInterval = Duration(5 * time.Second)
 
 const DefaultEvmFinalityDepth = 1024
 const DefaultEvmStatePollerDebounce = Duration(5 * time.Second)

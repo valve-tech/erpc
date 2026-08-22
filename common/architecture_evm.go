@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -86,22 +87,45 @@ func (c AvailbilityConfidence) MarshalJSON() ([]byte, error) {
 	return SonicCfg.Marshal(c.String())
 }
 
+// availbilityConfidences names every value of the type. UnmarshalYAML reads
+// this list and matches against each value's own String(), so the parser
+// accepts exactly what the printer emits and the two cannot drift.
+//
+// They used to drift. The parser held its own hand-written table of four
+// spellings while String() emitted three, so `stateProven` marshalled out
+// and failed to parse back: an operator who dumped the effective config and
+// fed it in got "invalid availability confidence: stateProven". Adding a
+// value to the const block above is now enough — add it here and both
+// directions follow.
+var availbilityConfidences = []AvailbilityConfidence{
+	AvailbilityConfidenceBlockHead,
+	AvailbilityConfidenceFinalized,
+	AvailbilityConfidenceStateProven,
+}
+
 func (c *AvailbilityConfidence) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
 		return err
 	}
+	s = strings.TrimSpace(s)
 
-	switch strings.ToLower(s) {
-	case "blockhead", "1":
-		*c = AvailbilityConfidenceBlockHead
-		return nil
-	case "finalizedblock", "2":
-		*c = AvailbilityConfidenceFinalized
-		return nil
+	names := make([]string, 0, len(availbilityConfidences))
+	for _, known := range availbilityConfidences {
+		name := known.String()
+		// The number is accepted too, because the config surface has
+		// always taken it and a dropped quote in YAML reads as one.
+		if strings.EqualFold(s, name) || s == strconv.Itoa(int(known)) {
+			*c = known
+			return nil
+		}
+		names = append(names, name)
 	}
 
-	return fmt.Errorf("invalid availability confidence: %s", s)
+	// Name what is allowed. Rejecting a value without saying what the
+	// alternatives are leaves the operator guessing at a closed set.
+	return fmt.Errorf("invalid availability confidence %q, expected one of: %s",
+		s, strings.Join(names, ", "))
 }
 
 type EvmNodeType string

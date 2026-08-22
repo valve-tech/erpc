@@ -194,35 +194,100 @@ func TestTranslateFromConfig_EvalPerMethodPromotesToScope(t *testing.T) {
 		"the legacy stash must be cleared after translation")
 }
 
-// Bug 126: a network-level legacy field translates SILENTLY. The
-// translator rewrites `selectionPolicy.evalFunction` and
-// `resampleExcluded` into a new-shape eval but returns no warning, so the
-// operator never learns the keys are deprecated. legacy.Warn* holds the
-// message texts and nothing calls them.
+// A network-level legacy key is reported, not rewritten in silence. The
+// translator changes selection behaviour when it wraps
+// `selectionPolicy.evalFunction` or `resampleExcluded`, and the operator
+// learns which key caused it.
 //
-// This test pins today's behaviour. When the translator starts warning,
-// this test must flip to require.NotEmpty and assert the message.
-func TestTranslateFromConfig_NetworkLegacyFieldsWarnNothing(t *testing.T) {
-	nw := evmNetwork(1)
-	nw.SelectionPolicy = &common.SelectionPolicyConfig{
-		LegacySelectionPolicy: &common.LegacySelectionPolicyFields{
-			EvalFunction:     "(upstreams, method) => upstreams",
-			ResampleExcluded: true,
-			ResampleInterval: common.Duration(5 * time.Minute),
-		},
+// The sub-tests measure the reported cases against the quiet one, so the
+// test fails if the translator starts warning about everything as readily
+// as it fails if it goes back to warning about nothing.
+func TestTranslateFromConfig_NetworkLegacyFieldsAreReported(t *testing.T) {
+	// translate runs one network through the whole LoadConfig path and
+	// hands back the warnings and the network it rewrote.
+	translate := func(t *testing.T, sp *common.SelectionPolicyConfig) ([]string, *common.NetworkConfig) {
+		t.Helper()
+		nw := evmNetwork(1)
+		nw.SelectionPolicy = sp
+		cfg := &common.Config{Projects: []*common.ProjectConfig{{
+			Id:       "p1",
+			Networks: []*common.NetworkConfig{nw},
+		}}}
+		warns, err := legacy.TranslateFromConfig(cfg)
+		require.NoError(t, err)
+		return warns, nw
 	}
-	cfg := &common.Config{Projects: []*common.ProjectConfig{{
-		Id:       "p1",
-		Networks: []*common.NetworkConfig{nw},
-	}}}
 
-	warns, err := legacy.TranslateFromConfig(cfg)
-	require.NoError(t, err)
-	require.NotEmpty(t, nw.SelectionPolicy.EvalFunc, "the translation itself does happen")
-	require.Empty(t, warns,
-		"bug 126: evalFunction + resampleExcluded translate with no deprecation warning")
-	require.NotEmpty(t, legacy.WarnLegacySelectionPolicy(),
-		"the unused warning text still exists in the package")
-	require.NotEmpty(t, legacy.WarnResampleExcluded(),
-		"the unused warning text still exists in the package")
+	joined := func(warns []string) string { return strings.Join(warns, "\n") }
+
+	t.Run("EvalFunctionAndResampleExcludedBothReport", func(t *testing.T) {
+		warns, nw := translate(t, &common.SelectionPolicyConfig{
+			LegacySelectionPolicy: &common.LegacySelectionPolicyFields{
+				EvalFunction:     "(upstreams, method) => upstreams",
+				ResampleExcluded: true,
+				ResampleInterval: common.Duration(5 * time.Minute),
+			},
+		})
+		require.NotEmpty(t, nw.SelectionPolicy.EvalFunc, "the translation itself still happens")
+		require.Contains(t, joined(warns), "selectionPolicy.evalFunction",
+			"the rewrite must name the key that caused it")
+		require.Contains(t, joined(warns), "selectionPolicy.resampleExcluded",
+			"the rewrite must name the key that caused it")
+	})
+
+	// One key, one warning. The other key must stay quiet, or the message
+	// tells the operator nothing about which one they wrote.
+	t.Run("ResampleExcludedAloneDoesNotBlameEvalFunction", func(t *testing.T) {
+		warns, _ := translate(t, &common.SelectionPolicyConfig{
+			LegacySelectionPolicy: &common.LegacySelectionPolicyFields{
+				ResampleExcluded: true,
+				ResampleInterval: common.Duration(5 * time.Minute),
+			},
+		})
+		require.Contains(t, joined(warns), "selectionPolicy.resampleExcluded")
+		require.NotContains(t, joined(warns), "selectionPolicy.evalFunction")
+	})
+
+	// A modern eval beside a legacy one is the worse case: the legacy
+	// function is discarded, not translated. The operator reads code that
+	// decides nothing, so the message must say "ignored", not "wrapped".
+	t.Run("ADiscardedEvalFunctionSaysItIsIgnored", func(t *testing.T) {
+		warns, nw := translate(t, &common.SelectionPolicyConfig{
+			EvalFunc: "(upstreams, ctx) => upstreams",
+			LegacySelectionPolicy: &common.LegacySelectionPolicyFields{
+				EvalFunction: "(upstreams, method) => upstreams.slice(0, 1)",
+			},
+		})
+		require.Equal(t, "(upstreams, ctx) => upstreams", nw.SelectionPolicy.EvalFunc,
+			"the modern eval still wins")
+		require.Contains(t, joined(warns), "is ignored",
+			"a discarded legacy function must not be reported as a translation")
+	})
+
+	// One line per key, however many networks share the config block.
+	t.Run("ThreeNetworksProduceOneLinePerKey", func(t *testing.T) {
+		var nws []*common.NetworkConfig
+		for _, chainID := range []int64{1, 10, 137} {
+			nw := evmNetwork(chainID)
+			nw.SelectionPolicy = &common.SelectionPolicyConfig{
+				LegacySelectionPolicy: &common.LegacySelectionPolicyFields{
+					EvalFunction: "(upstreams, method) => upstreams",
+				},
+			}
+			nws = append(nws, nw)
+		}
+		cfg := &common.Config{Projects: []*common.ProjectConfig{{Id: "p1", Networks: nws}}}
+		warns, err := legacy.TranslateFromConfig(cfg)
+		require.NoError(t, err)
+		require.Equal(t, 1, strings.Count(joined(warns), "selectionPolicy.evalFunction"),
+			"three networks, one config key, one line")
+	})
+
+	// Nothing legacy, nothing said.
+	t.Run("AModernOnlyNetworkSaysNothing", func(t *testing.T) {
+		warns, _ := translate(t, &common.SelectionPolicyConfig{
+			EvalFunc: "(upstreams, ctx) => upstreams",
+		})
+		require.Empty(t, warns, "a modern config must produce no deprecation line")
+	})
 }

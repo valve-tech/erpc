@@ -546,8 +546,16 @@ func (i *Initializer) Errors() error {
 	var errs []error
 	i.tasks.Range(func(key, value interface{}) bool {
 		t := value.(*BootstrapTask)
-		if t.Error() != nil {
-			errs = append(errs, t.Error().Err)
+		// Call Error() ONCE — the same defect fixed in waitForTasks above,
+		// at its surviving twin. The initializer stores wrappedError{nil}
+		// before every attempt, so a retry landing between the nil check and
+		// the dereference makes the second call return nil and `.Err` panics.
+		//
+		// This one crashes a READ, not the shutdown path: Errors() is what a
+		// caller polls while waiting for a connector to come up, so a retrying
+		// task and a polling caller are the normal case, not a rare one.
+		if te := t.Error(); te != nil {
+			errs = append(errs, te.Err)
 		}
 		return true
 	})

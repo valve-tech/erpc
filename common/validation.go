@@ -595,8 +595,14 @@ func (p *DynamoDBConnectorConfig) Validate() error {
 	if p.SetTimeout == 0 {
 		return fmt.Errorf("database.*.connector.dynamodb.setTimeout is required")
 	}
-	if p.StatePollInterval == 0 {
-		return fmt.Errorf("database.*.connector.dynamodb.statePollInterval is required")
+	// Non-positive, not just zero. SetDefaults runs before Validate and
+	// fills an absent interval, so the `== 0` this used to test could never
+	// fire; a NEGATIVE interval was the one value that reached the watch
+	// unchanged, and time.NewTicker panics on it. Name the field and the
+	// value, so the operator fixes the config instead of reading a stack
+	// trace from startup.
+	if p.StatePollInterval <= 0 {
+		return fmt.Errorf("database.*.connector.dynamodb.statePollInterval must be positive, got %s", p.StatePollInterval)
 	}
 	return nil
 }

@@ -708,9 +708,14 @@ projects:
 	p := onlyProject(t, cfg)
 	require.Len(t, p.Networks, 2)
 
-	// The defaults themselves are defaulted before they are handed down.
+	// The defaults themselves are defaulted before they are handed down —
+	// except directiveDefaults, where a nil field is the signal the legacy
+	// `evm.integrity` migration reads. Filling it here is what used to
+	// cancel that migration, so the block goes down as the operator wrote
+	// it and each network defaults its own copy afterwards.
 	require.Equal(t, Duration(3*time.Second), p.NetworkDefaults.SelectionPolicy.EvalInterval)
-	require.NotNil(t, p.NetworkDefaults.DirectiveDefaults.EnforceHighestBlock)
+	require.Nil(t, p.NetworkDefaults.DirectiveDefaults.EnforceHighestBlock,
+		"a directive the operator did not name must stay nil at the defaults level")
 
 	bare, own := p.Networks[0], p.Networks[1]
 	require.Equal(t, "net-budget", bare.RateLimitBudget)
@@ -720,6 +725,9 @@ projects:
 	require.NotNil(t, bare.SelectionPolicy, "the shared selection policy must reach the network")
 	require.Equal(t, Duration(3*time.Second), bare.SelectionPolicy.EvalInterval)
 	require.False(t, *bare.DirectiveDefaults.RetryEmpty)
+	require.NotNil(t, bare.DirectiveDefaults.EnforceHighestBlock,
+		"and it must be defaulted by the time the network reads it")
+	require.True(t, *bare.DirectiveDefaults.EnforceHighestBlock)
 
 	require.Equal(t, "own-budget", own.RateLimitBudget, "a network's own value must win")
 	require.Equal(t, int64(99), own.Evm.GetLogsMaxAllowedRange)
@@ -749,27 +757,30 @@ projects:
 		"networkDefaults.evm.integrity must reach the per-network directives")
 }
 
-func TestNetworkDefaults_ADirectiveDefaultsBlockCancelsTheLegacyIntegrityMigration(t *testing.T) {
-	// KNOWN DEFECT, pinned so a fix is visible as a test change rather than a
-	// surprise. Adding ANY key under networkDefaults.directiveDefaults silently
-	// switches the legacy networkDefaults.evm.integrity block off:
-	//
-	//   ProjectConfig.SetDefaults runs NetworkDefaults.SetDefaults first, which
-	//   fills DirectiveDefaults.Enforce* with `true` (common/defaults.go:1723).
-	//   Each network then copies that whole block (common/defaults.go:2142), and
-	//   the migration at common/defaults.go:2291 only writes into a field that is
-	//   still nil — so it finds `true` already there and does nothing.
-	//
-	// The operator sees enforcement stay ON for a config that says `false`, with
-	// no warning, purely because an unrelated directive sits next to it.
-	cfg := mustSetDefaultsFromYAML(t, `
+// An unrelated key under `networkDefaults.directiveDefaults` does not cancel
+// the legacy `evm.integrity` migration.
+//
+// It used to. ProjectConfig.SetDefaults ran NetworkDefaults.SetDefaults
+// first, which filled DirectiveDefaults.Enforce* with `true`; each network
+// copied that block, and the migration only writes into a field that is
+// still nil — so it found `true` already there and did nothing. An operator
+// whose `enforceHighestBlock: false` worked yesterday lost it by adding
+// `retryEmpty: false` beside it, with no warning, and saw only requests
+// rejected for a highest-block violation.
+//
+// The sub-tests measure the two levels against each other, because the
+// defect was that they disagreed.
+func TestNetworkDefaults_ADirectiveDefaultsBlockDoesNotCancelTheLegacyIntegrityMigration(t *testing.T) {
+	// legacyIntegrityConfig writes the same legacy `enforceHighestBlock:
+	// false` at networkDefaults level, with whatever extra directiveDefaults
+	// keys the case needs beside it.
+	legacyIntegrityConfig := func(extraDirectives string) string {
+		return `
 projects:
   - id: prod
     upstreams:
       - endpoint: https://a.example/rpc
-    networkDefaults:
-      directiveDefaults:
-        retryEmpty: false
+    networkDefaults:` + extraDirectives + `
       evm:
         integrity:
           enforceHighestBlock: false
@@ -777,10 +788,51 @@ projects:
       - architecture: evm
         evm:
           chainId: 1
-`, nil)
-	n := onlyProject(t, cfg).Networks[0]
-	require.False(t, *n.Evm.Integrity.EnforceHighestBlock,
-		"the legacy block itself still arrives at the network")
-	require.True(t, *n.DirectiveDefaults.EnforceHighestBlock,
-		"defect: the directive the runtime reads keeps the default `true` and ignores the legacy false")
+`
+	}
+
+	t.Run("WithAnUnrelatedDirectiveBeside", func(t *testing.T) {
+		cfg := mustSetDefaultsFromYAML(t, legacyIntegrityConfig(`
+      directiveDefaults:
+        retryEmpty: false`), nil)
+		n := onlyProject(t, cfg).Networks[0]
+		require.False(t, *n.Evm.Integrity.EnforceHighestBlock,
+			"the legacy block itself still arrives at the network")
+		require.False(t, *n.DirectiveDefaults.EnforceHighestBlock,
+			"an unrelated directive must not switch enforcement back on")
+		require.False(t, *n.DirectiveDefaults.RetryEmpty,
+			"the unrelated directive itself must still take effect")
+	})
+
+	// The same config without the extra key. Both cases must agree, or the
+	// operator's result still depends on a key that means nothing here.
+	t.Run("WithNothingBeside", func(t *testing.T) {
+		cfg := mustSetDefaultsFromYAML(t, legacyIntegrityConfig(``), nil)
+		n := onlyProject(t, cfg).Networks[0]
+		require.False(t, *n.DirectiveDefaults.EnforceHighestBlock)
+	})
+
+	// Whatever the operator did not name still gets its default. Deleting
+	// the early defaults pass must not leave nil fields behind.
+	t.Run("TheOtherDirectivesStillGetTheirDefaults", func(t *testing.T) {
+		cfg := mustSetDefaultsFromYAML(t, legacyIntegrityConfig(`
+      directiveDefaults:
+        retryEmpty: false`), nil)
+		dd := onlyProject(t, cfg).Networks[0].DirectiveDefaults
+		require.NotNil(t, dd.EnforceGetLogsBlockRange)
+		require.True(t, *dd.EnforceGetLogsBlockRange)
+		require.NotNil(t, dd.EnforceNonNullTaggedBlocks)
+		require.True(t, *dd.EnforceNonNullTaggedBlocks)
+	})
+
+	// An explicit directive still beats the legacy block. The migration is
+	// allowed to fill a gap, never to overwrite what the operator wrote.
+	t.Run("AnExplicitDirectiveStillWins", func(t *testing.T) {
+		cfg := mustSetDefaultsFromYAML(t, legacyIntegrityConfig(`
+      directiveDefaults:
+        enforceHighestBlock: true`), nil)
+		n := onlyProject(t, cfg).Networks[0]
+		require.True(t, *n.DirectiveDefaults.EnforceHighestBlock,
+			"an explicit directiveDefaults key must beat the deprecated integrity block")
+	})
 }

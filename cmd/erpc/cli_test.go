@@ -344,19 +344,54 @@ func TestConfigDiscovery_RequireConfig_ListsEveryProbedPath(t *testing.T) {
 //
 // This test pins today's behaviour. When the guard becomes a non-empty
 // check, this test must flip to expect the named file.
-func TestConfig_OneCharacterPathIsIgnored(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "a"),
-		[]byte(strings.Replace(oneUpstreamConfig(deadEndpoint), "id: main", "id: from-flag", 1)), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "erpc.yaml"),
-		[]byte(strings.Replace(oneUpstreamConfig(deadEndpoint), "id: main", "id: from-discovery", 1)), 0o600))
-	t.Chdir(dir)
+// A one-character --config path names a file like any other path. The
+// length of a file name decides nothing.
+//
+// The three sub-tests measure the short path against the cases that
+// surround it, rather than against a constant: a longer path present, the
+// short path present, and the short path missing. All three must agree.
+func TestConfig_APathIsAPathWhateverItsLength(t *testing.T) {
+	// writeBoth lays down a named config and a discoverable one, so a
+	// dump says which of the two the command actually read.
+	writeBoth := func(t *testing.T, name string) string {
+		t.Helper()
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name),
+			[]byte(strings.Replace(oneUpstreamConfig(deadEndpoint), "id: main", "id: from-flag", 1)), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "erpc.yaml"),
+			[]byte(strings.Replace(oneUpstreamConfig(deadEndpoint), "id: main", "id: from-discovery", 1)), 0o600))
+		t.Chdir(dir)
+		return dir
+	}
 
-	run := runCLI(t, "--config", "a", "dump")
-	require.Empty(t, run.exitCodes)
-	require.Contains(t, run.stdout, "id: from-discovery",
-		"bug 127: a one-character --config path is ignored and discovery wins")
-	require.NotContains(t, run.stdout, "id: from-flag")
+	t.Run("TwoCharacterPathWins", func(t *testing.T) {
+		writeBoth(t, "aa")
+		run := runCLI(t, "--config", "aa", "dump")
+		require.Empty(t, run.exitCodes)
+		require.Contains(t, run.stdout, "id: from-flag")
+		require.NotContains(t, run.stdout, "id: from-discovery")
+	})
+
+	t.Run("OneCharacterPathWinsToo", func(t *testing.T) {
+		writeBoth(t, "a")
+		run := runCLI(t, "--config", "a", "dump")
+		require.Empty(t, run.exitCodes)
+		require.Contains(t, run.stdout, "id: from-flag",
+			"a one-character --config path names the file it names")
+		require.NotContains(t, run.stdout, "id: from-discovery",
+			"discovery must not win over an explicit --config")
+	})
+
+	// A named config that is not there is fatal, whatever its length. It
+	// must not fall through to discovery, which is what made the short
+	// path run a config the operator never asked for.
+	t.Run("AMissingOneCharacterPathIsFatal", func(t *testing.T) {
+		writeBoth(t, "a")
+		require.NoError(t, os.Remove("a"))
+		run := runCLI(t, "--config", "a", "dump")
+		require.NotEmpty(t, run.exitCodes, "a missing --config must not fall through to discovery")
+		require.NotContains(t, run.stdout, "id: from-discovery")
+	})
 }
 
 /* -------------------------------------------------------------------------- */

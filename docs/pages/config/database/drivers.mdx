@@ -235,7 +235,7 @@ ElastiCache Serverless is **not** supported (it lacks `PSUBSCRIBE`, required by 
 | `dynamodb.getTimeout` | Duration | `1s` | Per-Get deadline. |
 | `dynamodb.setTimeout` | Duration | `2s` | Per-Set/Delete/Lock deadline. |
 | `dynamodb.maxRetries` | int | `0` (SDK default) | AWS SDK retry count for transient errors. |
-| `dynamodb.statePollInterval` | Duration | `5s` | `WatchCounterInt64` polling interval. |
+| `dynamodb.statePollInterval` | Duration | `5s` | `WatchCounterInt64` polling interval. Must be positive; config load rejects zero or negative and names the field. |
 | `dynamodb.lockRetryInterval` | Duration | **no default** (zero) | **Footgun**: zero duration → retry loop spins as fast as the API under lock contention. Always set to `100ms` in production. — <SourceLink file="data/dynamodb.go" lines="660-688" /> |
 
 #### gRPC connector — <SourceLink file="common/config.go" lines="354-359" />, defaults <SourceLink file="common/defaults.go" lines="927-929" />
