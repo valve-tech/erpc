@@ -211,18 +211,52 @@ func (c *GenericHttpJsonRpcClient) shutdown() {
 func (c *GenericHttpJsonRpcClient) getHttpClient() *http.Client {
 	if c.proxyPool != nil {
 		client, err := c.proxyPool.GetClient()
-		if c.isLogLevelTrace {
-			proxy, _ := client.Transport.(*http.Transport).Proxy(nil)
-			c.logger.Trace().Str("proxyPool", c.proxyPool.ID).Str("ptr", fmt.Sprintf("%p", client.Transport)).Str("proxy", proxy.String()).Msgf("using client from proxy pool")
-		}
+		// Check the error FIRST. The trace block used to run above this, and
+		// GetClient returns (nil, err) when the pool holds no clients — so at
+		// trace level the log line dereferenced the nil client before anything
+		// looked at err, and the request goroutine died. Raising the log level
+		// turned a logged error into a panic.
 		if err != nil {
 			c.logger.Error().Err(err).Msgf("failed to get client from proxy pool")
 			return c.httpClient
+		}
+		if c.isLogLevelTrace {
+			c.logger.Trace().
+				Str("proxyPool", c.proxyPool.ID).
+				Str("ptr", fmt.Sprintf("%p", client.Transport)).
+				Str("proxy", proxyLabel(client)).
+				Msg("using client from proxy pool")
 		}
 		return client
 	}
 
 	return c.httpClient
+}
+
+// proxyLabel names the proxy a pooled client sends through, for a trace line.
+// It answers "" for anything it cannot read rather than panicking: a label on
+// a log line must never be able to kill the request it describes.
+//
+// Three separate panics used to live in the one expression this replaces. The
+// transport was asserted with a bare type assertion, Proxy was called without
+// checking it is set, and the returned *url.URL was dereferenced without
+// checking it is non-nil — and Proxy returns (nil, nil) for "send this one
+// direct", which is an ordinary answer, not an error.
+func proxyLabel(client *http.Client) string {
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		return ""
+	}
+	// Proxy takes the request it is routing. The pool builds every client with
+	// http.ProxyURL, which ignores the argument — but a transport this package
+	// did not build may read it, and Go's own caller never passes nil. A bare
+	// request keeps an arbitrary Proxy func on a defined path. The result is a
+	// label, not a routing decision.
+	proxy, err := transport.Proxy(&http.Request{URL: &url.URL{Scheme: "https"}})
+	if err != nil || proxy == nil {
+		return ""
+	}
+	return proxy.String()
 }
 
 func (c *GenericHttpJsonRpcClient) queueRequest(id interface{}, req *batchRequest) {

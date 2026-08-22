@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -209,9 +210,37 @@ type Initializer struct {
 	cancelAutoRetry atomic.Value // context.CancelFunc
 	autoRetryWg     sync.WaitGroup
 
+	// stopped records that Stop has finished waiting. Past that point the
+	// caller may tear down anything it lent this initializer, the logger
+	// included, so taskLogger stops handing the caller's logger out.
+	stopped atomic.Bool
+
 	conf *InitializerConfig
 
 	StateUpdates chan InitializationState
+}
+
+// discardTaskLogger is where an abandoned task goroutine's log lines go.
+var discardTaskLogger = zerolog.New(io.Discard)
+
+// taskLogger returns the logger a task goroutine may write to right now.
+//
+// Bug 109, second half. A task whose Fn ignores its context outlives Stop —
+// Stop waits one task-timeout and then returns anyway, because nothing can
+// interrupt a task that will not be interrupted. Its three post-body log
+// lines then write to a logger the caller has already torn down, and the
+// operator gets "initialization task failed" for a component that no longer
+// exists. Under test the same write lands in t.Log after tRunner finished,
+// which is how the race detector found it.
+//
+// This does NOT make the goroutine end. Nothing can. It makes the initializer
+// stop USING the caller's logger once the caller has been told the stop is
+// over, which is the half the initializer actually owns.
+func (i *Initializer) taskLogger() *zerolog.Logger {
+	if i.stopped.Load() {
+		return &discardTaskLogger
+	}
+	return i.logger
 }
 
 func NewInitializer(appCtx context.Context, logger *zerolog.Logger, conf *InitializerConfig) *Initializer {
@@ -453,7 +482,7 @@ func (i *Initializer) attemptRemainingTasks(respectBackoff bool) {
 					}
 					bt.lastErr.Store(wrappedError{err: underlying})
 					// Log the underlying fatal error
-					i.logger.Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
+					i.taskLogger().Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
 					bt.state.Store(int32(TaskFatal))
 					return
 				}
@@ -466,12 +495,12 @@ func (i *Initializer) attemptRemainingTasks(respectBackoff bool) {
 				} else {
 					bt.lastErr.CompareAndSwap(nil, wrappedError{err: err})
 				}
-				i.logger.Warn().Str("task", bt.Name).Err(err).Msg("initialization task failed")
+				i.taskLogger().Warn().Str("task", bt.Name).Err(err).Msg("initialization task failed")
 				bt.state.Store(int32(TaskFailed))
 			} else {
 				bt.lastErr.Store(wrappedError{err: nil})
 				lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
-				i.logger.Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
+				i.taskLogger().Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
 				bt.state.Store(int32(TaskSucceeded))
 			}
 		}(t, doneCh)
@@ -613,6 +642,12 @@ func (i *Initializer) Stop(destroyFn func() error) error {
 	if err := i.WaitForTasks(waitCtx); err != nil {
 		i.logger.Warn().Err(err).Msg("failed waiting for tasks to finish within the stop sequence")
 	}
+
+	// The wait is over, so anything still running is abandoned. From here the
+	// caller owns its logger again — destroyFn below is the caller tearing its
+	// component down. See taskLogger. Harmless when the wait succeeded, since
+	// no task goroutine is left to silence.
+	i.stopped.Store(true)
 
 	var err error
 	if destroyFn != nil {
