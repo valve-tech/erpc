@@ -651,22 +651,45 @@ Pinned by `TestPostgreSQLConnector_CRUD/List never issues a pagination token
 
 ## 25. A negative `statePollInterval` panics eRPC at startup
 
-**Status:** open. **Severity: medium.** Crash from a config typo, with no
-validation error.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** Crash from a config typo, with no validation error. Pinned by
+`TestDynamoDBConnector_ANonPositivePollIntervalCostsWhatAnAbsentOneCosts`.
 
-`data/dynamodb.go:723` calls `time.NewTicker(d.statePollInterval)` with no
-guard, and `time.NewTicker` panics on any non-positive duration.
+`data/dynamodb.go` called `time.NewTicker(d.statePollInterval)` with no guard,
+and `time.NewTicker` panics on any non-positive duration.
 
-`common/defaults.go:1332` substitutes a default only when the value is exactly
-`0`, so a negative duration in the operator's YAML survives config load
-untouched.
+`DynamoDBConnectorConfig.SetDefaults` substitutes a default only when the value
+is exactly `0`, so a negative duration in the operator's YAML survived config
+load untouched. `statePollInterval: -1s` under a DynamoDB shared-state
+connector therefore panicked the process — "non-positive interval for
+NewTicker" — the first time any shared counter was watched, which is during
+startup. No validation error named the field.
 
-`statePollInterval: -1s` under a DynamoDB shared-state connector therefore
-panics the process — "non-positive interval for NewTicker" — the first time any
-shared counter is watched, which is during startup. No validation error names
-the field.
+**The fix has two halves, because two different questions are being asked.**
 
-Pinned by `TestDynamoDBConnector_WatchCounterNonPositivePollInterval`.
+`DynamoDBConnectorConfig.Validate` now rejects a non-positive interval and
+quotes the value: `statePollInterval must be positive, got -1s`. The check used
+to read `== 0`, which could never fire — `SetDefaults` runs before `Validate`
+on the load path and fills an absent value, so a NEGATIVE interval was the one
+value that reached the watch unchanged. This is the operator-facing half: the
+process refuses to start and names the field, instead of printing a stack trace.
+
+`NewDynamoDBConnector` treats an interval it cannot use as an absent one. It
+polls at the default and warns, naming the value it refused and the one it used.
+The connector does not choose this duration — it is handed one — and
+`time.NewTicker`'s contract is the connector's problem, not the config path's.
+Validation covers the config path; this covers every other caller.
+
+The default itself is now `common.DefaultDynamoDBStatePollInterval`, named once
+and read by both `SetDefaults` and the connector, so an absent value and an
+unusable one cannot drift apart.
+
+Three mutations were run against the fix. Removing the connector guard, removing
+only the warning, and reverting `Validate` to `== 0` each failed the sub-test
+that names them.
+
+See also entry 178: the other eight "is required" checks in the same `Validate`
+are unreachable for the same reason, and nothing in the fork depends on them.
 
 ---
 
@@ -946,8 +969,9 @@ strongest signal in this log. Fixing `HasErrorCode` closes both.
 
 ## 36. An unrelated `directiveDefaults` key cancels the legacy integrity migration
 
-**Status:** open. **Severity: medium.** An upgrade-path regression that turns
-data-integrity enforcement back on without saying so.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+medium.** An upgrade-path regression that turned data-integrity enforcement
+back on without saying so.
 
 The root cause is a `nil` check standing in for "the user did not specify this",
 defeated by an earlier defaulting pass.
@@ -975,8 +999,32 @@ a highest-block violation.
 The same config at the **per-network** level works correctly, because there the
 migration runs before the defaults pass. So the two levels disagree.
 
+**The fix deletes the early defaults pass.** `NetworkDefaults.SetDefaults` no
+longer calls `DirectiveDefaultsConfig.SetDefaults` on its own block. A nil field
+there means "the operator did not say", which is exactly what the migration
+reads; filling it in before the migration ran is what destroyed the signal.
+
+Nothing is lost. Each network copies the block and then defaults its own copy at
+`NetworkConfig.SetDefaults`, AFTER the migration — so every field the operator
+did not name still gets its default, and the network level and the defaults
+level stop disagreeing about the same config.
+
+Weakening by deletion rather than by adding a "was this set by the user" flag is
+the point. A parallel `explicitlySet` bit would be a second source of truth
+about the same fact, and every future field would have to remember to maintain
+it.
+
 Pinned by
-`TestNetworkDefaults_ADirectiveDefaultsBlockCancelsTheLegacyIntegrityMigration`.
+`TestNetworkDefaults_ADirectiveDefaultsBlockDoesNotCancelTheLegacyIntegrityMigration`,
+whose four sub-tests measure the two levels against each other: with an
+unrelated directive beside the legacy block, with nothing beside it, with the
+other directives still defaulted, and with an explicit directive still beating
+the legacy block. Restoring the early pass fails the first.
+
+Two existing tests asserted the old behaviour and now state the new contract:
+`TestNetworkSetDefaults_NetworkDefaultsReachEveryNetwork` asserts the
+`networkDefaults` block keeps nil where the operator said nothing, and that the
+network's copy is defaulted by the time the network reads it.
 
 ---
 
@@ -4195,30 +4243,42 @@ cause still reports the bucket summary, not the upstream's own message".
 
 ## 117. `AvailbilityConfidence` does not survive a YAML round trip
 
-**Status:** open. `UnmarshalYAML` still accepts only `blockhead`, `1`,
-`finalizedblock` and `2`, while `String()` still emits `stateProven`.
-`TestAvailbilityConfidenceUnmarshalYAML`, sub-test "does not round-trip
-stateProven", asserts today's behaviour and passes.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low.**
+Pinned by `TestAvailbilityConfidenceUnmarshalYAML`.
 
 `common/architecture_evm.go` gives the type three values. `String()` and
 `MarshalYAML()` emit `blockHead`, `finalizedBlock` and `stateProven`.
-`UnmarshalYAML` accepts `blockhead`, `1`, `finalizedblock` and `2`, and
-rejects everything else.
+`UnmarshalYAML` held its own hand-written table and accepted only `blockhead`,
+`1`, `finalizedblock` and `2`.
 
-So `stateProven` marshals out and fails to parse back, and so does the
-`unknown(0)` an unset value produces. An operator who dumps the effective
-config and feeds it back gets `invalid availability confidence: stateProven`.
+So `stateProven` marshalled out and failed to parse back. An operator who
+dumped the effective config and fed it in got `invalid availability confidence:
+stateProven`.
 
-The reachable damage is small today: the only YAML-configurable field of this
-type is `EvmNetworkConfig.EmptyResultConfidence`, and its two readers
-(`architecture/evm/common.go:79`, `erpc/networks.go:871`) only test for
-`Finalized`, so `stateProven` would be inert there even if it parsed. That is
-the reason to record the asymmetry rather than close it by adding a value the
-readers ignore — the parser and the printer should agree on one set, whichever
-set that is.
+**The fix deletes the parse table.** `UnmarshalYAML` now matches the input
+against each value's own `String()`, reading a single list of the values
+(`availbilityConfidences`). The parser accepts exactly what the printer emits,
+by construction — adding a value to the const block and the list is enough, and
+the two cannot drift again. The numeric form is still accepted, because the
+config surface has always taken it and a dropped quote in YAML reads as one.
 
-Pinned by `TestAvailbilityConfidenceUnmarshalYAML`, sub-test "does not
-round-trip stateProven".
+The rejection message also names the set now: `invalid availability confidence
+"latest", expected one of: blockHead, finalizedBlock, stateProven`. Refusing a
+value without saying what the alternatives are leaves the operator guessing at a
+closed set.
+
+The reachable damage was small, and that has not changed. The only
+YAML-configurable field of this type is `EvmNetworkConfig.EmptyResultConfidence`,
+and its two readers (`architecture/evm/common.go`, `erpc/networks.go`) test only
+for `Finalized` — so `stateProven` parses there and stays inert. The parser and
+the printer agreeing is the fix; giving that field a third behaviour is not, and
+was not attempted.
+
+Two mutations were run. Dropping `stateProven` from the list failed four
+sub-tests, and removing the alternatives from the error message failed the one
+that names it.
+
+See also entry 179: the TypeScript SDK exports only two of the three values.
 
 ## 118. Two different requests can share one cache key
 
@@ -4476,53 +4536,80 @@ test.
 
 ## 126. The legacy translator rewrites network-level keys with no warning
 
-**Status:** open. Pinned by
-`common/legacy/translate_config_test.go:TestTranslateFromConfig_NetworkLegacyFieldsWarnNothing`.
-**Severity: low.** Nothing breaks today, but the operator never learns the
-config is deprecated.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low.**
+Nothing broke, but the operator never learned the config was deprecated. Pinned
+by `TestTranslateFromConfig_NetworkLegacyFieldsAreReported`.
 
-`common/legacy/translate.go:39` builds the warning list from project-level
-fields only — `routingStrategy`, `scoreMetricsMode`, and the four inert score
-knobs. The network-level legacy keys translate silently:
+`common/legacy/translate.go` built the warning list from project-level fields
+only — `routingStrategy`, `scoreMetricsMode`, and the four inert score knobs.
+The network-level legacy keys translated silently:
 
-- `selectionPolicy.evalFunction` is wrapped into the modern `eval`;
-- `selectionPolicy.resampleExcluded` appends `.probeExcluded(...)`.
+- `selectionPolicy.evalFunction` was wrapped into the modern `eval`;
+- `selectionPolicy.resampleExcluded` appended `.probeExcluded(...)`.
 
-`common/legacy/warnings.go` holds the exact messages for both cases —
+`common/legacy/warnings.go` held the exact messages for both cases —
 `WarnLegacySelectionPolicy` and `WarnResampleExcluded` — plus
-`WarnRoutingPolicyEnvVars`. All three are exported, and a repo-wide grep finds
-no caller. They are dead code that documents a behaviour the package does not
-have.
+`WarnRoutingPolicyEnvVars`. All three were exported, and a repo-wide grep found
+no caller. They were dead code documenting a behaviour the package did not have.
 
-The effect is a silent rewrite. An operator whose `evalFunction` becomes a
-wrapped legacy call gets different selection behaviour with no line in the log
-that says so, and no signal that the key is on its way out.
+**The fix calls the two that have a condition, and deletes the one that does
+not.** `Translate` now emits `WarnLegacySelectionPolicy` and
+`WarnResampleExcluded` at the sites where each key already tests true.
+`WarnRoutingPolicyEnvVars` is gone: the `ROUTING_POLICY_*` feature it describes
+does not exist in the package (see entry 128), so the function claimed a
+contract nothing kept.
 
-Fix: call the three functions from `Translate` where each condition already
-tests true, or delete them. The current state claims a contract the code does
-not keep.
+Two things were added that the entry did not ask for, and both are the same
+rule at the same sites.
+
+A message describes a key, not a network, so it is emitted once however many
+networks share the config block. A hundred networks under one `networkDefaults`
+would otherwise produce a hundred identical lines, which buries the message it
+carries. This is the same dedup shape as the policy-eval warning in entry 121.
+
+A legacy `evalFunction` written BESIDE a modern `eval` is discarded, not
+translated — `Translate` skips that network entirely. That is the worse case:
+the operator is reading code that decides nothing. It now says so, in different
+words (`is ignored because selectionPolicy.eval is also set`), because reporting
+a discard as a translation would be a second silent event.
+
+Two mutations were run. Removing the warning calls and warning once per network
+instead of once per key each failed the sub-test that names them.
+
+See also entry 177: making these messages live exposed a broken link they all
+carried.
 
 ## 127. `--config` silently ignores a one-character path
 
-**Status:** open. Pinned by
-`cmd/erpc/cli_test.go:TestConfig_OneCharacterPathIsIgnored`.
-**Severity: low.** The blast radius is small, but the failure mode is the bad
-kind: eRPC runs a config the operator did not ask for.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was: low.**
+The blast radius was small, but the failure mode was the bad kind: eRPC ran a
+config the operator did not ask for. Pinned by
+`cmd/erpc/cli_test.go:TestConfig_APathIsAPathWhateverItsLength`.
 
-`cmd/erpc/main.go:300`:
+`cmd/erpc/main.go`:
 
     if configFile := cmd.String("config"); len(configFile) > 1 {
 
-The guard tests for length, not for emptiness. `erpc --config a dump` drops
-the flag, falls through to auto-discovery, and loads `./erpc.yaml` instead.
-No error, no warning — the operator reads a dump of the wrong file.
+The guard tested for length, not for emptiness. `erpc --config a dump` dropped
+the flag, fell through to auto-discovery, and loaded `./erpc.yaml` instead. No
+error, no warning — the operator read a dump of the wrong file.
 
-The same path treats every other missing config as fatal, which is what makes
-this inconsistent rather than merely odd: `--config aa` on a missing file
-exits, `--config a` starts.
+The same path treats every other missing config as fatal, which is what made
+this inconsistent rather than merely odd: `--config aa` on a missing file exits,
+`--config a` started.
 
-Fix: test `configFile != ""`. The length bound commits to a rule about file
-names that nothing in the data supports.
+**The fix tests `configFile != ""`.** The length bound committed to a rule about
+file names that nothing in the data supports.
+
+The docs already described the fixed behaviour, not the shipped one.
+`docs/pages/operation/cli.mdx` says "When non-empty, sets `requireConfig=true`;
+no fallback to auto-discovery", and `docs/pages/faq.mdx` says "There is no
+fallback to auto-discovery when an explicit path is given". Both were true of
+every path except the one-character one. No doc change was needed.
+
+The three sub-tests measure the short path against the cases around it — a
+longer path present, the short path present, the short path missing — rather
+than against a constant. Restoring `len(configFile) > 1` fails two of them.
 
 ## 128. The legacy translator's golden fixtures are wired to nothing
 
@@ -4539,8 +4626,11 @@ translator detects an implicit fallback-group policy and synthesizes an eval
 that reads `ROUTING_POLICY_MAX_ERROR_RATE`, `ROUTING_POLICY_MAX_BLOCK_HEAD_LAG`
 and `ROUTING_POLICY_MIN_HEALTHY_THRESHOLD`. `common/legacy/translate.go` does
 no such thing: it never inspects `upstream.group`, and the env vars appear
-nowhere in the package. `WarnRoutingPolicyEnvVars` (see 126) is the dead
-warning for this same missing feature.
+nowhere in the package. `WarnRoutingPolicyEnvVars` used to be the dead warning
+for this same missing feature; entry 126 deleted it, on the grounds that a
+message for a feature the package does not have is a claim, not a warning. The
+fixture is the remaining evidence, and it still describes behaviour no code
+implements.
 
 So an operator who upgrades from a config that relied on the `ROUTING_POLICY_*`
 fallback policy gets the canonical default policy instead, with no warning and
@@ -6102,6 +6192,48 @@ a bug can hand you the one it was hiding, so re-run the whole package after a
 fix, not just the test you wrote for it.
 
 ---
+
+**The fix covered ONE of two sites. The twin survived until 2026-08-22.**
+
+`Initializer.Errors()` held the identical pattern — `if t.Error() != nil {
+errs = append(errs, t.Error().Err) }` — and the fix above never reached it. The
+status line said FIXED, and the defect was still in the file.
+
+It surfaced by crashing, not by reading: a full-suite run failed
+`data.TestPostgreSQLDistributedLocking` with a SIGSEGV whose stack ran
+`assert.Eventually` → `postgres_test.go:156` → `Initializer.Errors` →
+`initializer.go:550`. The test passes alone and passes with its own package; it
+took the whole non-`erpc` sweep running at once to open the window.
+
+**This site is worse than the shutdown path.** `Errors()` is what a caller polls
+WHILE waiting for a connector to come up — `data/postgres_test.go` calls it
+inside a `require.Eventually`, and that is the documented way to read why a
+connector is not ready. A retrying task and a reading caller are the normal
+case here, not a rare one. The shutdown path needed a retry to land in a narrow
+window during teardown; this one needs only a slow connector and someone
+watching it.
+
+Now fixed the same way — call `Error()` once — and pinned by
+`TestInitializer_ErrorsSurvivesAReadDuringARetry`, which runs eight readers
+against a 1µs retry loop for two seconds. Restoring the double call panics four
+times in that window, so the race is reliable, not marginal. The readers
+recover and report through `t.Errorf`: a nil deref in a goroutine that is not
+the test's own kills the whole test binary, and every other test in the package
+then reports nothing (see entry 26 for the same trap).
+
+**The lesson underneath the first lesson.** A fix written from one stack trace
+lands where the trace pointed. Grep for the PATTERN before closing an entry —
+`grep -n "Error()" util/initializer.go` would have shown both sites on the day
+170 was written.
+
+That grep is now done repo-wide, so nobody has to repeat it. A search for
+`if X() != nil` followed by a line that calls `X()` again finds two more sites,
+`util/initializer.go:774` and `data/redis.go:555`, and **both are safe**. Each
+is `ctx.Err()`, which is monotone — once non-nil it stays non-nil — and neither
+dereferences the result; they pass it to `Err()` and `%w`. No third instance of
+the defect exists in the tree.
+
+---
 ## 169. `make test-fast` compiles to one shared path, so two checkouts overwrite each other
 
 **Status: FIXED in the fork.** Upstream still carries it.
@@ -6168,6 +6300,17 @@ The rot is faster than that argument needs. The corrected citation above went
 stale again inside the same session: a later edit to `durationOr` added five
 lines above it, so `L837-839` became `L843-845` between one commit and the
 next. It was corrected a second time. Nothing would have caught it.
+
+**Measured again on 2026-08-22.** The config-edge fixes for 25, 36 and 117
+changed `common/defaults.go` by a net +10 lines around `NetworkDefaults.
+SetDefaults`, and `common/architecture_evm.go` by a net +25. Every
+`<SourceLink file="common/defaults.go" lines="..."/>` below those points is now
+off by that much — including the four in `docs/pages/config/projects/
+networks.mdx` that cite the very defaulting behaviour entry 36 changed. They
+were not corrected, because correcting a handful of the 622 and leaving the rest
+teaches a reader that the corrected ones are trustworthy. The count of wrong
+citations is now higher than the hand-check above measured, and the fork caused
+part of the increase.
 
 The cheap gate catches the past-EOF case only. The durable fix is to stop
 pinning lines: cite the SYMBOL, as
@@ -6292,3 +6435,94 @@ natural base ref.
 The second is the weaker commitment and matches the stated intent. Recorded
 rather than applied: changing when a CI job runs is a decision about the
 pipeline, and the person who added the job should make it.
+
+## 177. Every deprecation warning links to a page that does not exist
+
+**Status: FIXED in the fork.** Upstream still carries it. **Severity: low.**
+Found while fixing entry 126; no test pins it, because the assertion would be
+"this URL resolves", which no unit test can answer.
+
+`common/legacy/warnings.go` built every message around one constant:
+
+    const migrationDoc = "https://docs.erpc.cloud/migration/selection-policy"
+
+There is no such page. `docs/pages/` has no `migration/` directory at all. Each
+message then appended its own anchor — `#routing-strategy`,
+`#score-metrics-mode`, `#eval-function`, `#resample-excluded` — and none of
+those headings exist either, on that page or any other.
+
+Three of these messages were already live before entry 126 (`warnRoutingStrategy`,
+`warnScoreMetricsMode`, `warnInertField`), so operators upgrading from a legacy
+config have been sent to a 404 for as long as the translator has warned. Entry
+126 made two more live, which is how it surfaced.
+
+**The fix points the constant at the page that exists**,
+`https://docs.erpc.cloud/config/projects/selection-policies`, and deletes the
+anchors. A link to a heading nobody wrote is a commitment to a page layout, not
+a destination — the weaker link is the one that lands.
+
+Writing the migration page is the better answer and was not attempted here. It
+is a docs task, not a config-edge fix, and the fork would then own a page
+upstream does not have.
+
+## 178. Eight of the nine DynamoDB "is required" errors cannot fire
+
+**Status:** open. **Severity: low**, and harmless today — but the validation
+claims a contract it never enforces, and a test asserts the claim while
+bypassing the path that would disprove it.
+
+`DynamoDBConnectorConfig.Validate` returns nine `... is required` errors.
+`common/config.go` runs `cfg.SetDefaults(opts)` and THEN `cfg.Validate()`, and
+`DynamoDBConnectorConfig.SetDefaults` fills every one of the nine fields:
+`Table`, `PartitionKeyName`, `RangeKeyName`, `ReverseIndexName`,
+`TTLAttributeName`, `InitTimeout`, `GetTimeout`, `SetTimeout` and
+`StatePollInterval`. By the time `Validate` looks, none of them is empty.
+
+**Measured, not inferred.** A config whose whole DynamoDB block is
+
+    dynamodb:
+      region: us-west-2
+
+loads clean, and comes out with `table="erpc_shared_state"`,
+`partitionKeyName="groupKey"`, `rangeKeyName="requestKey"`, `initTimeout=5s`,
+`statePollInterval=5s`.
+
+`TestDynamoDBConnectorConfig_Validate_EveryFieldIsRequired` passes because it
+calls `Validate` directly on a struct it mutated, never running `SetDefaults`.
+It proves the function's internal logic and nothing about the load path.
+
+The ninth check is the exception and is now live: entry 25 changed
+`statePollInterval` from `== 0` to `<= 0`, and a NEGATIVE value does survive
+`SetDefaults`. That is the only one of the nine an operator can trip.
+
+Not patched, and the reason matters. Deleting eight unreachable checks is a
+tidy-up with real rebase cost and no behaviour change, and they would come back
+the moment the load order changed. The finding worth keeping is the shape:
+**a `Validate` that runs after `SetDefaults` can only check what `SetDefaults`
+does not fill.** Every other connector's `Validate` in `common/validation.go`
+has the same structure and deserves the same read.
+
+## 179. The TypeScript SDK exports two of the three availability confidences
+
+**Status:** open. **Severity: low.** A value that exists in Go, is used by the
+Go code, and cannot be named from a TypeScript config.
+
+`typescript/config/lib/generated.d.ts` declares:
+
+    export type AvailbilityConfidence = number;
+    export declare const AvailbilityConfidenceBlockHead: AvailbilityConfidence;
+    export declare const AvailbilityConfidenceFinalized: AvailbilityConfidence;
+
+`AvailbilityConfidenceStateProven` is missing. Go has had it since the
+state-proven head landed; `architecture/evm/hooks.go` asserts against it on
+every state method.
+
+The reachable damage is the same as entry 117's: the only YAML- or
+TS-configurable field of this type is `EvmNetworkConfig.EmptyResultConfidence`,
+and its readers test only for `Finalized`, so naming `stateProven` there would
+change nothing today. The asymmetry is the finding, not a broken config.
+
+Worth reading with entry 117, which fixed the Go parser/printer half. The SDK
+half is generated, so the fix belongs in whatever generates it (tygo), not in
+the `.d.ts`. That is why this is recorded rather than patched: editing a
+generated file is a fix that the next generation deletes.
