@@ -43,6 +43,12 @@ type WsConnection struct {
 	// Subscription state lives on the per-connection wsclient.Adapter
 	// owned by the SubscriptionManager — see indexer/adapters/wsclient.
 	// WsConnection no longer tracks subscriptions directly.
+	//
+	// The exception is passthrough subscriptions — every `<ns>_subscribe`
+	// that is not eth's. Those have no indexer backing and are pinned to one
+	// upstream socket, so the connection owns them directly. See
+	// passthrough_subscription.go.
+	passthroughSubs *passthroughSubscriptions
 
 	closed atomic.Bool
 }
@@ -90,6 +96,7 @@ func (s *HttpServer) handleWebSocket(
 		chainId:             chainId,
 		networkId:           networkId,
 		httpReq:             r,
+		passthroughSubs:     newPassthroughSubscriptions(),
 	}
 
 	lg.Info().Str("connId", wsc.id).Str("remoteAddr", r.RemoteAddr).Msg("websocket connection established")
@@ -271,6 +278,16 @@ func (wsc *WsConnection) handleSingleRequest(raw []byte, startedAt *time.Time) {
 	// Subscription methods have their own dedicated handling path
 	if IsSubscriptionMethod(method) {
 		wsc.handleSubscriptionMethod(requestCtx, nq, method, startedAt)
+		return
+	}
+
+	// Every other `<ns>_subscribe` goes through the passthrough path. Without
+	// it these fell to project.Forward below and were sent as ordinary
+	// one-shot requests: the upstream really did open a subscription and
+	// return an id, eRPC handed it back, and nothing ever registered a
+	// handler for it. The client held an id that could never deliver.
+	if IsPassthroughSubscriptionMethod(method) {
+		wsc.handlePassthroughMethod(requestCtx, nq, method, startedAt)
 		return
 	}
 
@@ -725,6 +742,14 @@ func (wsc *WsConnection) closeWithCode(code int, reason string) {
 		wsc.subscriptionManager.CleanupConnection(wsc, wsc.project)
 	}
 
+	// Passthrough handlers live on the UPSTREAM's ws client, which outlives
+	// this connection and serves every other one. Leaving them registered
+	// would leak a handler per subscription per client, for the life of the
+	// process.
+	if wsc.passthroughSubs != nil {
+		wsc.cleanupPassthroughSubscriptions()
+	}
+
 	_ = wsc.conn.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(code, reason),
@@ -735,12 +760,27 @@ func (wsc *WsConnection) closeWithCode(code int, reason string) {
 	wsc.logger.Info().Str("connId", wsc.id).Int("closeCode", code).Msg("websocket connection closed")
 }
 
-// WriteSubscriptionNotification sends a subscription notification to the client.
-// Used by the subscription manager to route upstream events to clients.
+// WriteSubscriptionNotification sends an eth_subscription notification to the
+// client. Used by the subscription manager to route indexer events, which are
+// always eth's.
 func (wsc *WsConnection) WriteSubscriptionNotification(clientSubId string, result json.RawMessage) error {
+	return wsc.WriteSubscriptionNotificationAs("eth_subscription", clientSubId, result)
+}
+
+// WriteSubscriptionNotificationAs sends a notification under the method name
+// the UPSTREAM used.
+//
+// The name used to be the hard-coded "eth_subscription" here. That is correct
+// for the indexer path and wrong for every other namespace: a client
+// subscribed to reth's msgboard filters on the name its own docs give, and
+// relabelling the frame makes the subscription look silent. The name is also
+// not fixed within a namespace — reth emitted `msgboard_subscribe` up to
+// v2.5.1-pulse-3 and `msgboard_subscription` from pulse-4 — so eRPC carries
+// through what it was given rather than deriving anything.
+func (wsc *WsConnection) WriteSubscriptionNotificationAs(method string, clientSubId string, result json.RawMessage) error {
 	notification := map[string]interface{}{
 		"jsonrpc": "2.0",
-		"method":  "eth_subscription",
+		"method":  method,
 		"params": map[string]interface{}{
 			"subscription": clientSubId,
 			"result":       result,
