@@ -250,11 +250,19 @@ These carry **no rebase debt at all** — the fork owns the file. Entry 6 is
 rising in severity because the fork's own polyglot work surfaced it. Entry 92
 is fork code by its own status line. Take these whenever convenient.
 
-**5 — diagnostics, admin surfaces and small defects (18).**
-5, 11, 15, 16, 17, 21, 34, 37, 52, 54, 61, 65, 90, 113, 143, 154, 161, 166.
+**5 — diagnostics, admin surfaces and small defects (16 left of 18).**
+5, 11, 15, 16, 17, 21, 34, 37, 52, 54, 61, 65, 90, 113, 143, 154, ~~161~~,
+~~166~~.
 Real, contained, individually small. Entry 34 is five defects in one entry.
 Entry 52's first bullet is already fixed and only its second is open. Entry 143
 is low alone and high next to 99.
+
+161 and 166 were the residue of the old deferred pile and are now fixed. 161
+turned out to have a seventh site carrying TWO dropped errors rather than one:
+a `hash` of the wrong JSON type became `""` through a type assertion before the
+decode ever ran. 166 splits three fields two ways — eRPC fills the chain id it
+routed by, and leaves both genesis hashes unset, because it holds no genesis
+hash and inventing one would be worse than silence.
 
 ## Suggested order
 
