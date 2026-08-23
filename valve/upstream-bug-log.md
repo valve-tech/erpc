@@ -6,7 +6,7 @@ a candidate to report or to send back as a patch.
 The fork tracks upstream by rebasing on it. It does NOT send these back as
 pull requests — that was considered and ruled out. So every fix here is a patch
 that must survive each rebase, or be retired when upstream fixes the same
-defect its own way. The 102 entries reading "FIXED in the fork" are therefore a
+defect its own way. The 104 entries reading "FIXED in the fork" are therefore a
 rebase risk register, not a pull-request backlog.
 
 **Status key.** Every entry carries exactly one of four statuses.
@@ -5579,26 +5579,39 @@ Mutation: deleting the guard fails the rewritten test.
 
 ## 166. The gRPC surface never fills the chain fields it can answer
 
-**Status:** open. **Severity: low.** The mirror image of 32, on the response
-side.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low.** The mirror image of 32, on the response side.
 
-BDS declares chain identity on responses too, and eRPC leaves all of it unset:
+BDS declares chain identity on responses too, and eRPC left all of it unset:
 
-- `ChainIdResponse.genesisHash` (`erpc/grpc_server.go`, the `ChainId` handler
-  returns `&evm.ChainIdResponse{ChainId: chainID}` only).
+- `ChainIdResponse.genesisHash`.
 - `GetBlockResponse.chainId` and `GetBlockResponse.chainGenesisHash`
   (`GetBlockByNumber` and `GetBlockByHash`).
 
-`chainId` is the cheap one: the handler already knows the network it routed to,
-so it can fill `GetBlockResponse.chainId` with no new lookup. That closes the
-loop for a client that wants to confirm which chain answered — the same
-question entry 32's request-side `chainId` asks. The two genesis-hash fields
-need a genesis hash eRPC does not hold, which is the same reason 32 refuses the
-request-side field; leaving them unset is correct until eRPC learns one.
+**One of the three is now filled, and the other two stay unset on purpose.**
+`chainId` was the cheap one: the handler routed by chain id, so
+`chainIdForResponse` reads it back off the `RequestInput` with no new lookup.
+That closes the loop for a client that wants to confirm WHICH chain answered —
+the same question entry 32's request-side `chainId` asks. It is filled on the
+null-result early return too: no block is still an answer from a chain, and a
+client reading the field off every reply must not find a hole in that one.
 
-A client cannot tell "chain 0" from "not set" through the generated
-`GetChainId()` accessor, only through the pointer field, which is why an unset
-`chainId` is worth filling rather than leaving to the reader.
+The two genesis-hash fields need a genesis hash eRPC does not hold. That is the
+same reason `extractRequestInput` refuses a request that pins one, and
+answering a hash eRPC does not have would be worse than saying nothing.
+
+`chainId` is an optional field, so nil means "not telling you". A successful
+response cannot reach that: the request only got this far because
+`"<architecture>:<chainId>"` resolved to a live network, and an EVM network id
+is numeric.
+
+Pinned by `erpc/grpc_server_chain_identity_test.go` (three tests). The
+genesis-hash one is the important half — it reddens if somebody fills a field
+from a value eRPC does not have. It reads `chainId` through the pointer and not
+`GetChainId()`, because the accessor returns 0 for "chain 0" and for "not set"
+alike, which is the ambiguity the field exists to remove. Mutations: unsetting
+`chainId` on the block returns, unsetting it on the empty answer, and inventing
+a genesis hash each fail their own test.
 
 ---
 
@@ -6052,22 +6065,41 @@ log record without checking that it is what the encoder promised.
 
 ## 161. `protoTraceFromJSON` discards every hex-decode error, the same way it discarded quantities
 
-**Status:** open. **Severity: low-medium.** Same class as 132, different helper.
-Found while fixing 132.
+**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+low-medium.** Same class as 132, different helper. Found while fixing 132.
 
-`architecture/evm/eth_query_shim.go:567-575` — six sites in
-`protoTraceFromJSON` hand a wire string to `common.HexToBytes` and drop the
-error: `From`, `To`, `Input`, `Output`, `TransactionHash` and `BlockHash`. Only
-`To` is guarded against absence (`decoded.To != nil && *decoded.To != ""`); the
-other five cannot tell an absent field from a garbage one.
+`architecture/evm/eth_query_shim.go` — six sites in `protoTraceFromJSON` handed
+a wire string to `common.HexToBytes` and dropped the error: `From`, `To`,
+`Input`, `Output`, `TransactionHash` and `BlockHash`. Only `To` was guarded
+against absence; the other five could not tell an absent field from a garbage
+one. A garbage `from` became an empty byte slice, and
+`NativeTransfersFromTraces` then reported a transfer with no sender — a claim
+about the chain that the chain never made.
 
-A garbage `from` becomes an empty byte slice, and `NativeTransfersFromTraces`
-then reports a transfer with no sender. Entry 132's rule fits here unchanged:
-absent stays absent, present-but-unreadable is reported. I did not apply it, to
-keep 132's change reviewable.
+The fix is entry 132's rule, unchanged: absent stays absent,
+present-but-unreadable is reported. It arrives as `parseOptionalBytes`, the
+hex twin of 132's `parseOptionalQuantity`, written next to it so the two rules
+sit together.
 
-`fetchTracesForBlock:443` has a seventh, on the block hash it stamps onto every
-trace of the block.
+`to` keeps its own shape rather than joining the others. A call that creates a
+contract has no `to`, and Parity writes that as `""`, so an empty string there
+is an answer and not a failure. The guard now tests `decoded.To != nil` alone,
+and `parseOptionalBytes` handles the empty string.
+
+**The seventh site had TWO dropped errors, not one.** `fetchTracesForBlock`
+read `blockHashHex, _ := block["hash"].(string)` and then
+`blockHash, _ := common.HexToBytes(blockHashHex)`. A `hash` of the wrong JSON
+type became `""` through the assertion, and an unreadable string became an
+empty slice through the decode. Either way every trace of that block carried no
+block hash. This one is the expensive site: the value is stamped onto EVERY
+trace of the block, so one bad read mislabels the whole block's worth. An
+ABSENT hash still keeps the nil — a pending block has none.
+
+Pinned by `architecture/evm/eth_query_unreadable_bytes_test.go` (six tests,
+three of them counterweights: an absent field stays absent, an explicit empty
+`to` stays empty, and a readable field still decodes). Mutations: restoring the
+discard at the decoder, at the block-hash decode, and at the type assertion
+each fail their own test.
 
 ---
 
