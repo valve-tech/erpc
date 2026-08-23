@@ -208,7 +208,7 @@ func TestWsClientDetectsSilentPeerAndReconnects(t *testing.T) {
 	subID1 := subscribeNewHeads(t, client)
 
 	heads := make(chan []byte, 16)
-	client.RegisterSubscriptionHandler(subID1, func(params []byte) {
+	client.RegisterSubscriptionHandler(subID1, func(_ string, params []byte) {
 		heads <- params
 	})
 	conn1.sendNewHead(subID1, "0x1")
@@ -245,7 +245,7 @@ func TestWsClientDetectsSilentPeerAndReconnects(t *testing.T) {
 	// adapter does this from its reconnect hook) and verify notifications
 	// flow again.
 	subID2 := subscribeNewHeads(t, client)
-	client.RegisterSubscriptionHandler(subID2, func(params []byte) {
+	client.RegisterSubscriptionHandler(subID2, func(_ string, params []byte) {
 		heads <- params
 	})
 	conn2.sendNewHead(subID2, "0x2")

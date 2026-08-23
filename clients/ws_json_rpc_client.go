@@ -101,7 +101,7 @@ type WsJsonRpcClient struct {
 
 	// Subscription notification callbacks: upstreamSubID -> handler
 	subHandlersMu sync.RWMutex
-	subHandlers   map[string]func(params []byte)
+	subHandlers   map[string]func(method string, params []byte)
 
 	// Disconnect/reconnect callbacks are keyed by caller-supplied IDs so
 	// subscribers can replace (on re-subscribe) and remove (on teardown)
@@ -187,7 +187,7 @@ func NewWsJsonRpcClient(
 		pending:         make(map[string]chan *wsPendingResult),
 		connReady:       make(chan struct{}),
 		connWake:        make(chan struct{}, 1),
-		subHandlers:     make(map[string]func(params []byte)),
+		subHandlers:     make(map[string]func(method string, params []byte)),
 		onDisconnectCbs: make(map[string]func()),
 		onReconnectCbs:  make(map[string]func()),
 		errorExtractor:  extractor,
@@ -323,8 +323,15 @@ func (c *WsJsonRpcClient) SendRequest(ctx context.Context, req *common.Normalize
 }
 
 // RegisterSubscriptionHandler registers a callback for a specific upstream subscription ID.
-// When the upstream sends a notification for this subscription, the handler is called with the raw params bytes.
-func (c *WsJsonRpcClient) RegisterSubscriptionHandler(upstreamSubID string, handler func(params []byte)) {
+// When the upstream sends a notification for this subscription, the handler is
+// called with the notification's own method name and the raw params bytes.
+//
+// The method is passed rather than assumed because the upstream chooses it and
+// it varies: eth writes `eth_subscription`, and reth's msgboard emitted
+// `msgboard_subscribe` up to v2.5.1-pulse-3 before pulse-4 renamed it to
+// `msgboard_subscription`. A caller that has to relay the notification onward
+// needs the string the upstream actually used; the indexer path ignores it.
+func (c *WsJsonRpcClient) RegisterSubscriptionHandler(upstreamSubID string, handler func(method string, params []byte)) {
 	c.subHandlersMu.Lock()
 	c.subHandlers[upstreamSubID] = handler
 	c.subHandlersMu.Unlock()
@@ -561,11 +568,19 @@ func (c *WsJsonRpcClient) handleMessage(message []byte) {
 }
 
 func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
-	if method != "eth_subscription" {
-		c.logger.Debug().Str("method", method).Msg("received non-subscription notification")
-		return
-	}
-
+	// Route on the subscription ID, never on the method name.
+	//
+	// This used to drop every notification not named exactly
+	// "eth_subscription", which silently discarded every non-eth namespace —
+	// a `msgboard_subscribe` returned a live subscription id and then
+	// delivered nothing for the life of the connection. The name is the
+	// upstream's choice and it is not stable even within one namespace: reth
+	// emitted `msgboard_subscribe` up to v2.5.1-pulse-3 and
+	// `msgboard_subscription` from pulse-4 on.
+	//
+	// The id is what identifies a subscription. It is a value the upstream
+	// minted for us, and subHandlers is keyed purely by it, so a hit is
+	// already proof the frame belongs to a subscription this client opened.
 	var notifParams wsNotificationParams
 	if err := common.SonicCfg.Unmarshal(params, &notifParams); err != nil {
 		c.logger.Warn().Err(err).Msg("failed to parse subscription notification params")
@@ -577,11 +592,14 @@ func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
 	c.subHandlersMu.RUnlock()
 
 	if !ok {
-		c.logger.Debug().Str("subscriptionId", notifParams.Subscription).Msg("received notification for unknown subscription")
+		c.logger.Debug().
+			Str("method", method).
+			Str("subscriptionId", notifParams.Subscription).
+			Msg("received notification for unknown subscription")
 		return
 	}
 
-	handler(params)
+	handler(method, params)
 }
 
 func (c *WsJsonRpcClient) reconnect() {
