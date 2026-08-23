@@ -453,6 +453,27 @@ func parseOptionalQuantity(raw string, field string) (uint64, error) {
 	return value, nil
 }
 
+// parseOptionalBytes is parseOptionalQuantity's twin for a wire hex string.
+// The same rule applies, for the same reason: an ABSENT field keeps the nil,
+// because the proto has no way to say "absent", and a field that is PRESENT
+// and unreadable is reported rather than flattened.
+//
+// Six sites in protoTraceFromJSON used to read `x, _ := common.HexToBytes(...)`
+// and drop the error, so garbage and absence produced the same empty slice.
+// A garbage `from` became a transfer with no sender in
+// NativeTransfersFromTraces — a claim about the chain that the chain never
+// made. See entry 161 in valve/upstream-bug-log.md.
+func parseOptionalBytes(raw string, field string) ([]byte, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := common.HexToBytes(raw)
+	if err != nil {
+		return nil, fmt.Errorf("unreadable %s: %w", field, err)
+	}
+	return value, nil
+}
+
 func uint32FromUint64(value uint64, field string) (uint32, error) {
 	if value > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("%s exceeds uint32 range", field)
