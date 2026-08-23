@@ -439,8 +439,26 @@ func fetchTracesForBlock(ctx context.Context, network common.Network, parentReqI
 	if err != nil {
 		return nil, fmt.Errorf("block has an unreadable number: %w", err)
 	}
-	blockHashHex, _ := block["hash"].(string)
-	blockHash, _ := common.HexToBytes(blockHashHex)
+	// The block hash below is stamped onto EVERY trace of this block, so one
+	// unreadable value mislabels the whole block's worth of traces. Two errors
+	// used to be dropped here: a non-string `hash` became "" through the type
+	// assertion, and an unreadable string became an empty slice through
+	// HexToBytes. Either way every trace carried no block hash, which reads
+	// downstream as a chain that does not report one.
+	//
+	// An ABSENT hash keeps the nil. A pending block has no hash, and the proto
+	// has no way to say "absent".
+	var blockHash []byte
+	if rawHash := block["hash"]; rawHash != nil {
+		hashHex, ok := rawHash.(string)
+		if !ok {
+			return nil, fmt.Errorf("block %d has a hash of unsupported type %T", blockNumber, rawHash)
+		}
+		blockHash, err = parseOptionalBytes(hashHex, "block hash")
+		if err != nil {
+			return nil, fmt.Errorf("block %d has an %w", blockNumber, err)
+		}
+	}
 	blockNumberHex, _ := block["number"].(string)
 	if blockNumberHex == "" {
 		blockNumberHex = fmt.Sprintf("0x%x", blockNumber)
@@ -564,15 +582,41 @@ func protoTraceFromJSON(trace map[string]interface{}) (*bdsevm.Trace, error) {
 		return nil, err
 	}
 
-	from, _ := common.HexToBytes(decoded.From)
-	var to []byte
-	if decoded.To != nil && *decoded.To != "" {
-		to, _ = common.HexToBytes(*decoded.To)
+	// Six hex fields, one rule, the same rule the quantities above already
+	// follow: absent stays absent, present-but-unreadable is reported. Each
+	// of these used to drop the decode error, so a garbage value and a
+	// missing one both arrived as an empty slice. Downstream cannot tell
+	// those apart — NativeTransfersFromTraces reads an empty `from` as a
+	// transfer with no sender.
+	from, err := parseOptionalBytes(decoded.From, "from")
+	if err != nil {
+		return nil, err
 	}
-	input, _ := common.HexToBytes(decoded.Input)
-	output, _ := common.HexToBytes(decoded.Output)
-	txHash, _ := common.HexToBytes(decoded.TransactionHash)
-	blockHash, _ := common.HexToBytes(decoded.BlockHash)
+	// `to` was already guarded for absence, and stays that way: a call that
+	// creates a contract has no `to`, and the proto has no way to say so.
+	var to []byte
+	if decoded.To != nil {
+		to, err = parseOptionalBytes(*decoded.To, "to")
+		if err != nil {
+			return nil, err
+		}
+	}
+	input, err := parseOptionalBytes(decoded.Input, "input")
+	if err != nil {
+		return nil, err
+	}
+	output, err := parseOptionalBytes(decoded.Output, "output")
+	if err != nil {
+		return nil, err
+	}
+	txHash, err := parseOptionalBytes(decoded.TransactionHash, "transactionHash")
+	if err != nil {
+		return nil, err
+	}
+	blockHash, err := parseOptionalBytes(decoded.BlockHash, "blockHash")
+	if err != nil {
+		return nil, err
+	}
 	gas, err := parseOptionalQuantity(decoded.Gas, "gas")
 	if err != nil {
 		return nil, err
