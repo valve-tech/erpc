@@ -159,7 +159,7 @@ func TestWsSubscriptionHandlers_UnregisterStopsDelivery(t *testing.T) {
 	subID := subscribeNewHeads(t, c)
 
 	fired := make(chan struct{}, 4)
-	c.RegisterSubscriptionHandler(subID, func([]byte) { fired <- struct{}{} })
+	c.RegisterSubscriptionHandler(subID, func(string, []byte) { fired <- struct{}{} })
 
 	conn.sendNewHead(subID, "0x1")
 	select {
@@ -251,7 +251,7 @@ func TestWsHandleNotification_UnknownSubscriptionReachesNoHandler(t *testing.T) 
 
 	subID := subscribeNewHeads(t, c)
 	fired := make(chan struct{}, 4)
-	c.RegisterSubscriptionHandler(subID, func([]byte) { fired <- struct{}{} })
+	c.RegisterSubscriptionHandler(subID, func(string, []byte) { fired <- struct{}{} })
 
 	conn.sendNewHead("0xsomeoneelsessubscription", "0x1")
 	select {

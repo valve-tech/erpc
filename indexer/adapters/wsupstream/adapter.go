@@ -395,7 +395,7 @@ func (a *Adapter) subscribeNewHeads(ctx context.Context) error {
 	a.newHeadsSubID = subID
 	a.subsMu.Unlock()
 
-	a.wsClient.RegisterSubscriptionHandler(subID, func(params []byte) {
+	a.wsClient.RegisterSubscriptionHandler(subID, func(_ string, params []byte) {
 		a.handleNewHeads(params)
 	})
 	a.logger.Info().Str("upstreamSubId", subID).Msg("subscribed to newHeads")
@@ -430,7 +430,7 @@ func (a *Adapter) subscribeFilter(ctx context.Context, sub *filterSub) error {
 	sub.upstreamSub = subID
 	a.subsMu.Unlock()
 
-	a.wsClient.RegisterSubscriptionHandler(subID, func(params []byte) {
+	a.wsClient.RegisterSubscriptionHandler(subID, func(_ string, params []byte) {
 		a.handleFilter(sub.subType, sub.paramsHash, params)
 	})
 	a.logger.Info().Str("upstreamSubId", subID).Str("subType", sub.subType).
@@ -464,11 +464,11 @@ func (a *Adapter) handleNewHeads(raw []byte) {
 		return
 	}
 	a.sink.Ingest(indexer.StreamEvent{
-		Kind:      indexer.KindNewHead,
-		NetworkId: a.networkID,
-		SourceId:  a.Name(),
-		Block:     indexer.BlockRef{Number: num, Hash: header.Hash, ParentHash: header.ParentHash},
-		Payload:   outer.Result,
+		Kind:       indexer.KindNewHead,
+		NetworkId:  a.networkID,
+		SourceId:   a.Name(),
+		Block:      indexer.BlockRef{Number: num, Hash: header.Hash, ParentHash: header.ParentHash},
+		Payload:    outer.Result,
 		ObservedAt: time.Now(),
 	})
 }

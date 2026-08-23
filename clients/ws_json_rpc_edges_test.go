@@ -191,8 +191,8 @@ func TestWsHandleNotification_ReachesOnlyTheMatchingSubscriber(t *testing.T) {
 
 	mine := make(chan []byte, 1)
 	theirs := make(chan []byte, 1)
-	c.RegisterSubscriptionHandler("0xaaa", func(p []byte) { mine <- p })
-	c.RegisterSubscriptionHandler("0xbbb", func(p []byte) { theirs <- p })
+	c.RegisterSubscriptionHandler("0xaaa", func(_ string, p []byte) { mine <- p })
+	c.RegisterSubscriptionHandler("0xbbb", func(_ string, p []byte) { theirs <- p })
 
 	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xaaa","result":{"number":"0x1"}}}`))
 
