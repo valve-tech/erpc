@@ -258,6 +258,30 @@ func (gs *GrpcServer) ChainId(ctx context.Context, req *evm.ChainIdRequest) (*ev
 	return &evm.ChainIdResponse{ChainId: chainID}, nil
 }
 
+// chainIdForResponse reads the chain id this request routed to, for the
+// optional `chainId` field BDS declares on a response. The handler already
+// knows it, so filling it costs no lookup, and it closes the loop for a client
+// that wants to confirm WHICH chain answered — the same question the
+// request-side `chainId` asks.
+//
+// The three response-side chain fields used to be left unset on every reply.
+// The other two are genesis hashes, and they stay unset: eRPC holds no genesis
+// hash for an EVM network, which is the same reason extractRequestInput above
+// refuses a request that pins one. Answering a hash eRPC does not have would
+// be worse than saying nothing.
+//
+// nil means "not telling you", which the optional field can express. A
+// successful response cannot reach that: the request only got this far because
+// "<architecture>:<chainId>" resolved to a live network, and an EVM network id
+// is numeric.
+func chainIdForResponse(input *RequestInput) *uint64 {
+	id, err := strconv.ParseUint(input.ChainId, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &id
+}
+
 func (gs *GrpcServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByNumberRequest) (*evm.GetBlockResponse, error) {
 	input, err := gs.extractRequestInput(ctx, "eth_getBlockByNumber", req)
 	if err != nil {
@@ -272,7 +296,8 @@ func (gs *GrpcServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByN
 		return nil, gs.mapToGRPCStatus(err)
 	}
 	if string(result) == "null" {
-		return &evm.GetBlockResponse{}, nil
+		// No block, but a chain still answered. Name it.
+		return &evm.GetBlockResponse{ChainId: chainIdForResponse(input)}, nil
 	}
 	var block evm.JsonRpcBlock
 	if err := sonic.Unmarshal(result, &block); err != nil {
@@ -287,6 +312,7 @@ func (gs *GrpcServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlockByN
 		Transactions:     protoBlock.TransactionHashes,
 		FullTransactions: protoBlock.FullTransactions,
 		Withdrawals:      protoBlock.Withdrawals,
+		ChainId:          chainIdForResponse(input),
 	}, nil
 }
 
@@ -304,7 +330,8 @@ func (gs *GrpcServer) GetBlockByHash(ctx context.Context, req *evm.GetBlockByHas
 		return nil, gs.mapToGRPCStatus(err)
 	}
 	if string(result) == "null" {
-		return &evm.GetBlockResponse{}, nil
+		// No block, but a chain still answered. Name it.
+		return &evm.GetBlockResponse{ChainId: chainIdForResponse(input)}, nil
 	}
 	var block evm.JsonRpcBlock
 	if err := sonic.Unmarshal(result, &block); err != nil {
@@ -319,6 +346,7 @@ func (gs *GrpcServer) GetBlockByHash(ctx context.Context, req *evm.GetBlockByHas
 		Transactions:     protoBlock.TransactionHashes,
 		FullTransactions: protoBlock.FullTransactions,
 		Withdrawals:      protoBlock.Withdrawals,
+		ChainId:          chainIdForResponse(input),
 	}, nil
 }
 
