@@ -495,19 +495,42 @@ configuration"` and never learns which method, or which upstream.
 
 ## 18. Auth strategy type inference is last-block-wins, silently
 
-**Status:** open. **Severity: low, and uncertain — may be intended.**
+**Status: FIXED in the fork.** Applied 2026-08-24 — validation now rejects
+the ambiguous shape. **Severity was: low.** Silent swap of who authenticates.
 
-`common/defaults.go:3135-3185`. `AuthStrategyConfig.SetDefaults` overwrites a
-declared `type` when a sub-block for another type is also present, with the last
-block in source order winning.
+The entry cited `common/defaults.go:3135-3185`; the real code is
+`common/defaults.go:3202-3251` (that range is `SelectionPolicyConfig`).
 
-A leftover `secret:` block above a new `jwt:` block changes which strategy
-authenticates, with no warning.
+The open question was documented-vs-accident. Both halves are documented, and
+they say different things:
 
-This may be deliberate inference. If so, validation is the natural place to
-reject the ambiguous shape rather than silently pick one.
+- The single-block inference is intended. `docs/pages/config/auth.mdx:202`
+  documents `type` as "Inferred from sub-config block", and
+  `typescript/config/src/types/generic.ts:123-143` models the strategy as a
+  discriminated union — one block, named by `type`.
+- The multi-block pick is documented as a hazard, not as semantics.
+  `docs/pages/config/auth.mdx:617` (gotcha 11) states the evaluation order
+  `secret → database → jwt → siwe` and then says "Never set multiple
+  sub-config blocks in one strategy entry."
 
-Pinned by `TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePresent`.
+So one-block-per-strategy is an existing rule of the project. Nothing enforced
+it: `AuthStrategyConfig.Validate` at `common/validation.go:829` inspected only
+the block named by `Type` and never looked at the others, and YAML operators
+can write both keys because both are ordinary struct fields
+(`common/config.go:3066-3071`). TS users cannot — the union forbids it. The gap
+was YAML/JSON only.
+
+Fix: `common/validation.go:833-855` rejects a strategy carrying more than one
+of network/secret/database/jwt/siwe, naming the blocks it found. `SetDefaults`
+is unchanged — the single-block inference the docs promise still works, and
+`SetDefaults` also runs on configs that are never validated.
+
+Pinned by `TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePresent`
+(defaulting half, now asserting Validate stops the config),
+`TestAuthStrategyConfig_Validate_RejectsSeveralBlocksInOneStrategy` (enforcing
+half, driven from YAML to prove the shape is reachable), and
+`TestAuthStrategyConfig_Validate_AcceptsEverySingleBlockShape` (guards against
+a false positive on real configs).
 
 ---
 

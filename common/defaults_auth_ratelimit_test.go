@@ -64,10 +64,16 @@ func TestAuthStrategyConfig_SetDefaults_MaterializesTheBlockNamedByTheType(t *te
 }
 
 // TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePresent
-// records a sharp edge. A strategy carrying two blocks is a config mistake, but
-// today it is accepted silently and the LAST inference in source order decides
-// which one actually authenticates. An operator who left an old `secret:` block
-// above a new `jwt:` block gets jwt, with no warning either way.
+// pins the defaulting half of a two-part contract. SetDefaults infers `type`
+// from block presence, so with several blocks the LAST inference in source
+// order wins and the losing block stays in the config looking active. That is
+// a config mistake — docs/pages/config/auth.mdx gotcha 11 says "Never set
+// multiple sub-config blocks in one strategy entry" — so SetDefaults does not
+// have to reach a sensible answer here. Validate is what rejects the shape;
+// see TestAuthStrategyConfig_Validate_RejectsSeveralBlocksInOneStrategy.
+// SetDefaults stays permissive because it also runs on configs that are never
+// validated (tests, TS export), and because the single-block inference it
+// exists for must not change.
 func TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePresent(t *testing.T) {
 	t.Parallel()
 
@@ -81,6 +87,73 @@ func TestAuthStrategyConfig_SetDefaults_TheLastBlockWinsWhenSeveralArePresent(t 
 	require.Equal(t, AuthTypeJwt, s.Type,
 		"the declared type is overwritten without a word to the operator")
 	require.NotNil(t, s.Secret, "the ignored block is still present and looks active")
+
+	// The operator never gets to run on this config: Validate stops it, and
+	// stops it for the ambiguity itself rather than for some incidental
+	// complaint about the block that happened to win.
+	err := s.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exactly one")
+}
+
+// TestAuthStrategyConfig_Validate_RejectsSeveralBlocksInOneStrategy is the
+// enforcing half. An operator who leaves an old `secret:` block above a new
+// `jwt:` block would otherwise silently swap who authenticates, so the config
+// is rejected at startup instead of being resolved by source order.
+func TestAuthStrategyConfig_Validate_RejectsSeveralBlocksInOneStrategy(t *testing.T) {
+	t.Parallel()
+
+	// The shape is reachable from plain YAML — both keys are ordinary fields.
+	var s AuthStrategyConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+type: jwt
+secret:
+  id: leftover
+  value: old-token
+jwt:
+  verificationKeys:
+    kid: pem
+`), &s))
+	require.NotNil(t, s.Secret)
+	require.NotNil(t, s.Jwt)
+
+	require.NoError(t, s.SetDefaults())
+	err := s.Validate()
+	require.Error(t, err, "two blocks in one strategy must not be silently resolved")
+	require.Contains(t, err.Error(), "exactly one")
+	require.Contains(t, err.Error(), "secret")
+	require.Contains(t, err.Error(), "jwt")
+}
+
+// TestAuthStrategyConfig_Validate_AcceptsEverySingleBlockShape guards the other
+// side: the rejection must not fire on any config an operator would really
+// write. SetDefaults materializes the block named by `type`, so a well-formed
+// strategy has exactly one block by the time Validate sees it.
+func TestAuthStrategyConfig_Validate_AcceptsEverySingleBlockShape(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		cfg  *AuthStrategyConfig
+	}{
+		{"type only, block materialized", &AuthStrategyConfig{Type: AuthTypeNetwork}},
+		{"block only, type inferred", &AuthStrategyConfig{Secret: &SecretStrategyConfig{Id: "s", Value: "v"}}},
+		{"type and matching block", &AuthStrategyConfig{
+			Type:   AuthTypeSecret,
+			Secret: &SecretStrategyConfig{Id: "s", Value: "v"},
+		}},
+		{"jwt with keys", &AuthStrategyConfig{
+			Type: AuthTypeJwt,
+			Jwt:  &JwtStrategyConfig{VerificationKeys: map[string]string{"kid": "pem"}},
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, tc.cfg.SetDefaults())
+			require.NoError(t, tc.cfg.Validate())
+		})
+	}
 }
 
 // TestAuthConfig_SetDefaults_ReachesEveryStrategy — a defaulting pass that
