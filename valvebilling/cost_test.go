@@ -17,10 +17,7 @@ import (
 // relay.relay_request.weight and it holds exactly one distinct (chain, method)
 // pair with a non-zero weight out of 155 seen, because nearly all traffic is
 // credit-exempt.
-const (
-	corpusFile   = "testdata/cost-corpus.json"
-	methodCUFile = "testdata/method-cu.json"
-)
+const corpusFile = "testdata/cost-corpus.json"
 
 type corpus struct {
 	GeneratedAt    string       `json:"generatedAt"`
@@ -29,9 +26,8 @@ type corpus struct {
 	DefaultCU      int64        `json:"defaultCu"`
 	Rows           []PriceRow   `json:"rows"`
 	Cases          []corpusCase `json:"cases"`
-	// MethodCU is folded in by the generator. Until it is, the table is read
-	// from methodCUFile, which is extracted mechanically from the same
-	// TypeScript source rather than transcribed.
+	// MethodCU is the tier-3 compute-unit table, shipped by the generator so
+	// that no Go-side copy of it can drift from the TypeScript one.
 	MethodCU map[string]int64 `json:"methodCu"`
 }
 
@@ -51,18 +47,8 @@ func loadCorpus(t *testing.T) corpus {
 	var c corpus
 	require.NoError(t, json.Unmarshal(raw, &c))
 
-	if c.MethodCU == nil {
-		var side struct {
-			DefaultCU int64            `json:"defaultCu"`
-			MethodCU  map[string]int64 `json:"methodCu"`
-		}
-		sraw, err := os.ReadFile(methodCUFile)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(sraw, &side))
-		c.MethodCU = side.MethodCU
-		require.Equal(t, c.DefaultCU, side.DefaultCU,
-			"the corpus and the compute-unit table disagree on defaultCu; one of them is stale")
-	}
+	require.NotNil(t, c.MethodCU,
+		"the corpus must carry methodCu; a Go-side copy of that table is how the two languages drift")
 
 	require.NotEmpty(t, c.Rows)
 	require.NotEmpty(t, c.Cases)
@@ -110,12 +96,18 @@ func TestResolveCost_TakesThePathEachCaseIntendsToExercise(t *testing.T) {
 	tbl := tableFrom(t, c)
 
 	expected := map[string]CostSource{
-		"tier1-exact":                 SourceExactRow,
-		"tier1-mixed-case-address":    SourceExactRow,
-		"tier2-zero-address-fallback": SourceZeroAddressRow,
-		"tier3-method-cu":             SourceMethodConstant,
-		"tier3-default-cu":            SourceDefaultConstant,
-		"tier3-default-cu-huge":       SourceExactRow,
+		"tier1-exact":              SourceExactRow,
+		"tier1-mixed-case-address": SourceExactRow,
+		// The one that actually pins hazard 1. Every other mixed-case case
+		// uses the zero address, which has no hex letters, so uppercasing it
+		// is the identity function and the probe is byte-identical to the
+		// stored row. Removing the token fold leaves all of those passing and
+		// fails only this one.
+		"tier1-mixed-case-address-with-hex-letters": SourceExactRow,
+		"tier2-zero-address-fallback":               SourceZeroAddressRow,
+		"tier3-method-cu":                           SourceMethodConstant,
+		"tier3-default-cu":                          SourceDefaultConstant,
+		"tier3-default-cu-huge":                     SourceExactRow,
 	}
 
 	seen := map[string]int{}
