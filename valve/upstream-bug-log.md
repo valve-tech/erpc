@@ -6585,8 +6585,52 @@ entry started.
 
 ## 176. The fork's whole-tree pre-commit CI job is red on `main`, and always was
 
-**Status:** open. **Severity: medium for the fork's gates**, none for the
-product. Needs a decision, not a patch.
+**Status: FIXED in the fork.** Applied 2026-08-24, by the narrowing option
+below. **Severity was: medium for the fork's gates**, none for the product.
+
+The job now passes `--from-ref` / `--to-ref` through the action's `extra_args`
+input, so it runs the hooks over the commits under review instead of the whole
+tree. That enforces what the local hooks enforce and commits to nothing about
+the 63 upstream-owned files. The checkout takes `fetch-depth: 0`, because
+`--from-ref` needs the base commit and a shallow checkout omits it.
+
+**The push trigger got the answer this entry was missing, and it is not the
+first answer tried.** The job first gained `if: github.event_name ==
+'pull_request'`, on the reasoning that a push has no base ref you can trust —
+`github.event.before` is all zeros when a branch is created and names a
+discarded commit after a force push, so any fallback would run only when the
+primary answer is already wrong and nothing would exercise it.
+
+That reasoning is sound and the conclusion was still wrong **for this
+repository**. The fork lands most work by pushing straight to `main`; every
+commit on main today arrived that way, none through a pull request. A
+pull-request-only job therefore never runs here at all, which is the same
+non-gate as a job that is always red. The measured fact about how this fork
+commits outranks the general argument about what a push cannot promise.
+
+So the job runs on both triggers, and `valve/precommit-range.sh` picks the base:
+the pull request's base when there is one, `github.event.before` for a push, and
+`HEAD~1` when neither resolves to a commit. One `git cat-file -e` test covers
+the empty case, the all-zeros case and the force-push case together, so the
+fallback is one path rather than three. It lives in a fork-owned shell script
+rather than inline in the workflow expression for one reason: a script can be
+run, and `valve/precommit-range-test.sh` runs it. An untested fallback is a
+guess.
+
+Verified on 2026-08-24. `valve/precommit-range-test.sh` passes seven checks
+covering each input shape, including a single-commit repository. Deleting the
+unresolvable-commit guard fails three of them, so the guard is load-bearing.
+The command CI will run — `pre-commit run --from-ref <computed base> --to-ref
+HEAD` — exits 0 on this tree, and every hook including shellcheck passes over
+both new scripts. The workflow parses, carries no job-level `if`, and wires
+`PR_BASE`/`PUSH_BEFORE` into the step. `pre-commit/action` v3.0.1 declares
+`extra_args` with the description "options to pass to pre-commit run", and
+appends it to `pre-commit run --show-diff-on-failure --color=always`.
+
+What this still does not gate: a force push to `main` checks the wrong range,
+because the range it should check no longer exists. The job falls back to
+`HEAD~1` and reports on that instead of failing, which is a narrower claim than
+the job appears to make.
 
 The fork added a `pre-commit` job to `.github/workflows/test.yml` (upstream's
 copy of that file has no pre-commit step). Its comment states the reason
