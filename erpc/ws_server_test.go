@@ -1735,3 +1735,71 @@ func TestWebSocket_RegressionInternalRequestIdsDontCollide(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// TestWebSocket_RegressionRefusedPassthroughSubscribeStopsAtTheFirstUpstream
+// covers what a client sees when a node refuses a non-eth subscription, and
+// what eRPC does next.
+//
+// A passthrough subscribe walks the WS upstreams until one accepts. That walk
+// treated every failure alike, so a node answering "unsupported subscription
+// kind" (-32602) sent the request to the next upstream too — which runs the
+// same software and refuses it identically. The client then received -32603
+// Internal error, because the WebSocket client never ran its error extractor
+// and an unclassified error reads as an unknown server fault.
+//
+// Both halves matter to a caller. The code tells them whether to fix their
+// request or retry, and the second attempt only delays an answer that was
+// already final.
+func TestWebSocket_RegressionRefusedPassthroughSubscribeStopsAtTheFirstUpstream(t *testing.T) {
+	var asked1, asked2 atomic.Int32
+
+	makeMock := func(seen *atomic.Int32) *httptest.Server {
+		return mockWsUpstream(t, func(conn *mockWsConn) {
+			standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
+				switch method {
+				case "msgboard_subscribe":
+					seen.Add(1)
+					_ = conn.WriteJSON(map[string]interface{}{
+						"jsonrpc": "2.0", "id": id,
+						"error": map[string]interface{}{
+							"code":    -32602,
+							"message": `unsupported subscription kind: "notAKind"`,
+						},
+					})
+				default:
+					_ = conn.WriteJSON(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": "0x1"})
+				}
+			})
+		})
+	}
+	mock1 := makeMock(&asked1)
+	defer mock1.Close()
+	mock2 := makeMock(&asked2)
+	defer mock2.Close()
+
+	setupGock()
+	defer util.ResetGock()
+
+	url1 := "ws" + strings.TrimPrefix(mock1.URL, "http")
+	url2 := "ws" + strings.TrimPrefix(mock2.URL, "http")
+	addr, cleanup := setupTestERPCServer(t, multiWsConfig(url1, url2))
+	defer cleanup()
+	time.Sleep(2 * time.Second)
+
+	conn := dialWs(t, addr)
+	defer func() { _ = conn.Close() }()
+	resp := sendAndReceive(t, conn,
+		`{"jsonrpc":"2.0","id":1,"method":"msgboard_subscribe","params":["notAKind"]}`)
+
+	errObj, ok := resp["error"].(map[string]interface{})
+	require.True(t, ok, "a refused subscribe must answer with an error, got %v", resp)
+
+	// The node's own code, not a generic internal error.
+	assert.EqualValues(t, -32602, errObj["code"],
+		"the upstream said the request was invalid; -32603 tells the caller the gateway broke instead")
+
+	// Exactly one upstream was asked. The other cannot answer differently.
+	total := asked1.Load() + asked2.Load()
+	assert.EqualValues(t, 1, total,
+		"a refused request went to %d upstreams; no upstream accepts a request the first one called invalid", total)
+}
