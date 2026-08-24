@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-24T20:49:43.421Z",
+  "generatedAt": "2026-08-24T22:08:57.609Z",
   "sourceRowCount": 341,
   "zeroAddress": "0x0000000000000000000000000000000000000000",
   "defaultCu": 6,
@@ -827,7 +827,7 @@
     {
       "chainId": 1,
       "method": "valve_synthetic_mixed_case_probe",
-      "tokenAddress": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "tokenAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "amountWei": "42",
       "holdLockUntilSettle": false
     },
@@ -3322,7 +3322,7 @@
       "why": "tier1-exact",
       "chainId": 1,
       "method": "valve_synthetic_mixed_case_probe",
-      "tokenAddress": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "tokenAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "expectAmountWei": "42",
       "expectHoldLockUntilSettle": false
     },
@@ -6050,7 +6050,7 @@
       "why": "tier1-mixed-case-address",
       "chainId": 1,
       "method": "valve_synthetic_mixed_case_probe",
-      "tokenAddress": "0xABCDEF0123456789ABCDEF0123456789ABCDEF01",
+      "tokenAddress": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "expectAmountWei": "42",
       "expectHoldLockUntilSettle": false
     },
@@ -6058,7 +6058,7 @@
       "why": "tier1-mixed-case-address-with-hex-letters",
       "chainId": 1,
       "method": "valve_synthetic_mixed_case_probe",
-      "tokenAddress": "0xABCDEF0123456789ABCDEF0123456789ABCDEF01",
+      "tokenAddress": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "expectAmountWei": "42",
       "expectHoldLockUntilSettle": false
     },
