@@ -1,0 +1,71 @@
+{
+  "note": "SYNTHETIC values only. No production pepper or API key appears here. Safe to commit and to share across repositories.",
+  "construction": {
+    "algorithm": "HMAC-SHA256",
+    "hmacKey": "the pepper (VALVE_REDIS_KEY_PEPPER)",
+    "message": "the API key, encoded UTF-8",
+    "digestEncoding": "lowercase hex",
+    "truncation": "first 32 hex characters, equivalently the hex of the first 16 bytes",
+    "pepperMinLength": 32,
+    "pepperTooShortBehaviour": "throws; never degrades to unpeppered hashing or to storing the raw key",
+    "reference": "packages/utils/src/hash-api-key.ts"
+  },
+  "vectors": [
+    {
+      "why": "ascii-typical",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_0123456789abcdef0123456789abcdef",
+      "apiKeyUtf8Bytes": 35,
+      "expected": "e876602a35464ef5b96e6b3e52a3549d"
+    },
+    {
+      "why": "ascii-short",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_a",
+      "apiKeyUtf8Bytes": 4,
+      "expected": "36eaab3a01a6e0c0453ae7251cb3c774"
+    },
+    {
+      "why": "empty-string",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "",
+      "apiKeyUtf8Bytes": 0,
+      "expected": "537acb8d60af619a5e8f89f97fb13528"
+    },
+    {
+      "why": "non-ascii-accented",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_café_zürich",
+      "apiKeyUtf8Bytes": 16,
+      "expected": "4631f3667c8f2f82aafe9df4eb87ee54"
+    },
+    {
+      "why": "non-ascii-cjk",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_鍵_テスト",
+      "apiKeyUtf8Bytes": 16,
+      "expected": "2fbe17d846f3bf4b71e1b244d00402ce"
+    },
+    {
+      "why": "non-ascii-emoji",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_🔑🇩🇪",
+      "apiKeyUtf8Bytes": 15,
+      "expected": "d7bd5e9598a70e1bdab67b0b094026e5"
+    },
+    {
+      "why": "embedded-colon",
+      "pepper": "synthetic-test-pepper-do-not-use-in-prod",
+      "apiKey": "vk_has:colon:and|pipe",
+      "apiKeyUtf8Bytes": 21,
+      "expected": "daae713feae8da5b08721dccb1fea002"
+    },
+    {
+      "why": "pepper-sensitivity",
+      "pepper": "a-second-synthetic-pepper-32-chars-min!!",
+      "apiKey": "vk_0123456789abcdef0123456789abcdef",
+      "apiKeyUtf8Bytes": 35,
+      "expected": "1ff706b2454421f20c5b7104e0503656"
+    }
+  ]
+}
