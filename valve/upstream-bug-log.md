@@ -6764,3 +6764,59 @@ Worth reading with entry 117, which fixed the Go parser/printer half. The SDK
 half is generated, so the fix belongs in whatever generates it (tygo), not in
 the `.d.ts`. That is why this is recorded rather than patched: editing a
 generated file is a fix that the next generation deletes.
+
+## 180. The WebSocket client held an error extractor and never called it
+
+**Status: FIXED in the fork.** Applied 2026-08-24. **Severity was: medium.**
+Every JSON-RPC error that arrived on a WebSocket reached the caller
+unclassified.
+
+`clients/ws_json_rpc_client.go` stored `errorExtractor` at construction and
+used it nowhere. The HTTP client runs it on every reply
+(`clients/http_json_rpc_client.go:962`, `c.errorExtractor.Extract(r, nr, jr,
+c.upstream)`); the WebSocket client passed `msg.Error` — a bare
+`*ErrJsonRpcExceptionExternal` — straight to the waiting caller.
+
+Unclassified reads as an unknown server fault everywhere downstream. Measured
+against production on 2026-08-24, a node answering `msgboard_subscribe` with
+
+    -32602 unsupported subscription kind: "notAKind"
+
+reached the client as:
+
+    {"code":-32603,"message":"Internal error", ... "attempts":2}
+
+The caller could not tell "the parameters you sent are wrong" from "the gateway
+is broken", and the code that distinguishes them was in the frame the whole
+time. The same request over HTTP returned a clean `-32602`, which is what made
+the WebSocket path's answer wrong rather than merely unhelpful.
+
+The extractor takes an `*http.Response` and dereferences `r.StatusCode` without
+a nil check, so the fix passes a synthetic `200` with empty headers rather than
+`nil`. That is not a convenient lie: every branch reading that response tests an
+HTTP-level signal — 401, 402, 403, 405, 415, 429 — that a delivered WebSocket
+frame genuinely cannot carry, and a 200 states exactly what is true, that the
+transport delivered and the JSON-RPC layer returned an error. Making the
+extractor nil-tolerant was the alternative and was rejected: `r` is dereferenced
+in a dozen places across a 750-line upstream-owned function, which is real
+rebase cost for the fork on every replay.
+
+The second half is in this fork's own passthrough subscribe. It walked the WS
+upstreams until one accepted and treated every failure alike, so a refused
+request went to the second upstream too — which runs the same software and
+refuses it identically. It now stops on `common.IsClientError`, and still walks
+on a transport failure, which says nothing about the request.
+
+Deliberately not changed: eRPC retries a generic `-32602` on purpose. The
+comment at `architecture/evm/error_normalizer.go:650` says so, and reserves the
+no-retry answer for messages it recognises. Callers that must not retry a client
+error key on `IsClientError`, which is what this restores on the WebSocket path.
+
+Verified by mutation. Stubbing `classifyError` to skip the extractor reproduces
+the original failure exactly — the client sees `-32603` instead of `-32602`, and
+two upstreams are asked instead of one. Pinned by
+`TestWsSendRequest_ClassifiesAnErrorTheUpstreamReturns`,
+`TestWsSendRequest_LeavesAServerFaultRetryable` (the counterweight: a real
+server fault must stay retryable, or the first test would pass on a change that
+marked everything unretryable), and
+`TestWebSocket_RegressionRefusedPassthroughSubscribeStopsAtTheFirstUpstream`.
