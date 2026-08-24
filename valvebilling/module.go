@@ -42,6 +42,20 @@ func New(ctx context.Context, cfg Config, prices *PriceTable) (*Module, error) {
 		return nil, fmt.Errorf("valvebilling: %s is not a valid Redis URL: %w", EnvRedisURL, err)
 	}
 	rdb := redis.NewClient(opts)
+	// A successful PING proves the socket and, usually, the credentials. It
+	// does NOT prove the next command will work.
+	//
+	// Observed on 2026-08-24 with redis-cli: against a Redis that wants no
+	// password, REDISCLI_AUTH set makes `ping` answer PONG while `--scan`
+	// returns nothing at all, with the error only on stderr. That failed a
+	// deploy gate which counted zero keys against a Redis holding 32.
+	//
+	// That specific asymmetry is redis-cli's, not go-redis's, so nothing
+	// heavier is done here — a richer probe would be machinery guarding a
+	// failure this client has not been shown to have. It is recorded because
+	// the shape generalises: if billing ever reports an empty or impossible
+	// reading while the connection looks healthy, distrust the health check
+	// before distrusting the data.
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = rdb.Close()
 		return nil, fmt.Errorf("valvebilling: cannot reach Redis: %w", err)
