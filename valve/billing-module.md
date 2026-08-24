@@ -85,10 +85,22 @@ integers above 2^53 round. Measured: below 2^53 a one-unit shortfall is
 caught; at 2^53 it is invisible and two units are caught; at 2^54 the
 granularity is four.
 
-This is reached in production — the largest live `ceiling` is about 1e17,
-roughly 11x 2^53, where the granularity is 16 credits. It is nonetheless
-harmless: the stored values are exact, because `spend` accumulates by Redis
-`INCRBY` on int64. Only the in-Lua sufficiency comparison rounds, and the
+Whether production reaches it is UNSETTLED, and this document previously
+stated that it does. The monorepo reported the largest live `ceiling` at about
+1e17 — roughly 11x 2^53, granularity 16 credits. It has since been pointed out
+that the only account matching that description is the system account, which
+the seed funds at 10^6 credits. Two sources disagree by eleven orders of
+magnitude and one Redis `GET` settles it; it has been asked for and not yet
+answered.
+
+If 10^6 is right, nothing in production approaches 2^53 and this section
+describes a hazard that does not occur. The strict decoding in `cost.go` stays
+correct either way, for the reason given there: the column is Postgres
+`numeric`, nothing constrains a future row, and a rounded read would be silent.
+
+The limit itself is real regardless, and harmless where it is reached: the
+stored values are exact, because `spend` accumulates by Redis `INCRBY` on
+int64. Only the in-Lua sufficiency comparison rounds, and the
 worst case is an account whose effective balance sits within one ULP of zero
 at that magnitude overspending by about $1.6e-8.
 

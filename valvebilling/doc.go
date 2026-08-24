@@ -20,7 +20,7 @@
 // # Why the metering decision is not here
 //
 // The decision tree — the order of the gates, the credits-per-second
-// bucket's self-heal, the tier boundary, the overdraft window — lives in a
+// bucket's self-heal, the tier boundary — lives in a
 // Lua script that runs inside Redis (authorize.lua, verbatim from the
 // monorepo's AUTHORIZE_LUA as of a08e9b9). This package CALLS it. It does
 // not reimplement it, and a future maintainer must not "simplify" it into

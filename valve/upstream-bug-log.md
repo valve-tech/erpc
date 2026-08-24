@@ -6820,3 +6820,139 @@ two upstreams are asked instead of one. Pinned by
 server fault must stay retryable, or the first test would pass on a change that
 marked everything unretryable), and
 `TestWebSocket_RegressionRefusedPassthroughSubscribeStopsAtTheFirstUpstream`.
+
+## 181. The database auth strategy logs the raw API key, twice above debug
+
+**Status:** open. **Severity: high if the strategy is ever enabled.** None
+today, because the fork does not configure `auth` at all.
+
+`auth/strategy_database.go` writes the caller's API key into the log at ten
+sites. Six are `Debug`, which a production deployment usually discards. **Four
+are not** — this entry first said three and missed the first of them:
+
+    :198  Error()  Str("apiKey", apiKey)  "database query failed during authentication"
+    :221  Error()  Str("apiKey", apiKey).RawJSON("data", valueBytes)
+    :226  Error()  Str("apiKey", apiKey).RawJSON("data", valueBytes)
+    :235  Warn()   Str("apiKey", apiKey)  "authentication attempt with disabled API key"
+
+The miscount is worth recording rather than quietly correcting. It was found by
+counting the log CALLS rather than by reading the grep output that produced
+this entry, and the missed site is in the branch that fires when the database
+is unreachable — the highest-volume error path there is, and therefore the one
+that would have copied the most keys into a log.
+
+The `Warn` fires when someone authenticates with a **revoked** key. That is
+exactly the moment a leaked key is being probed, so the one event most worth
+alerting on is also the one that copies the credential into the log. The two
+`Error` lines add `RawJSON("data", valueBytes)`, which prints the whole stored
+user record beside it.
+
+A log is not a secret store. It is shipped, aggregated, retained and read by
+people who are not entitled to the credential. This is the same failure class
+as putting a key in a Redis key name, which exposed a real key on 2026-08-02
+through `--scan`, `MONITOR` and RDB backups — and it is why every valve key is
+addressed by an HMAC digest rather than by its own value (`valvebilling/
+hashkey.go`).
+
+**Reachability today is zero and that is the only reason this is not urgent.**
+`scripts/generate-erpc-config.ts` in the monorepo emits no `auth` block, so no
+strategy is constructed, so no line here executes. The 2026-08-04 research note
+records that as deliberate: the relay authenticates in front and eRPC binds
+`127.0.0.1:4000`.
+
+**It stops being zero the moment anyone acts on the obvious idea.** eRPC ships
+per-identity rate-limit budgets that the fork does not use, and moving
+enforcement into them means enabling this strategy with real customer keys. The
+attractive shortcut and the exposure are the same switch.
+
+**eRPC already has the answer to this, one directory away.** `util/redact.go`
+hashes a secret and logs `redacted=<hash[:5]>` — enough to correlate two log
+lines, useless to anyone who steals them. `common/config.go:600` already uses
+it for endpoint URLs. The strategy simply does not call it.
+
+Not upstream's alone to answer for: the fork already carries this file at
++17/-3, so the redaction hunks land in a file that is already forked rather
+than opening a new conflict site. Upstream touches it in 9 of its last 200
+commits.
+
+## 182. The simulator's response preview is always empty
+
+**Status:** open. **Severity: low.** A developer tool shows nothing where it
+promises a response body. No product impact.
+
+`internal/simulator/orchestrator.go:731` calls `jrr.MarshalJSON()`.
+`common/json_rpc.go:642` defines that method to fail unconditionally:
+
+    // MarshalJSON must not be used as it requires marshalling the whole
+    // response into a buffer in memory.
+    func (r *JsonRpcResponse) MarshalJSON() ([]byte, error) {
+        return nil, fmt.Errorf("MarshalJSON must not be used on JsonRpcResponse")
+    }
+
+`previewResponseBody` treats the error as "no body" and returns `""`, so the
+simulator's trace drawer shows an empty response for every request, including
+every successful one. The truncation logic below it — which carefully keeps
+both ends of a long body so an operator can see the shape — has never run.
+
+The refusal is deliberate and correct: the type has a `WriteTo` that streams
+without buffering, and that is what the rest of the codebase uses. The
+simulator simply reaches for the wrong one, and the error path hides it. A
+`MarshalJSON` that always errors is easy to call by habit, because every other
+Go type in the process answers it.
+
+Both files are upstream's and the fork has no diff on either, so this is
+recorded rather than patched: the product does not use the simulator, and a
+one-line fix in an upstream file is rebase cost for zero product value.
+
+Found while building `valverelay/`, whose embedded backend serialises with
+`WriteTo` for this reason. Its test catches the substitution — swapping
+`WriteTo` for `MarshalJSON` there fails two tests, which is how the bug
+surfaced.
+
+## 183. eRPC answers 200 for its own failures, so a fronting biller cannot tell them from application errors
+
+**Status:** open. **Severity: medium for anyone billing in front of eRPC**,
+which upstream explicitly supports.
+
+`erpc/http_server.go:1678` ends `determineResponseStatusCode` with:
+
+    // All other errors (JSON-RPC application errors) return 200
+    return http.StatusOK
+
+The enumerated cases above it map many failures to real statuses — 400, 401,
+404, 429. `ErrCodeUpstreamsExhausted` is not among them. So a request where
+every upstream failed leaves eRPC as **HTTP 200 carrying an error body**,
+byte-indistinguishable at the transport layer from a contract call that
+reverted.
+
+Those two must be billed differently. A reverted call is work an upstream
+performed and is charged. An exhausted upstream bundle is eRPC failing to get
+an answer and must cost the customer nothing — there is no refund path once a
+charge is committed.
+
+**This is not a hypothetical seam.** Upstream ships `server.costHeaders`
+(`common/config.go:311-316`) whose own comment says it exists "so a proxy in
+front can attribute usage per network without parsing bodies", and
+`projects[].trustUserIdHeader` for the same topology. Upstream intends to be
+fronted by something that meters. It just does not tell that thing when the
+answer is its own failure.
+
+**The consequence is measurable in this fork.** `valverelay/` has two
+backends. The embedded one calls `Network.Forward` and receives a Go error, so
+it does not bill. The HTTP one receives 200 and does, because the status is the
+only signal available. The same failure therefore bills differently depending
+on where the module runs — which breaks the property the billing brief asked
+for, that the hosting decision stays open and can be made later.
+
+Note which side diverges from production: the live TypeScript relay also POSTs
+to eRPC over HTTP and also sees 200, so the HTTP backend matches today's
+behaviour and the embedded one would change it.
+
+The fix cannot be string-matching eRPC's error payloads, which the fork's
+design razor forbids and which would break on the next upstream error-message
+edit. The honest fix is a response header stating "this body is an eRPC
+failure, not an upstream answer", set once at the boundary that already knows
+it, and read by anything metering in front. That is upstream's to add and it
+belongs with `costHeaders`, whose contract it completes.
+
+Recorded in `valverelay/doc.go` as a known asymmetry.
