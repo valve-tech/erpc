@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,12 +139,33 @@ func TestResolveCost_TakesThePathEachCaseIntendsToExercise(t *testing.T) {
 // to lowercase; the METHOD and CHAIN do not. Folding the method too would
 // change pricing with no error anywhere.
 func TestResolveCost_FoldsTheTokenButNotTheMethod(t *testing.T) {
+	// These two must differ in a hex LETTER, not merely in case somewhere.
+	//
+	// Uppercasing a string with no hex letters is the identity function, so an
+	// address of digits alone probes nothing: the mixed-case lookup would be
+	// byte-identical to the stored one and would pass with the fold removed
+	// entirely. That is not hypothetical — the monorepo's golden corpus has
+	// exactly that hole today, because every address in its 1105 cases is the
+	// zero address. Removing strings.ToLower from cacheKey leaves all of them
+	// passing and fails only this test.
+	//
+	// The guard below asserts the property rather than trusting these literals
+	// to keep it, so an edit that swapped in a digit-only address fails here
+	// instead of silently reopening the hole.
+	const storedAddr = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	const probeAddr = "0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd"
+
+	require.NotEqual(t, storedAddr, probeAddr, "the probe must differ from the stored address")
+	require.Equal(t, storedAddr, strings.ToLower(probeAddr), "they must differ only in case")
+	require.True(t, strings.ContainsAny(probeAddr, "ABCDEF"),
+		"the probe has no upper-case hex letter, so folding it is a no-op and this test proves nothing")
+
 	tbl := NewPriceTable(map[string]int64{}, 6)
 	require.NoError(t, tbl.Load([]PriceRow{
-		{ChainID: 1, Method: "eth_getLogs", TokenAddress: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd", AmountWei: "42"},
+		{ChainID: 1, Method: "eth_getLogs", TokenAddress: storedAddr, AmountWei: "42"},
 	}))
 
-	mixed := tbl.Resolve(1, "eth_getLogs", "0xAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCd")
+	mixed := tbl.Resolve(1, "eth_getLogs", probeAddr)
 	assert.Equal(t, SourceExactRow, mixed.Source, "an EIP-55 address must hit the row written in lowercase")
 	assert.Equal(t, "42", mixed.AmountWei.String())
 
