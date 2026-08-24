@@ -1,5 +1,5 @@
 {
-  "note": "SYNTHETIC values only. No production pepper or API key appears here. Safe to commit and to share across repositories.",
+  "note": "SYNTHETIC values only. No production pepper or API key appears here, and none of these was copied or adapted from one. Every apiKey deliberately begins SYNTHETIC- and does NOT use the production key prefix or length, so a secret scanner cannot mistake it for a live credential and nobody learns to wave that alert through. Safe to commit and to share across repositories.",
   "construction": {
     "algorithm": "HMAC-SHA256",
     "hmacKey": "the pepper (VALVE_REDIS_KEY_PEPPER)",
@@ -14,16 +14,16 @@
     {
       "why": "ascii-typical",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_0123456789abcdef0123456789abcdef",
-      "apiKeyUtf8Bytes": 35,
-      "expected": "e876602a35464ef5b96e6b3e52a3549d"
+      "apiKey": "SYNTHETIC-NOT-A-KEY-ascii-typical",
+      "apiKeyUtf8Bytes": 33,
+      "expected": "7d0922f239e3332d36d7242c867e88a3"
     },
     {
       "why": "ascii-short",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_a",
-      "apiKeyUtf8Bytes": 4,
-      "expected": "36eaab3a01a6e0c0453ae7251cb3c774"
+      "apiKey": "SYNTHETIC-x",
+      "apiKeyUtf8Bytes": 11,
+      "expected": "559c8bb8e459bba0017dd82f55c08bbf"
     },
     {
       "why": "empty-string",
@@ -35,37 +35,37 @@
     {
       "why": "non-ascii-accented",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_café_zürich",
-      "apiKeyUtf8Bytes": 16,
-      "expected": "4631f3667c8f2f82aafe9df4eb87ee54"
+      "apiKey": "SYNTHETIC-café-zürich",
+      "apiKeyUtf8Bytes": 23,
+      "expected": "7ced2040df7980d6157cd82a911d4490"
     },
     {
       "why": "non-ascii-cjk",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_鍵_テスト",
-      "apiKeyUtf8Bytes": 16,
-      "expected": "2fbe17d846f3bf4b71e1b244d00402ce"
+      "apiKey": "SYNTHETIC-鍵-テスト",
+      "apiKeyUtf8Bytes": 23,
+      "expected": "bca653979572caebe634ce14d7bab13d"
     },
     {
       "why": "non-ascii-emoji",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_🔑🇩🇪",
-      "apiKeyUtf8Bytes": 15,
-      "expected": "d7bd5e9598a70e1bdab67b0b094026e5"
+      "apiKey": "SYNTHETIC-🔑🇩🇪",
+      "apiKeyUtf8Bytes": 22,
+      "expected": "32057a66c1aeedbb8f4faced1f5adf32"
     },
     {
       "why": "embedded-colon",
       "pepper": "synthetic-test-pepper-do-not-use-in-prod",
-      "apiKey": "vk_has:colon:and|pipe",
-      "apiKeyUtf8Bytes": 21,
-      "expected": "daae713feae8da5b08721dccb1fea002"
+      "apiKey": "SYNTHETIC-has:colon:and|pipe",
+      "apiKeyUtf8Bytes": 28,
+      "expected": "ed74f7240885fe1156f976b8fce61694"
     },
     {
       "why": "pepper-sensitivity",
       "pepper": "a-second-synthetic-pepper-32-chars-min!!",
-      "apiKey": "vk_0123456789abcdef0123456789abcdef",
-      "apiKeyUtf8Bytes": 35,
-      "expected": "1ff706b2454421f20c5b7104e0503656"
+      "apiKey": "SYNTHETIC-NOT-A-KEY-ascii-typical",
+      "apiKeyUtf8Bytes": 33,
+      "expected": "e2a206375a5ef36dfb5a54ce2ae30134"
     }
   ]
 }
