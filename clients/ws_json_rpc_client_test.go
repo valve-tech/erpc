@@ -31,10 +31,37 @@ type fakeWsServer struct {
 	mu    sync.Mutex
 	conns []*fakeWsConn
 
+	// errFor holds a JSON-RPC error to answer a method with, so a test can
+	// make the upstream refuse a request the way a real node does. Keyed by
+	// method, set before the request is sent.
+	errFor map[string]fakeWsError
+
 	newConn chan *fakeWsConn
 }
 
+// fakeWsError is a JSON-RPC error reply, as a node sends it.
+type fakeWsError struct {
+	code    int
+	message string
+}
+
+// RefuseMethod makes every connection answer that method with a JSON-RPC
+// error instead of a result.
+func (f *fakeWsServer) RefuseMethod(method string, code int, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errFor[method] = fakeWsError{code: code, message: message}
+}
+
+func (f *fakeWsServer) errorForMethod(method string) (fakeWsError, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.errFor[method]
+	return e, ok
+}
+
 type fakeWsConn struct {
+	srv     *fakeWsServer
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	// silent simulates a black-holed path: pings are swallowed (no pong)
@@ -46,14 +73,14 @@ type fakeWsConn struct {
 }
 
 func newFakeWsServer(t *testing.T) *fakeWsServer {
-	f := &fakeWsServer{t: t, newConn: make(chan *fakeWsConn, 16)}
+	f := &fakeWsServer{t: t, newConn: make(chan *fakeWsConn, 16), errFor: map[string]fakeWsError{}}
 	upgrader := websocket.Upgrader{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		sc := &fakeWsConn{conn: conn, subscribeCh: make(chan string, 16)}
+		sc := &fakeWsConn{srv: f, conn: conn, subscribeCh: make(chan string, 16)}
 		conn.SetPingHandler(func(appData string) error {
 			if sc.silent.Load() {
 				return nil // swallow: black-holed path sends no pong
@@ -97,6 +124,15 @@ func (sc *fakeWsConn) readLoop() {
 			Params []interface{} `json:"params"`
 		}
 		if err := common.SonicCfg.Unmarshal(msg, &req); err != nil {
+			continue
+		}
+		if e, refused := sc.srv.errorForMethod(req.Method); refused {
+			resp, _ := common.SonicCfg.Marshal(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error":   map[string]interface{}{"code": e.code, "message": e.message},
+			})
+			sc.write(websocket.TextMessage, resp)
 			continue
 		}
 		if req.Method == "eth_subscribe" {
@@ -148,11 +184,24 @@ func compressWsLiveness(t *testing.T) {
 }
 
 func newTestWsClient(t *testing.T, u *url.URL) *WsJsonRpcClient {
+	return newTestWsClientWithExtractor(t, u, nil)
+}
+
+// newTestWsClientWithExtractor builds the client with an error extractor, the
+// way the registry does in production. The architecture packages that supply
+// the real extractors depend on this one, so a test here cannot import them;
+// a stub is enough to prove the client calls the extractor and uses what it
+// returns.
+func newTestWsClientWithExtractor(
+	t *testing.T,
+	u *url.URL,
+	extractor common.JsonRpcErrorExtractor,
+) *WsJsonRpcClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	logger := zerolog.New(zerolog.NewTestWriter(t)).Level(zerolog.WarnLevel)
 	up := common.NewFakeUpstream("test-ws-upstream")
-	ci, err := NewWsJsonRpcClient(ctx, &logger, "test-project", up, u, nil, nil)
+	ci, err := NewWsJsonRpcClient(ctx, &logger, "test-project", up, u, nil, extractor)
 	require.NoError(t, err)
 	c, ok := ci.(*WsJsonRpcClient)
 	require.True(t, ok)

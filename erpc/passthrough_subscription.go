@@ -163,6 +163,17 @@ func (wsc *WsConnection) handlePassthroughSubscribe(
 		resp, err := up.Forward(ctx, nq, true, false)
 		if err != nil {
 			lastErr = err
+			// A refusal is an answer. The node parsed the request and called
+			// it invalid — an unsupported subscription kind, a malformed
+			// filter — and the next upstream runs the same software, so it
+			// refuses identically. Trying it only delays a final answer and
+			// buries the node's own error under the last one to fail.
+			//
+			// A transport failure is the opposite: it says nothing about the
+			// request, so the walk continues.
+			if common.IsClientError(err) {
+				return err
+			}
 			continue
 		}
 

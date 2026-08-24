@@ -557,7 +557,7 @@ func (c *WsJsonRpcClient) handleMessage(message []byte) {
 		nr := common.NewNormalizedResponse().WithBody(io.NopCloser(strings.NewReader(string(message))))
 
 		if msg.Error != nil {
-			ch <- &wsPendingResult{resp: nr, err: msg.Error}
+			ch <- &wsPendingResult{resp: nr, err: c.classifyError(nr, msg.Error)}
 		} else {
 			ch <- &wsPendingResult{resp: nr}
 		}
@@ -565,6 +565,45 @@ func (c *WsJsonRpcClient) handleMessage(message []byte) {
 	}
 
 	c.logger.Debug().Str("raw", string(message)).Msg("received unhandled websocket message")
+}
+
+// classifyError runs the architecture's error extractor over a JSON-RPC error
+// that arrived on the socket — the same extractor the HTTP client runs (see
+// `c.errorExtractor.Extract` in http_json_rpc_client.go).
+//
+// This client held an errorExtractor and never called it. Every error reply
+// therefore reached the caller as a bare *ErrJsonRpcExceptionExternal, which
+// carries a code but no classification, and everything downstream reads an
+// unclassified error as an unknown server fault. A node's -32602 was retried
+// against the same upstream, then against the next one, and finally reported
+// to the client as -32603 Internal error. The code that would have identified
+// it as the caller's own mistake was sitting in the frame the whole time.
+//
+// The extractor's first argument is the HTTP response. A WebSocket frame has
+// none, and every branch that reads it tests an HTTP-level signal — 401, 402,
+// 403, 405, 415, 429 — that a delivered frame genuinely cannot carry. A 200
+// with no headers states exactly that: the transport delivered, and the
+// JSON-RPC layer returned an error. Passing nil is not an option; the
+// extractor dereferences r.StatusCode unconditionally.
+//
+// On anything unexpected the original error is returned unchanged, so a
+// classification failure can never lose the upstream's answer.
+func (c *WsJsonRpcClient) classifyError(
+	nr *common.NormalizedResponse,
+	extErr *common.ErrJsonRpcExceptionExternal,
+) error {
+	if c.errorExtractor == nil {
+		return extErr
+	}
+	jr, err := nr.JsonRpcResponse()
+	if err != nil || jr == nil || jr.Error == nil {
+		return extErr
+	}
+	delivered := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+	if e := c.errorExtractor.Extract(delivered, nr, jr, c.upstream); e != nil {
+		return e
+	}
+	return extErr
 }
 
 func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
