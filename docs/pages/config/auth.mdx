@@ -616,7 +616,7 @@ they naturally expire. Always set `allowedAlgorithms` to prevent algorithm-confu
 8. **secret uses non-constant-time comparison.** Plain `!=` is timing-side-channel vulnerable for public internet exposures.
 9. **Database negative cache TTL is hardcoded at 5 seconds.** Not configurable. Re-enabled keys are rejected for up to 5 seconds.
 10. **Connector-down probe is per-process.** One probe/second per replica, no cross-replica coordination.
-11. **type inference conflict.** Setting multiple sub-config blocks (e.g. both `secret:` and `jwt:`) in one strategy entry causes the last-evaluated block to silently overwrite `type`. Evaluation order: `secret → database → jwt → siwe`. Never set multiple sub-config blocks in one strategy entry.
+11. **type inference conflict is rejected at startup.** A strategy entry must declare exactly one sub-config block. Setting several (e.g. both `secret:` and `jwt:`) makes `SetDefaults` infer `type` from the last-evaluated block — evaluation order `secret → database → jwt → siwe` — so validation refuses the config rather than let source order decide who authenticates. Put each block in its own entry under `auth.strategies`. [<SourceLink file="common/validation.go" lines="833-855" />]
 12. **`Authorization: Basic` username is silently discarded.** Only the password field is used as the secret value. `alice:mysecret` and `bob:mysecret` are treated identically.
 13. **JWT requires keys.** Configure `verificationKeys` and/or `verificationJwksUrl`. With neither, startup validation fails. An empty resolved key map rejects every JWT (deny-all, not allow-all).
 14. **SIWE requires both signature and message together.** Missing either one causes silent fallthrough to network-strategy payload extraction.
