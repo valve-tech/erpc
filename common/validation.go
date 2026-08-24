@@ -827,6 +827,29 @@ func (s *AuthStrategyConfig) Validate() error {
 	if s.Type == "" {
 		return fmt.Errorf("auth.*.type is required")
 	}
+	// One sub-block per strategy. SetDefaults infers `type` from block
+	// presence, so a second block silently overwrites the type and decides
+	// who authenticates, while the losing block stays in the config and
+	// still looks active. Reject the ambiguous shape rather than pick one.
+	var blocks []string
+	if s.Network != nil {
+		blocks = append(blocks, "network")
+	}
+	if s.Secret != nil {
+		blocks = append(blocks, "secret")
+	}
+	if s.Database != nil {
+		blocks = append(blocks, "database")
+	}
+	if s.Jwt != nil {
+		blocks = append(blocks, "jwt")
+	}
+	if s.Siwe != nil {
+		blocks = append(blocks, "siwe")
+	}
+	if len(blocks) > 1 {
+		return fmt.Errorf("auth.*: a strategy must declare exactly one of network/secret/database/jwt/siwe, got %s; put each one in its own entry under auth.strategies", strings.Join(blocks, " + "))
+	}
 	if s.AllowClientDirectives != nil && *s.AllowClientDirectives != "" {
 		if _, err := NewWildcardMatcher(*s.AllowClientDirectives); err != nil {
 			return fmt.Errorf("auth.*.allowClientDirectives pattern is invalid: %w", err)
