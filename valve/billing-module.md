@@ -85,24 +85,31 @@ integers above 2^53 round. Measured: below 2^53 a one-unit shortfall is
 caught; at 2^53 it is invisible and two units are caught; at 2^54 the
 granularity is four.
 
-Whether production reaches it is UNSETTLED, and this document previously
-stated that it does. The monorepo reported the largest live `ceiling` at about
-1e17 — roughly 11x 2^53, granularity 16 credits. It has since been pointed out
-that the only account matching that description is the system account, which
-the seed funds at 10^6 credits. Two sources disagree by eleven orders of
-magnitude and one Redis `GET` settles it; it has been asked for and not yet
-answered.
+This IS reached in production. Read raw from Redis on 2026-08-24, the largest
+live `ceiling` is `99999680453646021` — 11.1x 2^53, where the double's
+granularity is 16 credits. That account is also the source of essentially all
+current traffic.
 
-If 10^6 is right, nothing in production approaches 2^53 and this section
-describes a hazard that does not occur. The strict decoding in `cost.go` stays
-correct either way, for the reason given there: the column is Postgres
-`numeric`, nothing constrains a future row, and a rounded read would be silent.
+An earlier draft of this section hedged that number as unsettled, on a
+suggestion that the only account matching the description was a system account
+seeded at 10^6. The suggestion was wrong and the hedge was worse than the
+original claim: it made a measured fact read as a doubt. The number was
+re-measured directly rather than argued about.
 
-The limit itself is real regardless, and harmless where it is reached: the
-stored values are exact, because `spend` accumulates by Redis `INCRBY` on
-int64. Only the in-Lua sufficiency comparison rounds, and the
-worst case is an account whose effective balance sits within one ULP of zero
-at that magnitude overspending by about $1.6e-8.
+It is nonetheless harmless, and the reason is the important part: the STORED
+values are exact, because `spend` accumulates by Redis `INCRBY` on int64. Only
+the in-Lua sufficiency comparison rounds. The worst case is an account whose
+effective balance sits within one ULP of zero at that magnitude overspending by
+about $1.6e-8.
+
+A second correction, in the other direction. The originating brief gives the
+overdraft bound as roughly 6x `FULL_CREDITS_PER_SEC`, about 30,000 credits, and
+an earlier version of this document repeated it. It is unreachable. The tier is
+chosen from the effective balance, and any account close enough to zero to
+overdraft is far below the $5 SLOW threshold, so it is always on the SLOW tier
+by the time overdraft is possible. The reachable bound is 6x
+`SLOW_CREDITS_PER_SEC` = 3,000 credits; a FULL-tier account cannot overdraft at
+all at the defaults. Confirmed in the monorepo's own code.
 
 The TypeScript relay passes the same decimal string to the same script and has
 always behaved this way. Do NOT "fix" this in Go: byte-identical outcomes are
