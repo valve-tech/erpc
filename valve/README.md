@@ -7,12 +7,14 @@ Next.js documentation site, and it changes on most merges.
 
 | Document | What it is |
 |---|---|
-| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 174 entries: 104 fixed in the fork, 52 open, 18 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
+| [upstream-bug-log.md](upstream-bug-log.md) | **Start here.** 178 entries: 107 fixed in the fork, 53 open, 18 judged not a bug. Every entry cites `file:line` and was verified in source. Read its "Reading this file" section before you grep it — ids are sparse and out of order, and a section header is weaker evidence than an entry's own Status line. |
 | [open-entry-triage.md](open-entry-triage.md) | What to do with the log's open entries, now that the fork rebases instead of sending pull requests. Ten of them obey one rule at ten different sites, and two of those are now fixed; fourteen were dead code and are now closed. |
 | [polyglot-feasibility.md](polyglot-feasibility.md) | Can the fork serve non-EVM chains from configuration rather than new Go code? Verdict and evidence. |
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |
 | [merge-review.md](merge-review.md) | Review of that merge. Carries a correction: the first pass recorded the `erpc` package as green when the run had been truncated by Go's default 600s timeout. |
 | [fallback-escape-decision.md](fallback-escape-decision.md) | Why the per-request fallback escape belongs in the selection policy, not in Go. |
+| [billing-module.md](billing-module.md) | The design of `valvebilling/` — the valve billing path as a flag-gated Go package with a zero-file diff against upstream. Why the metering decision stays in Lua inside Redis and is never reimplemented in Go, and what can still break quietly. |
+| [periodic-enforcement.md](periodic-enforcement.md) | Serving billing from state eRPC refreshes on a timer, instead of from a blocking call. Quantifies what a cache TTL costs in overdraft, and finds that eRPC already ships the enforcement machinery — the blocker is that its key strategy looks up by the raw credential. |
 | [polyglot-live-run.md](polyglot-live-run.md) | One binary serving EVM, SVM and BTC at once against live public endpoints. Tests the "a chain is configuration, not Go" claim end to end. Config: [polyglot-live-pool.yaml](polyglot-live-pool.yaml). |
 
 ## Checking the log
