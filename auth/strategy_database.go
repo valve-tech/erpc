@@ -13,6 +13,7 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/telemetry"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/singleflight"
 )
@@ -134,16 +135,16 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 	// Check positive cache first if available
 	if s.cache != nil {
 		if cachedUser, found := s.cache.Get(apiKey); found {
-			s.logger.Debug().Str("apiKey", apiKey).Msg("API key found in cache")
+			s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Msg("API key found in cache")
 			return cachedUser, nil
 		}
-		s.logger.Debug().Str("apiKey", apiKey).Msg("API key not found in cache")
+		s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Msg("API key not found in cache")
 	}
 
 	// Negative cache: short-circuit known invalid/disabled keys
 	if s.negCache != nil {
 		if _, found := s.negCache.Get(apiKey); found {
-			s.logger.Debug().Str("apiKey", apiKey).Msg("API key found in negative cache")
+			s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Msg("API key found in negative cache")
 			s.recordAuthFailureMetric(req, "cached_unknown_api_key")
 			return nil, common.NewErrAuthUnauthorized("database", "invalid API key")
 		}
@@ -195,7 +196,7 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 			}
 			s.logger.Error().
 				Err(err).
-				Str("apiKey", apiKey).
+				Str("apiKey", util.RedactSecret(apiKey)).
 				Str("driver", string(s.cfg.Connector.Driver)).
 				Str("connectorId", s.cfg.Connector.Id).
 				Msg("database query failed during authentication")
@@ -218,12 +219,22 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 			RateLimitBudget string `json:"rateLimitBudget,omitempty"`
 		}
 		if err := json.Unmarshal(valueBytes, &userData); err != nil {
-			s.logger.Error().Err(err).Str("apiKey", apiKey).RawJSON("data", valueBytes).Msg("failed to parse user data from database")
+			// The stored record is a customer record, so it does not belong in
+			// a log any more than the key does. What debugging a malformed
+			// record needs survives without it: the unmarshal error already
+			// names the offset and the offending type, the length separates
+			// "empty" and "truncated" from "wrong shape", and the digest tells
+			// one bad record from many while still matching the stored bytes
+			// if an operator goes and reads the row.
+			s.logger.Error().Err(err).Str("apiKey", util.RedactSecret(apiKey)).Int("dataLen", len(valueBytes)).Str("dataDigest", util.RedactSecret(string(valueBytes))).Msg("failed to parse user data from database")
 			s.recordAuthFailureMetric(req, "db_record_parse_error")
 			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "invalid user data format"), neg: false}, nil
 		}
 		if userData.UserId == "" {
-			s.logger.Error().Str("apiKey", apiKey).RawJSON("data", valueBytes).Msg("missing user ID in database record")
+			// Same reasoning as the parse-error site above. Here the record is
+			// valid JSON, so the digest is the only handle an operator has on
+			// which row is the bad one.
+			s.logger.Error().Str("apiKey", util.RedactSecret(apiKey)).Int("dataLen", len(valueBytes)).Str("dataDigest", util.RedactSecret(string(valueBytes))).Msg("missing user ID in database record")
 			s.recordAuthFailureMetric(req, "db_record_missing_user_id")
 			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "missing user ID in data"), neg: false}, nil
 		}
@@ -232,7 +243,7 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 			enabled = *userData.Enabled
 		}
 		if !enabled {
-			s.logger.Warn().Str("apiKey", apiKey).Str("userId", userData.UserId).Msg("authentication attempt with disabled API key")
+			s.logger.Warn().Str("apiKey", util.RedactSecret(apiKey)).Str("userId", userData.UserId).Msg("authentication attempt with disabled API key")
 			s.recordAuthFailureMetric(req, "disabled_key")
 			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "API key is disabled"), neg: true}, nil
 		}
@@ -263,10 +274,10 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 	if afr.skipCache == false && s.cache != nil && s.cfg.Cache != nil && s.cfg.Cache.TTL != nil {
 		ttl := *s.cfg.Cache.TTL
 		s.cache.SetWithTTL(apiKey, user, 1, ttl)
-		s.logger.Debug().Str("apiKey", apiKey).Dur("ttl", ttl).Msg("cached API key data")
+		s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Dur("ttl", ttl).Msg("cached API key data")
 	}
 
-	s.logger.Debug().Str("apiKey", apiKey).Str("userId", user.Id).Str("budget", user.RateLimitBudget).Msg("user authenticated successfully")
+	s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Str("userId", user.Id).Str("budget", user.RateLimitBudget).Msg("user authenticated successfully")
 
 	return user, nil
 }
@@ -440,7 +451,7 @@ func (s *DatabaseStrategy) InvalidateCache(apiKey string) {
 	if s.negCache != nil {
 		s.negCache.Del(apiKey)
 	}
-	s.logger.Debug().Str("apiKey", apiKey).Msg("invalidated API key cache entry")
+	s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Msg("invalidated API key cache entry")
 }
 
 // ClearCache clears all cached API keys
