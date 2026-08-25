@@ -128,9 +128,14 @@ overdraft bound as roughly 6x `FULL_CREDITS_PER_SEC`, about 30,000 credits, and
 an earlier version of this document repeated it. It is unreachable. The tier is
 chosen from the effective balance, and any account close enough to zero to
 overdraft is far below the $5 SLOW threshold, so it is always on the SLOW tier
-by the time overdraft is possible. The reachable bound is 6x
-`SLOW_CREDITS_PER_SEC` = 3,000 credits; a FULL-tier account cannot overdraft at
-all at the defaults. Confirmed in the monorepo's own code.
+by the time overdraft is possible. The reachable bound was derived here as 6x
+`SLOW_CREDITS_PER_SEC` = 3,000 credits. That derivation is wrong twice, and
+`valvebilling/overdraft_test.go` now measures **3,486** against real Redis: one
+window yields `floor(500/6) x 6 = 498` because the last approval must fit
+whole, and the window is anchored at the first charge rather than a clock, so a
+12-second span at the worst phase touches seven windows. A FULL-tier account
+cannot overdraft at the DEFAULT threshold — but the threshold has no floor, and
+a small enough one puts a near-empty account on the FULL branch at 34,986.
 
 The TypeScript relay passes the same decimal string to the same script and has
 always behaved this way. Do NOT "fix" this in Go: byte-identical outcomes are
@@ -266,7 +271,13 @@ Settle amount `V`, then:
 
 **Never `SET 0`.** Measured: with a concurrent `Capture` of 250 credits landing
 between the read and the write, `SET 0` discarded all 250 and `DECRBY V` lost
-none. `SET 0` is only safe for an authoritative recompute, which is what
+none.
+
+**`DECRBY` is not the final answer either — see "How to zero it" below.** It
+survives the concurrent capture, which is the only failure this section tested.
+It does not survive a crash between the durable write and the `DECRBY`, which
+bills the window twice. The settle wants `RENAME` to a named staging key plus
+an idempotent write. Read both sections before building one. `SET 0` is only safe for an authoritative recompute, which is what
 `REFRESH_LUA` does for `ceiling` today — the same move on `spend` loses money.
 
 **Ceiling first.** A crash between the two steps leaves the account temporarily
@@ -317,12 +328,37 @@ top — it falls out of "resolve into Postgres and set to zero" if the model is
 applied to both counters. It is also what bounds overspend once more than one
 eRPC process runs, exactly, and with no dependence on a clock.
 
-**One correction to "set to zero".** Do not read and then zero. The measured
-loss above is exactly that gap: a settle that read 1000 and wrote 0 discarded a
-concurrent `Capture` of 250. `GETSET key 0` returns the old value and clears it
-in one operation, so nothing can land in between; anything arriving after it is
-counted in the next window. `DECRBY` by the amount read is equally safe and
-costs a second round trip. Either is correct. Read-then-`SET` is not.
+### How to zero it, measured against real Redis
+
+"Set to zero" is the right model and the wrong instruction. The settle has two
+independent failure points — a concurrent capture, and a crash mid-settle — and
+each of the obvious primitives survives only one of them.
+
+A window of 1000 credits settles. A concurrent `Capture` of 250 lands during
+it. Postgres must end up holding 1250. Measured on `redis-server` 7.2.4,
+2026-08-24:
+
+| strategy | crash point | Postgres ends at |
+|---|---|---|
+| read → Postgres → `DECRBY V` | after the Postgres write | **2250** — billed twice |
+| `GETSET spend 0` → Postgres | after the `GETSET` | **250** — window lost |
+| `RENAME spend spend:settling` → Postgres → `DEL` | after the `RENAME` | 1250 — exact |
+| `RENAME` → Postgres → `DEL`, plain append write | after the Postgres write | **2250** — billed twice |
+| `RENAME` → Postgres → `DEL`, upsert keyed on (account, window) | after the Postgres write | 1250 — exact |
+
+`GETSET` closes the concurrency race, and that is why it looked right. It opens
+a worse hole: it clears the counter BEFORE the amount is durable, so the value
+exists only in process memory and a crash loses the window with nothing going
+red. Losing money quietly is worse than billing twice, which at least shows up
+in a reconciliation.
+
+**The settle needs both halves.** An atomic `RENAME` to a NAMED staging key, so
+the amount survives a crash under a name a recovery pass can find. AND a
+durable write that is idempotent on that name, so finishing an orphan twice
+posts the amount once. Either half alone fails at one of the two crash points.
+
+This corrects an earlier recommendation in this document that named `GETSET`
+alone. `valvebilling/settle_test.go` reproduces every row of the table.
 
 ### The limits underneath, measured
 
