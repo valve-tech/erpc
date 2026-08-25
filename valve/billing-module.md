@@ -158,6 +158,83 @@ The monorepo has one live instance of the pattern this guards against, at
 `beacon-handler.ts:276` (`Number(amountWei)`). Harmless at 50. Do not mirror
 it if beacon pricing is ever ported.
 
+## The block-span tariff, and the one hazard it introduces
+
+`valvebilling/rangecost.go` prices a request by the block range it names. It
+exists because the method table does not: `eth_getLogs` bills 18 credits for one
+block and 18 for five million, and every other range method is flat the same
+way. `trace_filter` is 12, `debug_traceBlockByNumber` is 12, `eth_getFilterLogs`
+is 18. None of them read the range. That is the same price for six orders of
+magnitude more work, and it is the largest mispricing in the table.
+
+This is not a precision fix. The window model below removes the precision limit
+on its own. The tariff stands or falls on the mispricing alone.
+
+It reads no method name. It looks for a params object carrying `fromBlock` or
+`toBlock`, by position or by name, so the next range method to appear is priced
+correctly with no edit. The razor argues for that: an 83-entry method table is
+an enumerated case list, and a charge proportional to the work a request names
+demotes it to a per-request floor.
+
+### Two defects were shipped and caught by the tests, not by review
+
+**The widest span billed nothing.** `Span.Blocks()` computes `To - From + 1`.
+For `From: 0, To: MaxInt64` that is 2^63, which wraps to `MinInt64`, and the
+charge path read the negative result as "no blocks". The single most expensive
+request a client can name — `{"fromBlock":"0x0","toBlock":"0x7fffffffffffffff"}`
+— was free at every tariff. `Credits` now measures the GAP, which is always
+representable: `units = gap/BlocksPerUnit + 1` carries the round-up rule and the
+overflow fix in one expression, because `gap = qB + r` with `1 <= r+1 <= B`
+proves exactly one more unit is always due.
+
+`Blocks()` still wraps on that one span and is still exported. The charge path
+no longer reads it, so no bill is affected, but anything that logs it or
+compares it against a limit gets `-9223372036854775808` with nothing going red.
+Pinned as a characterization test. The honest repair changes the signature.
+
+**The overflow comment was false.** It claimed a 2^63-block span overflows "any
+tariff". At 1,000 blocks per unit and 5 credits per unit the exact charge is
+46,116,860,184,273,880, which fits an int64 with room. Erroring there would have
+refused a request the tariff can price. The code now returns the exact charge
+wherever it fits, and the credit gate refuses 46 quadrillion credits on its own
+merits.
+
+### The hazard: a cold start refuses every open-ended range
+
+`Credits` refuses to price a range it cannot resolve, rather than returning
+zero. It has to: eRPC forwards `safe` and `pending` to the upstream untouched
+(`architecture/evm/json_rpc.go:55-80`), so `{"fromBlock":"earliest",
+"toBlock":"safe"}` returns whole-chain data, and answering zero would let one
+word buy the tariff off.
+
+The cost of that is a cold start. `Heads{}` is what the process holds until the
+head poller answers, and in that window every range with a tag or a defaulted
+end is unresolvable — **including plain `{"fromBlock":"0x1"}`, which is the
+ordinary open-ended `eth_getLogs`**. So at boot, on every chain, `Credits`
+errors for the most common range request there is.
+
+**That forces the caller's policy, and the forcing is the useful part.** The
+fallback cannot be "refuse", because a cold start would then refuse all
+`eth_getLogs` — an outage caused by a pricing function. It has to be **bill the
+flat price and COUNT it**. The counter is what keeps the bypass visible, and the
+two cases have different signatures: a cold start is a burst that ends when the
+poller answers, and a client leaning on `safe` is a counter that never returns
+to zero. Neither is silent, which was the brief's one requirement.
+
+### Open, and deliberately not decided here
+
+- A backwards range is swapped, so `{"toBlock":"0x5"}` at head 1,000,000 bills
+  999,996 blocks for a query that returns nothing. Swapping is right for eRPC's
+  `eth_query` shim, where `order: desc` makes `from > to` intentional, and wrong
+  for `eth_getLogs`, where it means an empty result. The two cannot be told
+  apart without reading the method name, which this file will not do.
+- A filter nested under a key is not found and pays flat.
+- `eth_getLogs` by `blockHash` pays flat. Correct today — one block.
+
+`rangecost_test.go` is 132 subtests and kills 13 of 13 mutants, including one
+the reviewer added for a bug in my own first patch: reading `Found` before
+`Resolved` priced a hand-built `Span` as free.
+
 ## Draining the counters, if that is the direction
 
 The operator proposed keeping credits as integers and periodically draining the
@@ -198,6 +275,54 @@ both in one `MULTI` or one script if the settle path can.
 
 Draining `pending` on settle also removes the wrongly-allowed shape entirely,
 since that shape needs a live `pending` in the sum.
+
+### The window is what removes the limit, not the unit size
+
+The operator's later framing is sharper and it is the one to build: **Redis
+accumulates, Postgres resolves, the counter goes back to zero.** Redis holds a
+window's worth of activity; Postgres holds the truth.
+
+That makes the precision limit a function of how long a counter is allowed to
+run, not of how fine a credit is.
+
+The table below assumes about 21,000,000 requests a day across the fleet at 6
+credits — the modal `methodCu` and the `defaultCu` — which is roughly 1,458
+credits a second. **That volume figure is not measured in this repository.** It
+came from the monorepo during the 2026-08-24 session and nothing here confirms
+it, so treat it as an order of magnitude. The conclusion does not depend on it:
+at a hundred times that volume a full year without settling still leaves about
+2,000× of headroom.
+
+At that rate the largest value any counter ever reaches is:
+
+| settle window | max counter value | headroom to 2^53 |
+|---|---|---|
+| 1 minute | 87,500 | 102,939,420,054× |
+| 1 hour | 5,250,000 | 1,715,657,001× |
+| 1 day | 126,000,000 | 71,485,708× |
+| 1 year | 45,990,000,000 | 195,851× |
+
+Even if the settler never ran for a **year**, five orders of magnitude of
+headroom remain. So the peg keeps its resolution: 1 credit stays $10⁻⁹ and the
+choice stops being a precision question.
+
+The requirement above does not go away. Zeroing `spend` alone leaves `ceiling`
+at 10¹⁷ inside `effective = ceiling + pending - spend`, and the error scales
+with the larger operand. **Both numbers have to be windowed.** Postgres grants a
+window's allowance into Redis, Redis meters against it, the settle returns the
+spend and re-grants.
+
+That turns the Redis ceiling into a **lease**, which is not machinery added on
+top — it falls out of "resolve into Postgres and set to zero" if the model is
+applied to both counters. It is also what bounds overspend once more than one
+eRPC process runs, exactly, and with no dependence on a clock.
+
+**One correction to "set to zero".** Do not read and then zero. The measured
+loss above is exactly that gap: a settle that read 1000 and wrote 0 discarded a
+concurrent `Capture` of 250. `GETSET key 0` returns the old value and clears it
+in one operation, so nothing can land in between; anything arriving after it is
+counted in the next window. `DECRBY` by the amount read is equally safe and
+costs a second round trip. Either is correct. Read-then-`SET` is not.
 
 ### The limits underneath, measured
 
