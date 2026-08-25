@@ -47,7 +47,13 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 func baseInput() AuthorizeInput {
 	return AuthorizeInput{
 		AccountID: "acct_1",
-		KeyID:     "0123456789abcdef0123456789abcdef",
+		// 32 hex characters, the shape HashAPIKey emits, made of one repeated
+		// character on purpose. The obvious synthetic value — the hex alphabet
+		// written twice — scores entropy 4.0 and secret scanners read it as a
+		// credential. A repeated character carries the same shape at near-zero
+		// entropy, so the fixture is unmistakably a fixture to a tool as well
+		// as to a reader.
+		KeyID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		// A fixed instant, so the second and day buckets are deterministic.
 		Now:    time.Unix(1_700_000_000, 0).UTC(),
 		Cost:   big.NewInt(100),
@@ -132,8 +138,8 @@ func TestAuthorize_ARejectionBurnsNothing(t *testing.T) {
 	for _, k := range []string{
 		spendKey("acct_1"),
 		cpsBucketKey("acct_1"),
-		"valve:rate:d:0123456789abcdef0123456789abcdef:19675",
-		"valve:rate:s:0123456789abcdef0123456789abcdef:1700000000",
+		"valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+		"valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
 	} {
 		assert.False(t, mr.Exists(k), "a rejected request moved %s", k)
 	}
@@ -226,4 +232,58 @@ func TestAuthorize_RejectsIncompleteInput(t *testing.T) {
 	in.AccountID = ""
 	_, err = Authorize(ctx, rdb, in)
 	assert.ErrorContains(t, err, "required")
+}
+
+// Why the credits-per-second limit may never be zero.
+//
+// Authorize reads the balance and never reserves it, and it never moves spend
+// — capture does that after the upstream answers. So every request in flight
+// on one account sees the same balance and passes the credit gate. The
+// credits-per-second bucket is the only thing that stops them, and
+// authorize.lua skips that bucket entirely when the limit is zero.
+//
+// This is the trap valvebilling.LoadTierLimitsFromEnv refuses to reproduce:
+// FULL_CREDITS_PER_SEC=0 parses as a real zero in the TypeScript relay, which
+// reads as "throttling off" and means "overdraft protection off".
+func TestAuthorize_TheCreditsPerSecondBucketIsTheOnlyOverdraftBound(t *testing.T) {
+	// A balance of exactly one request. Every further request overdraws.
+	const balance = "100"
+
+	t.Run("a zero limit leaves the overdraft unbounded", func(t *testing.T) {
+		mr, rdb := newTestRedis(t)
+		require.NoError(t, mr.Set(ceilingKey("acct_1"), balance))
+
+		in := baseInput()
+		in.Cost = big.NewInt(100)
+		in.Limits.FullCPS = 0
+
+		for i := 1; i <= 10; i++ {
+			v, err := Authorize(context.Background(), rdb, in)
+			require.NoError(t, err)
+			require.True(t, v.OK(),
+				"request %d was refused with %q; if the script ever bounds a zero limit, "+
+					"read LoadTierLimitsFromEnv again before relaxing it", i, v.Code)
+		}
+	})
+
+	t.Run("a positive limit bounds it", func(t *testing.T) {
+		mr, rdb := newTestRedis(t)
+		require.NoError(t, mr.Set(ceilingKey("acct_1"), balance))
+
+		in := baseInput()
+		in.Cost = big.NewInt(100)
+		in.Limits.FullCPS = 250
+
+		for i := 1; i <= 2; i++ {
+			v, err := Authorize(context.Background(), rdb, in)
+			require.NoError(t, err)
+			require.True(t, v.OK(), "request %d was refused with %q", i, v.Code)
+		}
+
+		v, err := Authorize(context.Background(), rdb, in)
+		require.NoError(t, err)
+		assert.False(t, v.OK())
+		assert.Equal(t, "cps_throttle", v.Code,
+			"the third request overdraws past the per-second budget and must be stopped")
+	})
 }
