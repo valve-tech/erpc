@@ -98,9 +98,30 @@ re-measured directly rather than argued about.
 
 It is nonetheless harmless, and the reason is the important part: the STORED
 values are exact, because `spend` accumulates by Redis `INCRBY` on int64. Only
-the in-Lua sufficiency comparison rounds. The worst case is an account whose
-effective balance sits within one ULP of zero at that magnitude overspending by
-about $1.6e-8.
+the in-Lua sufficiency comparison rounds.
+
+**Measured rather than derived, and smaller than the generic bound.** 16 is the
+ULP at that magnitude, but this ceiling is not a worst case for it: it reads
+into Lua as `99999680453646016`, a drift of −5 credits, and the largest
+overspend it permits is **3 credits** — about $0.000000003 at the ledger's peg.
+An earlier draft of this section quoted the generic 16 and $1.6e-8. See
+`valvebilling/limits_test.go`, which measures each boundary against the real
+script.
+
+**And the failure needs a specific shape, which the same tests establish.** An
+account whose balance is exactly exhausted — `ceiling == spend` — refuses a
+1-credit charge correctly at EVERY magnitude tested, up to 2^62. Equal operands
+round to the same double, so their difference is exactly zero however large
+they are. The error requires the operands to round in OPPOSITE directions, and
+there are two shapes that do it:
+
+- a 1-credit **balance** disappearing, from **2^54** ($18.0M), where the
+  customer is wrongly REFUSED their last credit — the error runs against the
+  customer, not the house;
+- a 1-credit **charge** wrongly allowed, from **2^53** ($9.0M), which needs a
+  live `pending` in the sum.
+
+Draining `pending` on settle removes the second shape entirely.
 
 A second correction, in the other direction. The originating brief gives the
 overdraft bound as roughly 6x `FULL_CREDITS_PER_SEC`, about 30,000 credits, and
@@ -136,3 +157,63 @@ read would be silent. A JSON number is refused rather than accepted.
 The monorepo has one live instance of the pattern this guards against, at
 `beacon-handler.ts:276` (`Number(amountWei)`). Harmless at 50. Do not mirror
 it if beacon pricing is ever ported.
+
+## Draining the counters, if that is the direction
+
+The operator proposed keeping credits as integers and periodically draining the
+Redis counters as they settle to Postgres or on-chain, so Redis holds an
+unsettled delta rather than a lifetime total. `valvebilling/limits_test.go`
+measures what that buys and what it requires.
+
+**It works, but only if the drain shrinks the CEILING, not just the spend.**
+The rounding error scales with the larger operand, and that is `ceiling`. Three
+shapes at the live magnitude, all measured:
+
+| shape | verdict |
+|---|---|
+| large ceiling, drained spend, small cost | right — but because the balance is nowhere near zero, not because the arithmetic is exact |
+| `spend ≈ ceiling` | **wrong**, by up to 3 credits at the live ceiling |
+| small ceiling AND small spend | exact, at every cost tested |
+
+So draining `spend` alone leaves the arithmetic wrong and merely moves the
+balance away from the point where it shows. The precision limit disappears only
+when both operands are small — which means `ceiling` has to be a REMAINING
+balance that the settle refreshes, not a lifetime grant.
+
+### The safe drain
+
+Settle amount `V`, then:
+
+1. `DECRBY ceiling V`
+2. `DECRBY spend V`
+
+**Never `SET 0`.** Measured: with a concurrent `Capture` of 250 credits landing
+between the read and the write, `SET 0` discarded all 250 and `DECRBY V` lost
+none. `SET 0` is only safe for an authoritative recompute, which is what
+`REFRESH_LUA` does for `ceiling` today — the same move on `spend` loses money.
+
+**Ceiling first.** A crash between the two steps leaves the account temporarily
+short, so it refuses — safe. Spend first would hand out `V` free credits. Do
+both in one `MULTI` or one script if the settle path can.
+
+Draining `pending` on settle also removes the wrongly-allowed shape entirely,
+since that shape needs a live `pending` in the sum.
+
+### The limits underneath, measured
+
+| limit | boundary | at the 10⁹ peg |
+|---|---|---|
+| a 1-credit balance disappears | 2^54 | $18,014,398.51 |
+| a 1-credit charge wrongly allowed (needs `pending`) | 2^53 | $9,007,199.25 |
+| `INCRBY` refuses to cross int64 max | 9223372036854775807 | $9,223,372,036.85 |
+| `Capture` refuses a cost past int64 before Redis is touched | 2^63 | — |
+
+`INCRBY` errors rather than wrapping, and the counter is unchanged. A cost at
+ERC-20 wei scale (10^24) never bills on this rail.
+
+**One test-environment caveat.** miniredis and real Redis diverge on a cost
+above int64: real Redis converts it to `1e+24` and answers `no_credits`, while
+miniredis fails to compile the script and `Authorize` returns an ERROR. Neither
+bills, but a caller that fails open on an authorize error would behave
+differently under test than in production. The fixtures were cross-checked
+against a real `redis-server` 7.2.4 for this reason.
