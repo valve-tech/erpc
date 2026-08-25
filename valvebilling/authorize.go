@@ -27,6 +27,10 @@ var authorizeLua string
 // AuthorizeScriptSHA1 is the digest the monorepo's copy hashes to. It is
 // stated here as a constant so a drifted copy fails a test rather than
 // quietly running a second script in production.
+//
+// It is a drift pin, so it is NOT configurable. A pin an operator can move
+// pins nothing: the first response to the test failing would be to move it,
+// which is the one action that must stay hard.
 const AuthorizeScriptSHA1 = "e261a53c458cbd91147367a7e4bb5c568b599efc" //gitleaks:allow — SHA1 of a public Lua script, not a credential
 
 // authorizeScript wraps the body with go-redis's EVALSHA-then-EVAL fallback,

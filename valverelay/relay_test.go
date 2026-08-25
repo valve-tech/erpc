@@ -114,7 +114,7 @@ func fundedRequest() Request {
 		ChainID:   1,
 		Method:    "eth_blockNumber",
 		AccountID: testAccount,
-		KeyID:     "0123456789abcdef0123456789abcdef",
+		KeyID:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		// A fixed instant, so the script's second and day buckets are
 		// deterministic.
 		Now: time.Unix(1_700_000_000, 0).UTC(),
@@ -311,11 +311,8 @@ func TestBill_WrapsAnyForward(t *testing.T) {
 	assert.Equal(t, int64(testCost), res.Billed.Int64())
 }
 
-func TestLoadPriceTable_ReadsTheExportedFiles(t *testing.T) {
-	table, err := LoadPriceTable(
-		"../valvebilling/testdata/cost-corpus.json",
-		"../valvebilling/testdata/method-cu.json",
-	)
+func TestLoadPriceTable_ReadsTheExportedCorpus(t *testing.T) {
+	table, err := LoadPriceTable("../valvebilling/testdata/cost-corpus.json")
 	require.NoError(t, err)
 
 	// A row the corpus carries. It was written against the zero address, so
@@ -330,18 +327,30 @@ func TestLoadPriceTable_ReadsTheExportedFiles(t *testing.T) {
 	assert.Equal(t, big.NewInt(6), got.AmountWei)
 }
 
-// The two exports must agree on defaultCu. A stale one against a fresh one
-// prices every unlisted method wrong with nothing going red.
-func TestLoadPriceTable_RefusesDisagreeingDefaults(t *testing.T) {
+// The export must carry methodCu. It used to live in a second file, and this
+// test used to assert that the two files' defaultCu agreed — a real hazard
+// while there were two. The monorepo folded methodCu into the corpus, so the
+// remaining failure is an export that lacks it, which would otherwise price
+// every listed method at the tier-3 default in silence.
+func TestLoadPriceTable_RefusesAnExportWithoutTheComputeUnitTable(t *testing.T) {
 	dir := t.TempDir()
-	rows := dir + "/rows.json"
-	cu := dir + "/cu.json"
-	require.NoError(t, writeFile(rows, `{"defaultCu":6,"rows":[]}`))
-	require.NoError(t, writeFile(cu, `{"defaultCu":20,"methodCu":{}}`))
+	path := dir + "/export.json"
+	require.NoError(t, writeFile(path, `{"defaultCu":6,"rows":[]}`))
 
-	_, err := LoadPriceTable(rows, cu)
+	_, err := LoadPriceTable(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "stale")
+	assert.Contains(t, err.Error(), "methodCu")
+}
+
+// defaultCu is never defaulted here — see the comment on LoadPriceTable.
+func TestLoadPriceTable_RefusesAnExportWithoutADefault(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/export.json"
+	require.NoError(t, writeFile(path, `{"methodCu":{"eth_call":12},"rows":[]}`))
+
+	_, err := LoadPriceTable(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "defaultCu")
 }
 
 func writeFile(path, content string) error {

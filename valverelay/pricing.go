@@ -8,55 +8,46 @@ import (
 	"github.com/erpc/erpc/valvebilling"
 )
 
-// priceRowsFile is the shape of the pricing export: the rows of
-// shared.method_pricing plus the tier-3 default. It is the shape
-// valvebilling/testdata/cost-corpus.json already carries, so the generator
-// that produces the corpus produces this too and no new format exists.
-type priceRowsFile struct {
+// priceExport is the shape of the pricing export: the rows of
+// shared.method_pricing, the tier-3 compute-unit table, and the tier-3
+// default. All three live in ONE file — valvebilling/testdata/cost-corpus.json
+// — so the generator that produces the corpus produces this too and no new
+// format exists.
+type priceExport struct {
 	DefaultCU *int64                  `json:"defaultCu"`
+	MethodCU  map[string]int64        `json:"methodCu"`
 	Rows      []valvebilling.PriceRow `json:"rows"`
 }
 
-// methodCUFile is the shape of the compute-unit export
-// (valvebilling/testdata/method-cu.json).
-type methodCUFile struct {
-	DefaultCU *int64           `json:"defaultCu"`
-	MethodCU  map[string]int64 `json:"methodCu"`
-}
-
-// LoadPriceTable builds the price table from the two exported files.
+// LoadPriceTable builds the price table from the exported corpus.
 //
-// Both are data the monorepo owns. Neither value is defaulted here: the
-// monorepo's own DEFAULT_CU was 20 until it was cut to 6, two comments still
-// said 20 afterwards, and two separate readers copied the wrong number from
-// them. A constant in this file would be a third copy to go stale.
+// It takes ONE path. It used to take two — rows and the compute-unit table
+// were separate exports — and it cross-checked that their defaultCu agreed,
+// because one stale export against one fresh one prices every unlisted method
+// wrong and nothing else would notice. The monorepo folded methodCu into the
+// corpus, so that drift is now impossible by construction and the check is
+// gone with the second file. A guard against a state that cannot occur is
+// machinery nothing exercises.
 //
-// The two files must agree on defaultCu. One stale export against one fresh
-// one prices every unlisted method wrong, and nothing else would notice.
-func LoadPriceTable(rowsPath, methodCUPath string) (*valvebilling.PriceTable, error) {
-	var rows priceRowsFile
-	if err := readJSON(rowsPath, &rows); err != nil {
+// defaultCu is not defaulted here. The monorepo's own DEFAULT_CU was 20 until
+// it was cut to 6, two comments still said 20 afterwards, and two separate
+// readers copied the wrong number from them. A constant in this file would be
+// a third copy to go stale.
+func LoadPriceTable(path string) (*valvebilling.PriceTable, error) {
+	var export priceExport
+	if err := readJSON(path, &export); err != nil {
 		return nil, err
 	}
-	if rows.DefaultCU == nil {
-		return nil, fmt.Errorf("valverelay: %s has no defaultCu; it is not defaulted here", rowsPath)
+	if export.DefaultCU == nil {
+		return nil, fmt.Errorf("valverelay: %s has no defaultCu; it is not defaulted here", path)
 	}
-
-	var cu methodCUFile
-	if err := readJSON(methodCUPath, &cu); err != nil {
-		return nil, err
-	}
-	if cu.DefaultCU == nil {
-		return nil, fmt.Errorf("valverelay: %s has no defaultCu; it is not defaulted here", methodCUPath)
-	}
-	if *cu.DefaultCU != *rows.DefaultCU {
+	if len(export.MethodCU) == 0 {
 		return nil, fmt.Errorf(
-			"valverelay: %s says defaultCu is %d and %s says %d; one export is stale",
-			rowsPath, *rows.DefaultCU, methodCUPath, *cu.DefaultCU)
+			"valverelay: %s carries no methodCu; a Go-side copy of that table is how the two languages drift", path)
 	}
 
-	table := valvebilling.NewPriceTable(cu.MethodCU, *rows.DefaultCU)
-	if err := table.Load(rows.Rows); err != nil {
+	table := valvebilling.NewPriceTable(export.MethodCU, *export.DefaultCU)
+	if err := table.Load(export.Rows); err != nil {
 		return nil, err
 	}
 	return table, nil
