@@ -296,25 +296,32 @@ window's worth of activity; Postgres holds the truth.
 That makes the precision limit a function of how long a counter is allowed to
 run, not of how fine a credit is.
 
-The table below assumes about 21,000,000 requests a day across the fleet at 6
-credits — the modal `methodCu` and the `defaultCu` — which is roughly 1,458
-credits a second. **That volume figure is not measured in this repository.** It
-came from the monorepo during the 2026-08-24 session and nothing here confirms
-it, so treat it as an order of magnitude. The conclusion does not depend on it:
-at a hundred times that volume a full year without settling still leaves about
-2,000× of headroom.
+The volume is now measured: **33,065,653 requests in the 24 hours to
+2026-08-25**, from `relay.relay_request` on valve-ingress — about 383 a second.
+An earlier version of this section said 21,000,000 a day and flagged it as
+unsourced. It was, and it was wrong.
+
+Carry the caveat that came with it: migration 0019 measured valve's own Admin
+Operations project at **99.993% of all rows**, so this is a LOAD figure, not
+customer demand.
+
+The cost per request also moved. Monorepo commit `ea1e12b` multiplied
+`METHOD_CU` by 100, so `DEFAULT_CU` is 600 rather than 6. Together those two
+corrections change the table below by 157x — 229,623 credits a second, not
+1,458.
 
 At that rate the largest value any counter ever reaches is:
 
 | settle window | max counter value | headroom to 2^53 |
 |---|---|---|
-| 1 minute | 87,500 | 102,939,420,054× |
-| 1 hour | 5,250,000 | 1,715,657,001× |
-| 1 day | 126,000,000 | 71,485,708× |
-| 1 year | 45,990,000,000 | 195,851× |
+| 1 minute | 13,777,355 | 653,768,374× |
+| 1 hour | 826,641,325 | 10,896,140× |
+| 1 day | 19,839,391,800 | 454,006× |
+| 1 year | 7,241,378,007,000 | 1,244× |
 
-Even if the settler never ran for a **year**, five orders of magnitude of
-headroom remain. So the peg keeps its resolution: 1 credit stays $10⁻⁹ and the
+Even if the settler never ran for a **year**, three orders of magnitude of
+headroom remain. The 157x correction moved every number and changed no
+conclusion, which is the useful thing to know about it. So the peg keeps its resolution: 1 credit stays $10⁻⁹ and the
 choice stops being a precision question.
 
 The requirement above does not go away. Zeroing `spend` alone leaves `ceiling`
