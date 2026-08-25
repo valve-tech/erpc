@@ -96,6 +96,10 @@ func (b *httpBackend) Close() error {
 
 // snippet bounds an error message that would otherwise carry a whole response
 // body into the logs.
+//
+// max stays a constant. Log hygiene has one right answer here, and a setting
+// nobody would ever turn is unexercised machinery — which is itself a
+// commitment to supporting it forever.
 func snippet(b []byte) string {
 	const max = 256
 	if len(b) > max {
