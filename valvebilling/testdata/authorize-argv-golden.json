@@ -1,0 +1,588 @@
+{
+  "why": "The exact KEYS and ARGV that valvebilling.Authorize sends to the shared authorize.lua. Order is significant everywhere; nothing here is sorted. The TypeScript relay builds the same two arrays in credits-lua.ts, and the script cannot tell the two apart. Regenerate with: go test ./valvebilling/ -run TestAuthorizeArgv_MatchesTheGoldenFixture -update-argv-golden",
+  "scriptSha1": "e261a53c458cbd91147367a7e4bb5c568b599efc",
+  "cases": [
+    {
+      "name": "no methods",
+      "why": "The ordinary request. The per-method gate is off, so ARGV[12] is 0 and ARGV ends there.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    },
+    {
+      "name": "one method",
+      "why": "The first per-method triple. Its base offset is 12, so an off-by-one lands on the count itself.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": [
+          {
+            "method": "eth_call",
+            "count": 1,
+            "limit": 5
+          }
+        ]
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "1",
+        "valve:rate:s:m:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:eth_call:1700000000",
+        "1",
+        "5"
+      ]
+    },
+    {
+      "name": "three methods",
+      "why": "The offset the script computes as base = 12 + (i-1)*3. Every count and every limit differs, and one limit is 0 (the gate off for that method alone), so a reordered or mis-strided triple cannot land on the same fixture.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": [
+          {
+            "method": "eth_call",
+            "count": 1,
+            "limit": 5
+          },
+          {
+            "method": "eth_getLogs",
+            "count": 2,
+            "limit": 0
+          },
+          {
+            "method": "eth_getBalance",
+            "count": 3,
+            "limit": 7
+          }
+        ]
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "3",
+        "valve:rate:s:m:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:eth_call:1700000000",
+        "1",
+        "5",
+        "valve:rate:s:m:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:eth_getLogs:1700000000",
+        "2",
+        "0",
+        "valve:rate:s:m:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:eth_getBalance:1700000000",
+        "3",
+        "7"
+      ]
+    },
+    {
+      "name": "cost above 2^53",
+      "why": "The cost travels as a decimal STRING, matching String(bigint) in TypeScript. 2^53+1 is the first integer a float64 cannot hold, so a Go-side float would round it to 9007199254740992 here.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "9007199254740993",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "9007199254740993",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    },
+    {
+      "name": "cost of 10^24 wei",
+      "why": "A wei-scale amount. big.Int.String never emits an exponent; a float64 would render this as 1e+24, which tonumber() in Lua would still parse — silently, and with a different value.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "1000000000000000000000000",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "1000000000000000000000000",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    },
+    {
+      "name": "cost of zero",
+      "why": "Zero cost turns off the credits-per-second bucket inside the script (chargeCps needs cost \u003e 0). The wire form must be \"0\", not \"\" and not \"0e0\".",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "0",
+        "cuCost": 0,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "0",
+        "0",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    },
+    {
+      "name": "every limit at zero",
+      "why": "The no-gate state. The script skips a gate whose limit is 0, including the credits-per-second bucket, which is the only bound on an overdraft. Pinned because zero must arrive as the number 0 and not as an omitted argument.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 0,
+          "cuSecondLimit": 0,
+          "cuDayLimit": 0,
+          "slowThreshold": 0,
+          "fullCps": 0,
+          "slowCps": 0,
+          "fullRps": 0,
+          "slowRps": 0,
+          "keyRps": 0
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "name": "every limit at MaxInt64",
+      "why": "The decimal form of 9223372036854775807. A float64 renders it as 9223372036854776000, so this pins that the limits are formatted as integers.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 9223372036854775807,
+          "cuSecondLimit": 9223372036854775807,
+          "cuDayLimit": 9223372036854775807,
+          "slowThreshold": 9223372036854775807,
+          "fullCps": 9223372036854775807,
+          "slowCps": 9223372036854775807,
+          "fullRps": 9223372036854775807,
+          "slowRps": 9223372036854775807,
+          "keyRps": 9223372036854775807
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "9223372036854775807",
+        "0"
+      ]
+    },
+    {
+      "name": "account id carrying the key delimiter",
+      "why": "Nothing escapes the account id: it is interpolated straight into colon-delimited key names. Redis keys are binary safe, so this is not a bug, but the exact unescaped result is pinned — a future sanitiser on either side would split the ledger in two without an error.",
+      "input": {
+        "accountId": "acct:1 \"quoted\"\n\tsp ce\\é",
+        "keyId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "nowUnix": 1700000000,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": [
+          {
+            "method": "eth_call:weird arg",
+            "count": 1,
+            "limit": 5
+          }
+        ]
+      },
+      "keys": [
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:per_request_lock",
+        "valve:rate:d:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:19675",
+        "valve:rate:cu:s:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1700000000",
+        "valve:rate:cu:d:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:19675",
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:ceiling",
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:pending",
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:spend",
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:closing",
+        "valve:credits:acct:1 \"quoted\"\n\tsp ce\\é:cps",
+        "valve:rate:s:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:1700000000"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "1",
+        "valve:rate:s:m:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:eth_call:weird arg:1700000000",
+        "1",
+        "5"
+      ]
+    },
+    {
+      "name": "the first second of a day",
+      "why": "day = sec / 86400 in Go and Math.floor(sec / 86400) in TypeScript. This second is exactly 19676 * 86400, so it pins the boundary the two forms must agree on.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700006400,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19676",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700006400",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19676",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700006400"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    },
+    {
+      "name": "the last second of a day",
+      "why": "One second earlier still belongs to day 19675. Together with the case above, this pins the floor.",
+      "input": {
+        "accountId": "acct_1",
+        "keyId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "nowUnix": 1700006399,
+        "cost": "100",
+        "cuCost": 5,
+        "limits": {
+          "dayLimit": 1000000,
+          "cuSecondLimit": 3000,
+          "cuDayLimit": 5000000,
+          "slowThreshold": 7000,
+          "fullCps": 11000,
+          "slowCps": 13,
+          "fullRps": 17,
+          "slowRps": 19,
+          "keyRps": 23
+        },
+        "methods": []
+      },
+      "keys": [
+        "valve:credits:acct_1:per_request_lock",
+        "valve:rate:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:rate:cu:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700006399",
+        "valve:rate:cu:d:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:19675",
+        "valve:credits:acct_1:ceiling",
+        "valve:credits:acct_1:pending",
+        "valve:credits:acct_1:spend",
+        "valve:credits:acct_1:closing",
+        "valve:credits:acct_1:cps",
+        "valve:rate:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1700006399"
+      ],
+      "argv": [
+        "100",
+        "5",
+        "1000000",
+        "3000",
+        "5000000",
+        "7000",
+        "11000",
+        "13",
+        "17",
+        "19",
+        "23",
+        "0"
+      ]
+    }
+  ]
+}
