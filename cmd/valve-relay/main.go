@@ -21,9 +21,16 @@
 // the valverelay package doc). Put it behind something that sets those headers
 // and strips whatever a client sent, or do not expose it.
 //
-// It also applies no tiering policy. Every request carries zero rate limits,
-// which leaves the script's rate gates disabled; the credit-balance gate still
-// applies.
+// It applies the deployment-wide tier limits and nothing more. With billing on
+// it reads SLOW_MODE_THRESHOLD_USD, FULL_CREDITS_PER_SEC, SLOW_CREDITS_PER_SEC,
+// FULL_RATE_RPS and SLOW_RATE_RPS — the names the TypeScript relay reads, so
+// one environment can feed both — and every one of them is required. See
+// valvebilling.LoadTierLimitsFromEnv for why none of them may be zero.
+//
+// The per-key quotas stay at zero: requests per day, compute units per second
+// and per day, and requests per second belong to an API key record, and this
+// fork reads no key records. Those gates stay off until an auth layer supplies
+// them.
 package main
 
 import (
@@ -75,21 +82,50 @@ func run() error {
 	configPath := flag.String("config", env("VALVE_RELAY_CONFIG", ""), "eRPC config file (embedded backend)")
 	upstream := flag.String("upstream", env("VALVE_RELAY_UPSTREAM", ""), "eRPC base URL (http backend)")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-request upstream timeout (http backend)")
-	pricesPath := flag.String("prices", env("VALVE_BILLING_PRICES", ""), "pricing rows export (required when billing is enabled)")
-	methodCUPath := flag.String("method-cu", env("VALVE_BILLING_METHOD_CU", ""), "compute-unit export (required when billing is enabled)")
+	pricesPath := flag.String("prices", env("VALVE_BILLING_PRICES", ""), "pricing export: rows, methodCu and defaultCu in one file (required when billing is enabled)")
+	maxRequestBytes := flag.Int64("max-request-bytes", 8<<20, "largest request body this relay reads")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "how long shutdown waits for in-flight requests")
 	flag.Parse()
+
+	// Both are operational bounds, so both may move; neither may vanish. A
+	// zero body limit refuses every request and a zero shutdown timeout cancels
+	// every in-flight one, and an operator who typed either meant something
+	// else.
+	if *maxRequestBytes <= 0 {
+		return fmt.Errorf("-max-request-bytes must be greater than zero, got %d", *maxRequestBytes)
+	}
+	if *shutdownTimeout <= 0 {
+		return fmt.Errorf("-shutdown-timeout must be greater than zero, got %s", *shutdownTimeout)
+	}
 
 	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).With().Timestamp().Logger()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	billing, err := newBilling(ctx, *pricesPath, *methodCUPath)
+	billing, err := newBilling(ctx, *pricesPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = billing.Close() }()
 	logger.Info().Bool("billing", billing.Enabled()).Msg("billing module")
+
+	// The tier limits are read only when billing is enabled, exactly like the
+	// pricing files. A passthrough deployment needs none of them.
+	var limits valvebilling.Limits
+	if billing.Enabled() {
+		limits, err = valvebilling.LoadTierLimitsFromEnv()
+		if err != nil {
+			return err
+		}
+		logger.Info().
+			Int64("slow_threshold_credits", limits.SlowThreshold).
+			Int64("full_cps", limits.FullCPS).
+			Int64("slow_cps", limits.SlowCPS).
+			Int64("full_rps", limits.FullRPS).
+			Int64("slow_rps", limits.SlowRPS).
+			Msg("tier limits")
+	}
 
 	backend, err := newBackend(ctx, &logger, *backendKind, *projectID, *configPath, *upstream, *timeout)
 	if err != nil {
@@ -98,12 +134,12 @@ func run() error {
 	defer func() { _ = backend.Close() }()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evm/{chainId}", handler(&logger, billing, backend))
+	mux.HandleFunc("POST /evm/{chainId}", handler(&logger, billing, backend, limits, *maxRequestBytes))
 
 	srv := &http.Server{Addr: *listen, Handler: mux}
 	go func() {
 		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
@@ -119,7 +155,7 @@ func run() error {
 //
 // The pricing files are read only when billing is enabled, so a passthrough
 // deployment needs neither of them and cannot be broken by a stale one.
-func newBilling(ctx context.Context, pricesPath, methodCUPath string) (*valvebilling.Module, error) {
+func newBilling(ctx context.Context, pricesPath string) (*valvebilling.Module, error) {
 	cfg, err := valvebilling.LoadConfigFromEnv()
 	if err != nil {
 		return nil, err
@@ -127,10 +163,10 @@ func newBilling(ctx context.Context, pricesPath, methodCUPath string) (*valvebil
 	if !cfg.Enabled {
 		return nil, nil
 	}
-	if pricesPath == "" || methodCUPath == "" {
+	if pricesPath == "" {
 		return nil, fmt.Errorf("billing is enabled but -prices and -method-cu are not both set; refusing to guess prices")
 	}
-	prices, err := valverelay.LoadPriceTable(pricesPath, methodCUPath)
+	prices, err := valverelay.LoadPriceTable(pricesPath)
 	if err != nil {
 		return nil, err
 	}
@@ -158,14 +194,20 @@ func newBackend(ctx context.Context, logger *zerolog.Logger, kind, projectID, co
 	}
 }
 
-func handler(logger *zerolog.Logger, billing *valvebilling.Module, backend valverelay.Backend) http.HandlerFunc {
+func handler(
+	logger *zerolog.Logger,
+	billing *valvebilling.Module,
+	backend valverelay.Backend,
+	limits valvebilling.Limits,
+	maxRequestBytes int64,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		chainID, err := strconv.ParseInt(r.PathValue("chainId"), 10, 64)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "chain id must be a number")
 			return
 		}
-		body, err := readBody(w, r)
+		body, err := readBody(w, r, maxRequestBytes)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -181,6 +223,7 @@ func handler(logger *zerolog.Logger, billing *valvebilling.Module, backend valve
 			Method:    method,
 			AccountID: r.Header.Get(headerAccountID),
 			KeyID:     r.Header.Get(headerKeyID),
+			Limits:    limits,
 		}
 		if billing.Enabled() && (req.AccountID == "" || req.KeyID == "") {
 			writeError(w, http.StatusBadRequest,
@@ -224,10 +267,8 @@ func handler(logger *zerolog.Logger, billing *valvebilling.Module, backend valve
 	}
 }
 
-// maxRequestBytes bounds what one request may post.
-const maxRequestBytes = 8 << 20
-
-func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+// readBody reads at most maxRequestBytes, which -max-request-bytes sets.
+func readBody(w http.ResponseWriter, r *http.Request, maxRequestBytes int64) ([]byte, error) {
 	defer func() { _ = r.Body.Close() }()
 	return io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 }

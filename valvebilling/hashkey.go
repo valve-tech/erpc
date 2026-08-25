@@ -9,11 +9,19 @@ import (
 
 // APIKeyHashLength is how many hex characters of the digest name a key.
 // It matches API_KEY_HASH_LENGTH in the monorepo's hash-api-key.ts.
+//
+// It is a wire contract, so it is NOT configurable. The api service writes
+// the buckets this module reads. If Go and TypeScript disagreed by one
+// character, every Redis lookup would miss, every account would look
+// unmetered, and nothing would go red.
 const APIKeyHashLength = 32
 
 // MinPepperLength mirrors the monorepo's MIN_PEPPER_LENGTH. A short pepper is
 // refused rather than accepted, because the whole point of the pepper is that
 // a stolen Redis dump is useless without it.
+//
+// It is a security floor, not a tuning knob, so it is NOT configurable. The
+// only reason to move a floor is to get under it.
 const MinPepperLength = 32
 
 // HashAPIKey derives the Redis-safe identifier for an API key.

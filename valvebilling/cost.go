@@ -11,6 +11,8 @@ import (
 // ZeroAddress is the all-zero 20-byte address. A (chain, method) row written
 // against it prices that method for ANY token — it is a distinct fallback
 // tier, not a default row.
+//
+// It is a blockchain constant, so it is NOT configurable.
 const ZeroAddress = "0x0000000000000000000000000000000000000000"
 
 // CostSource records which tier answered a lookup.

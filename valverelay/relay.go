@@ -38,6 +38,11 @@ type Request struct {
 	CUCost int64
 	// Limits are the policy numbers for this request. A zero Limits disables
 	// every rate gate in the script; the credit-balance gate still applies.
+	//
+	// valvebilling.LoadTierLimitsFromEnv reads the five deployment-wide ones
+	// and explains why none of them may be zero. The other four — requests per
+	// day, compute units per second and per day, and the per-key request rate
+	// — belong to an API key record, so a caller that has one sets them here.
 	Limits valvebilling.Limits
 	// Methods are the per-second per-method buckets. Empty skips that gate.
 	Methods []valvebilling.MethodBucket
