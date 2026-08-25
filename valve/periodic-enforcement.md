@@ -69,7 +69,7 @@ otherwise. Estimates say "estimate". Numbers from the monorepo brief say so.
 | Credits per USD (the web calculator) | 10⁶ | `packages/web/src/lib/pricing.ts:16` — **confirmed WRONG 2026-08-24; the ledger's 10⁹ governs, see section 2** |
 | CPS bucket window | 2 s, fixed | `packages/utils/src/credits-lua.ts:148-164`, `:201-204` |
 | Worst-case request lifetime | 12 s = (1+3) × 3,000 ms | `packages/relay/src/config.ts:83`, `:86`, `proxy-forward.ts:78-105` |
-| **Reachable overdraft bound today** | **3,000 credits = $0.000003/account** | derived; section 2 |
+| **Reachable overdraft bound today** | **3,486 credits = $0.0000034860/account** | MEASURED; `valvebilling/overdraft_test.go`; section 2 |
 | Deployment artifacts setting the five tier knobs | 0 | searched `config/ deploy/ scripts/ services/ docker-compose.yml .env*` |
 
 ---
@@ -81,7 +81,7 @@ otherwise. Estimates say "estimate". Numbers from the monorepo brief say so.
 | **Identity** — who is this key | **Yes, already does** | A new key does not work until first read. A miss is a live lookup, so this is bounded by the negative cache: 5 s. |
 | **Revocation** — this key must stop | **Partly. This is the real gap.** | Up to the positive TTL, per process. See below. |
 | **Rate limiting** — requests and credits per second | **Yes, already does** | The *budget name* is stale, not the counting. A tier change takes up to the TTL to apply; the limit itself is enforced exactly. |
-| **Credit sufficiency** — does the account still have money | **No. Not from cached state.** | Unbounded without a rate limit; `TTL × RPS × cost` with one. Today's reachable bound is 3,000 credits; any practical TTL is orders of magnitude larger. Section 2. |
+| **Credit sufficiency** — does the account still have money | **No. Not from cached state.** | Unbounded without a rate limit; `TTL × RPS × cost` with one. Today's reachable bound is 3,486 credits, measured; any practical TTL is orders of magnitude larger. Section 2. |
 | **Per-method policy** — per-second caps on named methods | **Yes, natively and better** | eRPC's budgets are per-method rules already. No staleness beyond the budget name. |
 
 ### Identity — already solved, and the shape is right
@@ -239,7 +239,7 @@ backends)) × upstreamTimeoutMs` = (1 + 3) × 3,000 ms = 12 s
 `packages/relay/src/proxy-forward.ts:78-105`). Twelve seconds spans six
 2-second windows, each granting a fresh `cpsLimit`. Hence the factor of 6.
 
-### The stated 30,000 is not the reachable bound. 3,000 is.
+### The stated 30,000 is not the reachable bound. 3,486 is.
 
 The comment derives ≈ 6 × `FULL_CREDITS_PER_SEC` = 6 × 5,000 = 30,000
 credits. That arithmetic is right and the tier is wrong.
@@ -255,6 +255,70 @@ is:
 ```
 6 × SLOW_CREDITS_PER_SEC  =  6 × 500  =  3,000 credits
 ```
+
+**Both halves of that arithmetic were wrong, and they were wrong in opposite
+directions.** `valvebilling/overdraft_test.go` measures it against a real
+redis-server 7.2.4 under real concurrency, and the answer is **3,486**.
+
+*The window yields 498, not 500.* The bucket gate is `cpsCount + cost >
+cpsLimit`, so the last approval has to fit WHOLE. At the default cost of 6,
+one window yields `floor(500/6) × 6 = 498` and strands 2. Reaching exactly
+3,000 needs a cost that divides 500 — 1, 2, 4, 5, 10, 20, 25 or 50. Six
+windows at cost 6 is 2,988.
+
+*The span touches seven windows, not six.* `EXPIRE ... 2 NX` is armed only by
+the charge that CREATES the key, so the window is a tumbling one anchored at
+the first charge — not sliding, and not aligned to a clock. Measured: PTTL
+falls 1.998 → 1.977 → 1.955 → 1.932 across four charges and is never
+refreshed. A 12-second span that starts mid-window gets that window's tail
+PLUS six more.
+
+```
+worst phase:  7 × floor(500/6) × 6  =  7 × 498  =  3,486 credits
+```
+
+The structural argument above stands — the overdrawing account is always
+`SLOW`, and 30,000 is stated for the wrong tier. The number attached to it
+was 16% low.
+
+**A client that paces to the window edge collects two full allowances in 162
+ms** (498 + 498 = 996), measured. Neither document recorded that the tumbling
+window bursts at its boundary, and it is what makes the seventh window
+reachable.
+
+**The bound does not care how fast the client sends.** Measured over one
+window at SlowCPS 500 and cost 6:
+
+| goroutines | requests offered | approved | credits |
+|---|---|---|---|
+| 1 | 2,564 | 83 | 498 |
+| 8 | 2,592 | 83 | 498 |
+| 64 | 2,816 | 83 | 498 |
+| 256 | 3,584 | 83 | 498 |
+| 512 | 4,608 | 83 | 498 |
+
+Offering 1.8× the load changes the overdraft by zero credits; a faster client
+only collects its rejections sooner. That is exactly the property this whole
+document depends on — a CPS bucket caps credits per unit TIME, where a cached
+projection's bound scales with request rate. It holds.
+
+**The 3,000-ish bound is a property of the configured threshold, not of the
+script.** The tier test is `effective < thresh`, and `LoadTierLimitsFromEnv`
+requires the threshold to be positive but sets no floor. So
+`SLOW_MODE_THRESHOLD_USD=0.000001` is ACCEPTED and puts a 600-credit account
+on the `FULL` branch, whose window is 4,998. Measured overdraft in a single
+window: 4,398. Over a 12-second span: 7 × 4,998 = **34,986** — the
+"unreachable" 30,000, reached and passed, through a value the config
+currently allows. If the bound is meant to be an invariant rather than a
+coincidence, `requiredCredits` needs a floor at one `FULL` window. That is a
+policy change and it is not made yet.
+
+**A cost above the tier's limit can never be authorized at all.** There is no
+first-request exemption in the gate, so `cost > cpsLimit` is a permanent
+`cps_throttle` rather than a throttle that clears. At `SLOW_CREDITS_PER_SEC=500`
+a low-balance account cannot make any single request over 500 credits — a
+JSON-RPC batch of eleven 50-credit methods, for one. The customer gets a
+rate-limit code for what is really a hard cap.
 
 A `FULL`-tier account holds at least 5×10⁹ credits and would have to burn
 five billion inside one 12-second window to reach zero; the CPS bucket caps
@@ -304,8 +368,8 @@ including `packages/api/src/credits/pricing.ts:17-18` and
 `packages/relay/src/meter.ts:75-76`. It is what converts the USD-denominated
 `SLOW_MODE_THRESHOLD_USD` into the credit ledger.
 
-So today's reachable overdraft bound, 3,000 credits, is **$0.000003 per
-account**.
+So today's reachable overdraft bound, 3,486 credits measured, is **$0.0000034860
+per account**.
 
 ### The bound a cached projection gives
 
@@ -391,7 +455,7 @@ Both, honestly, and it depends which comparison you make.
 serves requests it would have refused had it known the balance. A cached
 projection does more of the same thing for longer. Neither reserves.
 
-**A change of kind, if you compare the bounds.** Today's 3,000 credits is not
+**A change of kind, if you compare the bounds.** Today's 3,486 credits is not
 a policy choice — it falls out of the request lifetime and the 2-second
 window, and it is $0.000003. Reproducing it needs a TTL of about 5 seconds at
 a 100 RPS budget, and about 0.6 seconds at 1,000 RPS with the worst pricing
@@ -458,8 +522,10 @@ row, and a rounded read would be silent.
 `GET valve:credits:<accountId>:ceiling` against the largest live account, and
 that is a two-minute job for someone with access.
 
-**3. The brief's 30,000 is unreachable.** See above. The reachable bound is
-3,000, and `valve/billing-module.md` does not currently state either.
+**3. The brief's 30,000 is unreachable at the DEFAULT threshold.** See above.
+The measured reachable bound is 3,486. It is not an invariant: a
+`SLOW_MODE_THRESHOLD_USD` small enough to put a near-empty account on the FULL
+tier reaches 34,986, and the config currently accepts one.
 
 ---
 
@@ -821,7 +887,8 @@ Both systems, for stages 1 to 4. Two things are shared and must be watched:
 3. **A new instrument stage 3 needs and nobody has built: an overdraft
    monitor.** Per account, how far below zero did the effective balance go,
    in credits and in dollars, and for how long. Today's system bounds this
-   structurally at 3,000 credits, so nobody has had to measure it. Under a
+   structurally at 3,486 credits, and `valvebilling/overdraft_test.go` now
+   measures it. Under a
    cached projection it is the primary safety signal, and it must exist
    **before** stage 3, not after.
 4. **`valve_meter_outcomes_total{code, billing_class}`** across each stage —
@@ -845,8 +912,9 @@ Both systems, for stages 1 to 4. Two things are shared and must be watched:
 2. **How many dollars of overdraft, per account, per window, are
    acceptable?** This number sets the cache TTL and therefore the whole
    design — section 2's table converts between them. Ask it in dollars, not
-   by analogy to today's 3,000-credit bound: that bound is $0.000003 and is
-   an accident of the retry loop, not a policy anyone chose. eRPC's one-hour
+   by analogy to today's 3,486-credit bound: that bound is $0.0000034860 and
+   is an accident of the retry loop and a tumbling window's phase, not a
+   policy anyone chose. eRPC's one-hour
    default is almost certainly not the answer, but at the ledger peg it costs
    about two cents per account, which may well be acceptable.
 
@@ -921,11 +989,14 @@ Both systems, for stages 1 to 4. Two things are shared and must be watched:
   verified against `/opt/valve/.env`.
 - **The largest live `ceiling` is unresolved.** Two comments in the monorepo
   disagree by 10¹¹ and nobody queried Redis.
-- **The 3,000-credit bound is derived, not measured.** The formula, the
-  2-second window, the 12-second lifetime and the tier-selection order are
-  all read from source; the composition of them into 3,000 is mine. The
-  6-window worst case also assumes a pinned upstream and at least three
-  backends; unpinned it is 5 windows and 2,500 credits.
+- **The overdraft bound is now MEASURED, and the derived figure was wrong.**
+  `valvebilling/overdraft_test.go` runs it against a real redis-server 7.2.4
+  under concurrency: **3,486 credits**, not the 3,000 this document derived.
+  Two independent errors in the same direction pair: the window yields
+  `floor(500/6) x 6 = 498` rather than 500, and the tumbling window is
+  anchored at the first charge rather than a clock, so a 12-second span at the
+  worst phase touches SEVEN windows. The 6-window worst case still assumes a
+  pinned upstream and at least three backends; unpinned it is 5 windows.
 - **I did not verify that eRPC's admin transport is addressable per
   instance.** Fleet-wide revocation by admin fan-out depends on it.
 - **I did not verify who writes `valve:credits:<account>:ceiling`,
