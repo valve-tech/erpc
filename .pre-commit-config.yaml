@@ -33,3 +33,13 @@ repos:
     language: script
     files: ^valve/upstream-bug-log\.md$
     pass_filenames: false
+  - id: check-fork-isolation
+    name: no fork package imported from outside the fork directories
+    entry: valve/check-fork-isolation.sh
+    language: script
+    # Any Go file can introduce the import, so any staged Go file arms the
+    # check. It then scans the whole index rather than the named files,
+    # because an offending import can already sit in a file this commit does
+    # not touch — a rename of a fork package is the case that does it.
+    files: \.go$
+    pass_filenames: false
