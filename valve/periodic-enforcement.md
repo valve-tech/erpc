@@ -68,8 +68,10 @@ otherwise. Estimates say "estimate". Numbers from the monorepo brief say so.
 | Credits per USD (the ledger peg) | 10⁹ | `packages/api/src/credits/pricing.ts:17-18`, `packages/relay/src/meter.ts:75-76` |
 | Credits per USD (the web calculator) | 10⁶ | `packages/web/src/lib/pricing.ts:16` — **confirmed WRONG 2026-08-24; the ledger's 10⁹ governs, see section 2** |
 | CPS bucket window | 2 s, fixed | `packages/utils/src/credits-lua.ts:148-164`, `:201-204` |
-| Worst-case request lifetime | 12 s = (1+3) × 3,000 ms | `packages/relay/src/config.ts:83`, `:86`, `proxy-forward.ts:78-105` |
-| **Reachable overdraft bound today** | **3,486 credits = $0.0000034860/account** | MEASURED; `valvebilling/overdraft_test.go`; section 2 |
+| Worst-case request lifetime **today** | 6 s = (1+**1**) × 3,000 ms | ring has ONE backend; `proxy-forward.ts:80` caps attempts at `min(maxUpstreamAttempts, backends.length)` |
+| Worst-case request lifetime **with 3 eRPC backends** | 12 s = (1+3) × 3,000 ms | what spreading eRPC across the fleet creates |
+| **Reachable overdraft bound today** | **1,992 credits = $0.0000019920/account** | 4 windows × 498; derived from the measured per-window 498 |
+| **Reachable overdraft bound with 3 backends** | **3,486 credits = $0.0000034860/account** | MEASURED; `valvebilling/overdraft_test.go`; section 2 |
 | Deployment artifacts setting the five tier knobs | 0 | searched `config/ deploy/ scripts/ services/ docker-compose.yml .env*` |
 
 ---
@@ -81,7 +83,7 @@ otherwise. Estimates say "estimate". Numbers from the monorepo brief say so.
 | **Identity** — who is this key | **Yes, already does** | A new key does not work until first read. A miss is a live lookup, so this is bounded by the negative cache: 5 s. |
 | **Revocation** — this key must stop | **Partly. This is the real gap.** | Up to the positive TTL, per process. See below. |
 | **Rate limiting** — requests and credits per second | **Yes, already does** | The *budget name* is stale, not the counting. A tier change takes up to the TTL to apply; the limit itself is enforced exactly. |
-| **Credit sufficiency** — does the account still have money | **No. Not from cached state.** | Unbounded without a rate limit; `TTL × RPS × cost` with one. Today's reachable bound is 3,486 credits, measured; any practical TTL is orders of magnitude larger. Section 2. |
+| **Credit sufficiency** — does the account still have money | **No. Not from cached state.** | Unbounded without a rate limit; `TTL × RPS × cost` with one. Today's reachable bound is 1,992 credits; 3,486 once eRPC is spread across three backends. Either way any practical TTL is orders of magnitude larger. Section 2. |
 | **Per-method policy** — per-second caps on named methods | **Yes, natively and better** | eRPC's budgets are per-method rules already. No staleness beyond the budget name. |
 
 ### Identity — already solved, and the shape is right
@@ -234,12 +236,34 @@ overdraft  ≈  cpsLimit × ceil(maxInFlightSeconds / 2)
 ```
 
 A request lifetime is at worst `(1 pinned attempt + min(maxUpstreamAttempts,
-backends)) × upstreamTimeoutMs` = (1 + 3) × 3,000 ms = 12 s
-(`packages/relay/src/config.ts:83`, `:86`,
-`packages/relay/src/proxy-forward.ts:78-105`). Twelve seconds spans six
-2-second windows, each granting a fresh `cpsLimit`. Hence the factor of 6.
+backends)) × upstreamTimeoutMs`.
 
-### The stated 30,000 is not the reachable bound. 3,486 is.
+**`backends` is the size of the hash ring, and the ring has ONE member.**
+`proxy-forward.ts:80` reads `Math.min(config.args.maxUpstreamAttempts,
+backends.length)`, and `backends` is the eRPC backend list — not sequential
+tries against one server. `maxUpstreamAttempts` is 3, but `min(3, 1)` is 1:
+
+```
+today          (1 + min(3, 1)) × 3,000 ms  =   6 s
+3 backends     (1 + min(3, 3)) × 3,000 ms  =  12 s
+```
+
+An earlier revision of this document wrote (1 + 3) × 3,000 = 12 s for today,
+citing this exact file, and did not notice the `Math.min`. So did the comment
+at `meter.ts:261-267` it was checking. The 12 s figure is not wrong — it is
+**premature**. It describes the fleet after eRPC is spread, which is a change
+already on the roadmap, and it was measured against a wall no request can
+currently reach.
+
+This matters beyond arithmetic: **spreading eRPC across the fleet is a
+capacity change that silently doubles maximum overdraft exposure**, because
+the overdraft window is one request lifetime and that lifetime is bounded by
+ring size. Neither change predicts the other in isolation.
+
+Twelve seconds spans six 2-second windows, each granting a fresh `cpsLimit`.
+Hence the factor of 6. Six seconds spans three.
+
+### The stated 30,000 is not the reachable bound. 1,992 is today; 3,486 after.
 
 The comment derives ≈ 6 × `FULL_CREDITS_PER_SEC` = 6 × 5,000 = 30,000
 credits. That arithmetic is right and the tier is wrong.
@@ -274,8 +298,16 @@ refreshed. A 12-second span that starts mid-window gets that window's tail
 PLUS six more.
 
 ```
-worst phase:  7 × floor(500/6) × 6  =  7 × 498  =  3,486 credits
+3 backends, worst phase:  7 × floor(500/6) × 6  =  7 × 498  =  3,486 credits
+today,       worst phase:  4 × floor(500/6) × 6  =  4 × 498  =  1,992 credits
 ```
+
+The same tumbling-anchor argument gives today's figure: a 6-second span that
+starts mid-window gets that window's tail plus three more, so four windows,
+not seven. **3,486 is the post-spreading bound and this document previously
+labelled it "today".** The error is in the safe direction — it overstates
+today's exposure, so nothing was under-protected — but it is the number that
+changes when the ring grows, and mislabelling it hides exactly that.
 
 The structural argument above stands — the overdrawing account is always
 `SLOW`, and 30,000 is stated for the wrong tier. The number attached to it
