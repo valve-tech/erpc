@@ -16,7 +16,6 @@ import (
 func TestAvailbilityConfidenceString(t *testing.T) {
 	require.Equal(t, "blockHead", AvailbilityConfidenceBlockHead.String())
 	require.Equal(t, "finalizedBlock", AvailbilityConfidenceFinalized.String())
-	require.Equal(t, "stateProven", AvailbilityConfidenceStateProven.String())
 	require.Equal(t, "unknown(0)", AvailbilityConfidence(0).String(),
 		"an unset confidence must name itself rather than borrow a real label")
 	require.Equal(t, "unknown(9)", AvailbilityConfidence(9).String())
@@ -61,20 +60,11 @@ func TestAvailbilityConfidenceUnmarshalYAML(t *testing.T) {
 		}
 	})
 
-	// stateProven is the value that used to fail. Named on its own so the
-	// reason for this test survives a rename of the loop above.
-	t.Run("StateProvenComesBack", func(t *testing.T) {
-		got, err := parse(t, "stateProven")
-		require.NoError(t, err)
-		require.Equal(t, AvailbilityConfidenceStateProven, got)
-	})
-
 	t.Run("SpellingIsCaseInsensitive", func(t *testing.T) {
 		for text, want := range map[string]AvailbilityConfidence{
 			"blockhead":      AvailbilityConfidenceBlockHead,
 			"BLOCKHEAD":      AvailbilityConfidenceBlockHead,
 			"finalizedblock": AvailbilityConfidenceFinalized,
-			"STATEPROVEN":    AvailbilityConfidenceStateProven,
 		} {
 			got, err := parse(t, text)
 			require.NoError(t, err, text)
@@ -88,7 +78,6 @@ func TestAvailbilityConfidenceUnmarshalYAML(t *testing.T) {
 		for text, want := range map[string]AvailbilityConfidence{
 			"1": AvailbilityConfidenceBlockHead,
 			"2": AvailbilityConfidenceFinalized,
-			"3": AvailbilityConfidenceStateProven,
 		} {
 			got, err := parse(t, text)
 			require.NoError(t, err, text)
@@ -128,30 +117,4 @@ func TestEvmSyncingStateString(t *testing.T) {
 	require.Equal(t, "not_syncing", EvmSyncingStateNotSyncing.String())
 	require.Equal(t, "unknown(0)", EvmSyncingStateUnknown.String())
 	require.Equal(t, "unknown(7)", EvmSyncingState(7).String())
-}
-
-// IsEvmStateQueryMethod names the methods the state-proven boundary applies to.
-// It takes a LOWERCASED method name; feeding it the wire spelling must not
-// silently drop a method out of the gate.
-func TestIsEvmStateQueryMethod(t *testing.T) {
-	stateReading := []string{
-		"eth_call", "eth_getbalance", "eth_getcode", "eth_getstorageat",
-		"eth_gettransactioncount", "eth_estimategas", "eth_getproof",
-		"eth_simulatev1", "debug_tracecall",
-	}
-	for _, m := range stateReading {
-		require.True(t, IsEvmStateQueryMethod(m), "%s reads the state trie", m)
-	}
-
-	chainData := []string{
-		"eth_getblockbynumber", "eth_getlogs", "eth_gettransactionreceipt",
-		"eth_blocknumber", "eth_chainid", "trace_call", "eth_createaccesslist",
-	}
-	for _, m := range chainData {
-		require.False(t, IsEvmStateQueryMethod(m), "%s does not read the state trie", m)
-	}
-
-	require.False(t, IsEvmStateQueryMethod("eth_getBalance"),
-		"the caller must lowercase the method before asking")
-	require.False(t, IsEvmStateQueryMethod(""))
 }

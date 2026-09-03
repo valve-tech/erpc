@@ -22,9 +22,9 @@ type finalityNetwork struct {
 
 var _ common.Network = (*finalityNetwork)(nil)
 
-func (n *finalityNetwork) Id() string                            { return "evm:1" }
-func (n *finalityNetwork) Label() string                         { return "evm:1" }
-func (n *finalityNetwork) ProjectId() string                     { return "test_project" }
+func (n *finalityNetwork) Id() string        { return "evm:1" }
+func (n *finalityNetwork) Label() string     { return "evm:1" }
+func (n *finalityNetwork) ProjectId() string { return "test_project" }
 func (n *finalityNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }
@@ -50,7 +50,7 @@ func requestWithMethodAndFinality(method string, finality common.DataFinalitySta
 func newSelectableExecutor(t *testing.T, method string, finalities []common.DataFinalityState) *cacheExecutor {
 	t.Helper()
 	logger := zerolog.New(io.Discard)
-	e, err := NewCacheExecutor(&common.CacheFailsafeConfig{
+	e, err := NewCacheExecutor(context.Background(), &common.CacheFailsafeConfig{
 		MatchMethod:   method,
 		MatchFinality: finalities,
 	}, &logger)
@@ -131,7 +131,7 @@ func TestPickCacheExecutor_FourTierPriority(t *testing.T) {
 func TestBuildCacheExecutors_AlwaysAppendsADefault(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
-	executors, err := buildCacheExecutors(&logger, "memory-1", []*common.FailsafeConfig{
+	executors, err := buildCacheExecutors(context.Background(), &logger, "memory-1", []*common.FailsafeConfig{
 		{MatchMethod: "eth_getLogs", Retry: &common.RetryPolicyConfig{MaxAttempts: 2}},
 		nil, // a nil entry in the list must be skipped, not panic
 	})
@@ -142,7 +142,7 @@ func TestBuildCacheExecutors_AlwaysAppendsADefault(t *testing.T) {
 	assert.Empty(t, executors[1].MatchFinality())
 
 	t.Run("an unsupported policy fails the whole build", func(t *testing.T) {
-		_, err := buildCacheExecutors(&logger, "memory-1", []*common.FailsafeConfig{
+		_, err := buildCacheExecutors(context.Background(), &logger, "memory-1", []*common.FailsafeConfig{
 			{Consensus: &common.ConsensusPolicyConfig{}},
 		})
 		require.Error(t, err, "consensus has no meaning on a cache connector and must be refused")
@@ -155,16 +155,16 @@ func TestBuildCacheExecutors_AlwaysAppendsADefault(t *testing.T) {
 func TestNewCacheExecutor_DefaultsTheMethodToAWildcard(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
-	e, err := NewCacheExecutor(&common.CacheFailsafeConfig{}, &logger)
+	e, err := NewCacheExecutor(context.Background(), &common.CacheFailsafeConfig{}, &logger)
 	require.NoError(t, err)
 	assert.Equal(t, "*", e.MatchMethod())
 
-	e, err = NewCacheExecutor(nil, &logger)
+	e, err = NewCacheExecutor(context.Background(), nil, &logger)
 	require.NoError(t, err)
 	assert.Equal(t, "*", e.MatchMethod())
 	assert.Empty(t, e.MatchFinality())
 
-	e, err = NewCacheExecutor(&common.CacheFailsafeConfig{
+	e, err = NewCacheExecutor(context.Background(), &common.CacheFailsafeConfig{
 		MatchMethod:   "eth_getLogs",
 		MatchFinality: []common.DataFinalityState{common.DataFinalityStateRealtime},
 	}, &logger)
@@ -195,7 +195,7 @@ func TestFailsafeConnector_PassesThroughTheHeadReport(t *testing.T) {
 
 	t.Run("a head-aware connector's answer reaches the caller", func(t *testing.T) {
 		inner := &headAwareConnector{Connector: NewMockConnector("memory-1"), ts: 1717171717, ok: true}
-		fc, err := NewFailsafeConnector(&logger, inner, nil, nil)
+		fc, err := NewFailsafeConnector(context.Background(), &logger, inner, nil, nil)
 		require.NoError(t, err)
 
 		ts, ok := fc.CacheLatestBlockTimestamp("evm:1")
@@ -205,7 +205,7 @@ func TestFailsafeConnector_PassesThroughTheHeadReport(t *testing.T) {
 	})
 
 	t.Run("a connector that is not head-aware reports unknown", func(t *testing.T) {
-		fc, err := NewFailsafeConnector(&logger, NewMockConnector("memory-1"), nil, nil)
+		fc, err := NewFailsafeConnector(context.Background(), &logger, NewMockConnector("memory-1"), nil, nil)
 		require.NoError(t, err)
 
 		ts, ok := fc.CacheLatestBlockTimestamp("evm:1")
@@ -224,7 +224,7 @@ func TestFailsafeConnector_DelegatesSharedStateOperations(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	fc, err := NewFailsafeConnector(&logger, mem, nil, nil)
+	fc, err := NewFailsafeConnector(context.Background(), &logger, mem, nil, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "memory-1", fc.Id(), "telemetry labels the connector by this id")
@@ -265,7 +265,7 @@ func TestFailsafeConnector_ForwardsCounterCallsVerbatim(t *testing.T) {
 		watchCh:   make(chan CounterInt64State, 1),
 	}
 
-	fc, err := NewFailsafeConnector(&logger, inner, nil, nil)
+	fc, err := NewFailsafeConnector(context.Background(), &logger, inner, nil, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
