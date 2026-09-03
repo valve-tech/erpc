@@ -92,7 +92,6 @@ func (c AvailbilityConfidence) MarshalJSON() ([]byte, error) {
 var availbilityConfidences = []AvailbilityConfidence{
 	AvailbilityConfidenceBlockHead,
 	AvailbilityConfidenceFinalized,
-	AvailbilityConfidenceStateProven,
 }
 
 func (c *AvailbilityConfidence) UnmarshalYAML(unmarshal func(interface{}) error) error {
