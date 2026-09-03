@@ -65,7 +65,19 @@ func (r *JsonRpcResponse) SetResult(result []byte) {
 	r.result = result
 }
 
+// GetResultBytes returns the raw result bytes, or nil when there is no
+// response at all.
+//
+// NormalizedResponse.JsonRpcResponse answers (nil, nil) both for a nil
+// response and for one that has been released, so every caller can be handed a
+// nil receiver. IsResultEmptyish on this type already decides that case; this
+// method and ResultLength did not, and locking their receiver panicked instead.
+// Deciding it here fixes every caller at once. See entries 67 and 134 in
+// valve/upstream-bug-log.md.
 func (r *JsonRpcResponse) GetResultBytes() []byte {
+	if r == nil {
+		return nil
+	}
 	r.resultMu.RLock()
 	defer r.resultMu.RUnlock()
 	return r.result
@@ -75,7 +87,12 @@ func (r *JsonRpcResponse) GetResultString() string {
 	return util.B2Str(r.GetResultBytes())
 }
 
+// ResultLength returns the size of the result, or 0 when there is no response
+// at all. See GetResultBytes for why the nil receiver is decided here.
 func (r *JsonRpcResponse) ResultLength() int {
+	if r == nil {
+		return 0
+	}
 	r.resultMu.RLock()
 	ln := len(r.result)
 	rw := r.resultWriter
@@ -164,7 +181,8 @@ func NewJsonRpcResponseFromBytes(id []byte, resultRaw []byte, errBytes []byte) (
 		result:  resultRaw,
 	}
 
-	if len(errBytes) > 0 {
+	// A null error member means "no error" — see IsJsonNull.
+	if len(errBytes) > 0 && !IsJsonNull(errBytes) {
 		// Copy to avoid retaining buffer via unsafe conversion
 		err := jr.ParseError(string(errBytes))
 		if err != nil {
@@ -372,7 +390,8 @@ func (r *JsonRpcResponse) ParseFromStream(ctx []context.Context, reader io.Reade
 		}
 	}
 
-	if len(temp.Error) > 0 {
+	// A null error member means "no error" — see IsJsonNull.
+	if len(temp.Error) > 0 && !IsJsonNull(temp.Error) {
 		if err := r.ParseError(string(temp.Error)); err != nil {
 			return err
 		}
@@ -642,8 +661,15 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 	}
 	n += int64(nn)
 
-	// Write ID
-	nn, err = w.Write(r.idBytes)
+	// Write ID. An upstream that omits the id member leaves idBytes empty, and
+	// writing nothing here emits `{"jsonrpc":"2.0","id":,…}` — a body no client
+	// can parse. JSON-RPC 2.0 names null as the id for a response whose id
+	// cannot be determined, so write that instead.
+	idBytes := r.idBytes
+	if len(idBytes) == 0 {
+		idBytes = []byte("null")
+	}
+	nn, err = w.Write(idBytes)
 	if err != nil {
 		return n + int64(nn), err
 	}
@@ -663,10 +689,13 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += int64(nn)
 	} else if r.Error != nil {
-		// Marshal error on demand if errBytes not set
-		r.errBytes, err = SonicCfg.Marshal(r.Error)
-		if err != nil {
-			return n, err
+		// Marshal error on demand if errBytes not set. Render into a LOCAL and
+		// leave r.errBytes alone: this function holds read locks only, and
+		// multiplexing hands one response to many clients that render it at the
+		// same time. Writing the shared field here races those readers.
+		errBytes, merr := SonicCfg.Marshal(r.Error)
+		if merr != nil {
+			return n, merr
 		}
 
 		nn, err = w.Write([]byte(`,"error":`))
@@ -675,7 +704,7 @@ func (r *JsonRpcResponse) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += int64(nn)
 
-		nn, err = w.Write(r.errBytes)
+		nn, err = w.Write(errBytes)
 		if err != nil {
 			return n + int64(nn), err
 		}
@@ -915,9 +944,81 @@ func (r *JsonRpcResponse) CanonicalHashWithIgnoredFields(ignoreFields []string, 
 	return hash, nil
 }
 
-// canonicalizeTo writes the canonical JSON representation of v into w, applying
-// the same emptyish filtering semantics as canonicalize(). It returns true if
-// any bytes were written.
+// Frame tags for the consensus canonical form. Each tag names the kind of the
+// value that follows, so a string can never be read as the container, the key
+// or the quantity its bytes spell.
+const (
+	canonTagString  = 's' // a string, written verbatim
+	canonTagHex     = 'x' // a 0x quantity, written without its padding zeroes
+	canonTagLiteral = 'j' // a number or a boolean, as the JSON encoder writes it
+	canonTagKey     = 'k' // an object member name
+	canonTagObject  = 'o' // an object, followed by its surviving member count
+	canonOpenArray  = 'a' // an array opens here
+	canonCloseArray = 'e' // and closes here
+)
+
+// hexQuantityDigits reports whether b is a 0x-prefixed quantity, and returns
+// its digits with the padding zeroes removed. Some vendors pad a quantity and
+// some do not, so "0x0005208" and "0x5208" must reach the hash as one value.
+// The prefix stays out of the payload and the caller tags the value as hex, so
+// the plain string "5208" still encodes differently from the quantity "0x5208".
+func hexQuantityDigits(b []byte) ([]byte, bool) {
+	if len(b) > 2 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
+		return bytes.TrimLeft(b[2:], "0"), true
+	}
+	return nil, false
+}
+
+// writeCanonicalScalar frames one scalar under tag, or under the hex tag when
+// the bytes are a 0x quantity. It reports whether it wrote anything: a
+// quantity of nothing but zeroes carries no value, and the caller drops the
+// member that held it.
+func writeCanonicalScalar(w io.Writer, tag byte, b []byte) (bool, error) {
+	if digits, ok := hexQuantityDigits(b); ok {
+		if len(digits) == 0 {
+			return false, nil
+		}
+		if err := writeHashLeafBytes(w, canonTagHex, digits); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if len(b) == 0 {
+		return false, nil
+	}
+	if err := writeHashLeafBytes(w, tag, b); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// canonicalizeTo writes a canonical, self-delimiting encoding of v into w. The
+// consensus response hash is the SHA-256 of that byte stream, so two responses
+// that write the same bytes are reported as agreeing.
+//
+// Every piece carries a frame. A scalar writes a type tag, its byte length in
+// decimal, a ':' and then its payload — the encoding the cache key uses, see
+// writeHashFrame. An object writes its tag and its surviving member count the
+// same way, and frames each member name as a scalar of its own. An array opens
+// with one tag and closes with another.
+//
+// The framing is here for the reason it is there. A response body comes from
+// an UPSTREAM, so any byte chosen as a separator is a byte an upstream can
+// place inside a string, which moves the collision instead of removing it. A
+// framed stream is decodable, and a decodable stream cannot map two different
+// values onto one byte string.
+//
+// The earlier form wrote JSON punctuation around its members but wrote string
+// values raw, with no quotes and no escaping. One string could therefore spell
+// the rest of the document: {"blockHash":"aa,\"status\":1"} wrote the same
+// bytes as {"blockHash":"0xaa","status":"0x1"}, and a number wrote the same
+// bytes as the quantity that spells it, so 291 agreed with "0x291". A hostile
+// upstream padded one string field until its answer hashed equal to the honest
+// one, which defeats the check consensus exists to make. See bug 135.
+//
+// An emptyish member is dropped before framing. That is what makes an upstream
+// which omits a zero field agree with one that sends it, and it is deliberate.
+// canonicalizeTo returns true if it wrote any bytes.
 func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 	if isEmptyishValue(v) {
 		return false, nil
@@ -957,20 +1058,14 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 				}
 			}
 		}()
-		if _, err := w.Write([]byte{'{'}); err != nil {
+		// The member count comes first, then each member as a framed key
+		// followed by its framed value. The boundary between a key and its
+		// value cannot move, and neither can the boundary between members.
+		if err := writeHashFrame(w, canonTagObject, len(keys)); err != nil {
 			return false, err
 		}
-		for i, k := range keys {
-			if i > 0 {
-				if _, err := w.Write([]byte{','}); err != nil {
-					return false, err
-				}
-			}
-			kj, _ := SonicCfg.Marshal(k)
-			if _, err := w.Write(kj); err != nil {
-				return false, err
-			}
-			if _, err := w.Write([]byte{':'}); err != nil {
+		for _, k := range keys {
+			if err := writeHashLeaf(w, canonTagKey, k); err != nil {
 				return false, err
 			}
 			if _, err := w.Write(children[k].Bytes()); err != nil {
@@ -980,16 +1075,25 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 			util.ReturnBuf(children[k])
 			children[k] = nil
 		}
-		_, err := w.Write([]byte{'}'})
-		return true, err
+		return true, nil
 
 	case []interface{}:
-		// Filter empties and stream elements
-		if _, err := w.Write([]byte{'['}); err != nil {
-			return false, err
-		}
-		first := true
-		any := false
+		// An array streams rather than carrying a member count. It cannot know
+		// how many elements survive the emptyish filter without holding every
+		// one of them at once, and a top-level array — a block trace, a log
+		// page — is the largest value eRPC hashes. So it opens with a tag,
+		// writes each element as it renders it, and closes with a tag of its
+		// own.
+		//
+		// That stays decodable. Every element carries its own frame, so a
+		// reader consumes an element by length and never scans its payload.
+		// The closing tag is therefore only ever read where a tag is
+		// expected, and no payload byte is ever mistaken for it.
+		//
+		// Nothing is written before the first surviving element, so an array
+		// of nothing but emptyish members writes nothing at all — the same
+		// rule an object follows, at every depth.
+		opened := false
 		for _, item := range val {
 			if isEmptyishValue(item) {
 				continue
@@ -1004,43 +1108,32 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 				util.ReturnBuf(buf)
 				continue
 			}
-			if !first {
-				if _, err := w.Write([]byte{','}); err != nil {
+			if !opened {
+				if _, err := w.Write([]byte{canonOpenArray}); err != nil {
 					util.ReturnBuf(buf)
 					return false, err
 				}
+				opened = true
 			}
-			first = false
-			any = true
-			if _, err := w.Write(buf.Bytes()); err != nil {
-				util.ReturnBuf(buf)
+			_, err = w.Write(buf.Bytes())
+			util.ReturnBuf(buf)
+			if err != nil {
 				return false, err
 			}
-			util.ReturnBuf(buf)
 		}
-		if _, err := w.Write([]byte{']'}); err != nil {
-			return false, err
-		}
-		if !any {
+		if !opened {
 			return false, nil
+		}
+		if _, err := w.Write([]byte{canonCloseArray}); err != nil {
+			return false, err
 		}
 		return true, nil
 
 	case string:
-		b := removeLeadingZeroes(util.S2Bytes(val))
-		if len(b) == 0 {
-			return false, nil
-		}
-		_, err := w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagString, util.S2Bytes(val))
 
 	case []byte:
-		b := removeLeadingZeroes(val)
-		if len(b) == 0 {
-			return false, nil
-		}
-		_, err := w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagString, val)
 
 	default:
 		b, err := SonicCfg.Marshal(val)
@@ -1050,9 +1143,7 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 		if util.IsBytesEmptyish(b) {
 			return false, nil
 		}
-		b = removeLeadingZeroes(b)
-		_, err = w.Write(b)
-		return true, err
+		return writeCanonicalScalar(w, canonTagLiteral, b)
 	}
 }
 
@@ -1073,15 +1164,23 @@ func removeFieldsByPaths(obj interface{}, paths []string) interface{} {
 		current := pathTree
 		for i, part := range parts {
 			if i == len(parts)-1 {
-				current[part] = true // Leaf node
-			} else {
-				if _, exists := current[part]; !exists {
-					current[part] = make(map[string]interface{})
-				}
-				if next, ok := current[part].(map[string]interface{}); ok {
-					current = next
-				}
+				// Leaf node. A broader path wins over any subtree already here:
+				// removing the whole field also removes everything under it.
+				current[part] = true
+				break
 			}
+			next, ok := current[part].(map[string]interface{})
+			if !ok {
+				if current[part] == true {
+					// An ancestor of this path is already removed whole, so the
+					// rest of this path adds nothing. Drop it here — carrying on
+					// would write the remaining segments onto the wrong node.
+					break
+				}
+				next = make(map[string]interface{})
+				current[part] = next
+			}
+			current = next
 		}
 	}
 
@@ -1132,18 +1231,6 @@ func removeFieldsRecursive(obj interface{}, pathTree map[string]interface{}) int
 		// Primitive types or other types are returned as-is
 		return v
 	}
-}
-
-func removeLeadingZeroes(b []byte) []byte {
-	if len(b) > 2 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
-		b = bytes.TrimLeft(b[2:], "0")
-	} else if len(b) > 3 && b[0] == '"' && b[1] == '0' && b[2] == 'x' && b[3] == '0' {
-		b = bytes.TrimLeft(b[3:], "0")
-		if len(b) == 1 {
-			return nil
-		}
-	}
-	return b
 }
 
 // isEmptyishValue checks if a value should be considered empty for canonicalization
@@ -1412,19 +1499,14 @@ func (r *JsonRpcRequest) CacheHash(ctx ...context.Context) (string, error) {
 		}
 	}
 
-	// Encode into a single pooled buffer, then hash once. Streaming each token
-	// straight into an io.Writer forces the small length/tag scratch to escape
-	// to the heap on every token; a concrete *bytes.Buffer lets the digits be
-	// written byte-by-byte with no per-token allocation. This mirrors the
-	// pooled-buffer pattern canonicalizeTo already uses for responses.
-	buf := util.BorrowBuf()
-	defer util.ReturnBuf(buf)
+	hasher := sha256.New()
 	for _, p := range r.Params {
-		if err := hashValue(buf, p); err != nil {
+		err := hashValue(hasher, p)
+		if err != nil {
 			return "", err
 		}
 	}
-	b := sha256.Sum256(buf.Bytes())
+	b := sha256.Sum256(hasher.Sum(nil))
 	ch := fmt.Sprintf("%s:%x", r.Method, b)
 	r.cacheHash.Store(ch)
 	return ch, nil
@@ -1483,64 +1565,94 @@ func (r *JsonRpcRequest) PeekByPath(path ...interface{}) (interface{}, error) {
 	return current, nil
 }
 
-// hashValue writes a deterministic, structure-preserving encoding of v into h,
-// used to derive request-identity keys (CacheHash / in-flight multiplexing).
+// Frame tags for the cache-key encoding. Each one names the kind of value that
+// follows, so a container can never be read as the leaf its members spell.
+const (
+	hashTagBool   = 'b'
+	hashTagInt    = 'i'
+	hashTagFloat  = 'f'
+	hashTagString = 's'
+	hashTagNull   = 'z'
+	hashTagArray  = 'a'
+	hashTagObject = 'o'
+)
+
+// writeHashFrame writes one frame header: a type tag, a decimal count and a
+// ':'. For a leaf the count is the payload length in bytes; for a container it
+// is the number of members that follow.
 //
-// The old encoding recursively flattened params into the hash stream with no
-// type tags, lengths, or container markers, so structurally distinct requests
-// collapsed to the same byte stream and therefore the same key (#1034):
-// topics [[A,B]] and [A,B] were indistinguishable, "ab"+"c" aliased "a"+"bc",
-// and %f rounded 25.0000001 to "25.000000". Because that key drives both the
-// persistent cache and in-flight multiplexing, a follower request could be
-// handed the leader's response.
+// The ':' terminates the digits, and a digit is never a ':', so a reader always
+// knows where the count ends. That is what makes the whole stream decodable,
+// and a decodable stream cannot be ambiguous.
+func writeHashFrame(h io.Writer, tag byte, count int) error {
+	// Built by hand rather than with fmt: CacheHash runs on every request, and
+	// a header is three cheap appends into a stack buffer.
+	var buf [24]byte
+	b := append(buf[:0], tag)
+	b = strconv.AppendInt(b, int64(count), 10)
+	b = append(b, ':')
+	_, err := h.Write(b)
+	return err
+}
+
+// writeHashLeaf writes a framed scalar.
+func writeHashLeaf(h io.Writer, tag byte, payload string) error {
+	if err := writeHashFrame(h, tag, len(payload)); err != nil {
+		return err
+	}
+	if payload == "" {
+		return nil
+	}
+	_, err := io.WriteString(h, payload)
+	return err
+}
+
+// writeHashLeafBytes writes a framed scalar whose payload is already bytes.
+func writeHashLeafBytes(h io.Writer, tag byte, payload []byte) error {
+	if err := writeHashFrame(h, tag, len(payload)); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	_, err := h.Write(payload)
+	return err
+}
+
+// hashValue writes a self-delimiting encoding of v into h. The cache key is the
+// hash of that byte stream, so two values that write the same bytes become one
+// cache entry, and whichever request lands first serves the other its data.
 //
-// This encoding is injective across JSON value shapes: every value carries a
-// one-byte type tag, every string/number/container is length- or count-
-// delimited, and object keys are emitted in sorted order. Two self-delimiting
-// tokens cannot concatenate into a third, so different params can never produce
-// the same bytes.
+// The encoding frames every piece: a leaf writes its type tag, its byte length
+// and its payload; a container writes its type tag and its member count before
+// its members. A reader can walk the result without ever guessing where one
+// piece stops, so distinct values cannot produce the same bytes.
 //
-//	null    -> "N"
-//	bool    -> "B0" | "B1"
-//	number  -> "F" <len> ":" <shortest-round-tripping decimal>
-//	string  -> "S" <len> ":" <lowercased bytes>
-//	array   -> "A" <count> ":" <encoded element>...
-//	object  -> "O" <count> ":" ("K" <len> ":" <key>) <encoded value> ...
+// A separator byte would not do the job. Params carry arbitrary strings, so any
+// byte chosen as the separator is a byte a string may itself contain — that
+// moves the collision instead of removing it. A length prefix has no such hole,
+// whatever bytes the payload holds.
 //
-// String params are lowercased, preserving the long-standing EVM hex
-// normalization: a checksummed address and its lowercase form are the same
-// request and share a cache entry / multiplex group. The type tags make that
-// safe against cross-type aliasing that lowercasing alone would create — the
-// string "true" (S4:true) and the boolean true (B1) no longer collide. (SVM
-// needs the opposite, case-preserving key; see svmRequestKey, which is why it
-// does not route through this function.)
-func hashValue(buf *bytes.Buffer, v interface{}) error {
+// Changing this encoding changes every cache key eRPC computes. See bug 118.
+func hashValue(h io.Writer, v interface{}) error {
 	switch t := v.(type) {
-	case nil:
-		buf.WriteByte('N')
-		return nil
 	case bool:
-		if t {
-			buf.WriteString("B1")
-		} else {
-			buf.WriteString("B0")
-		}
-		return nil
+		return writeHashLeaf(h, hashTagBool, strconv.FormatBool(t))
 	case int:
-		writeHashToken(buf, 'F', strconv.FormatInt(int64(t), 10))
-		return nil
+		return writeHashLeaf(h, hashTagInt, strconv.Itoa(t))
 	case float64:
-		// 'g'/-1 emits the shortest decimal that round-trips to the same
-		// float64, preserving full precision (25 vs 25.0000001) unlike %f.
-		writeHashToken(buf, 'F', strconv.FormatFloat(t, 'g', -1, 64))
-		return nil
+		return writeHashLeaf(h, hashTagFloat, fmt.Sprintf("%f", t))
 	case string:
-		writeHashToken(buf, 'S', strings.ToLower(t))
-		return nil
+		// Lowercasing is deliberate: clients disagree on hex case, and eRPC
+		// must not split one entry in two. See CacheHash's callers for the SVM
+		// networks that must NOT use this hasher for that reason.
+		return writeHashLeaf(h, hashTagString, strings.ToLower(t))
 	case []interface{}:
-		writeHashHeader(buf, 'A', len(t))
+		if err := writeHashFrame(h, hashTagArray, len(t)); err != nil {
+			return err
+		}
 		for _, i := range t {
-			if err := hashValue(buf, i); err != nil {
+			if err := hashValue(h, i); err != nil {
 				return err
 			}
 		}
@@ -1550,60 +1662,27 @@ func hashValue(buf *bytes.Buffer, v interface{}) error {
 		for k := range t {
 			keys = append(keys, k)
 		}
+		// Sorting makes the key independent of Go's map iteration order.
 		sort.Strings(keys)
-		writeHashHeader(buf, 'O', len(keys))
+		if err := writeHashFrame(h, hashTagObject, len(t)); err != nil {
+			return err
+		}
 		for _, k := range keys {
-			// Keys are emitted verbatim (not lowercased): they are JSON-RPC
-			// field names, not EVM hex values. Length-prefixing keeps a key
-			// from bleeding into the following value.
-			writeHashToken(buf, 'K', k)
-			if err := hashValue(buf, t[k]); err != nil {
+			// The key is framed as a leaf too, so the boundary between a key
+			// and its value cannot move. Keys keep their case: a JSON member
+			// name is not a hex value.
+			if err := writeHashLeaf(h, hashTagString, k); err != nil {
+				return err
+			}
+			if err := hashValue(h, t[k]); err != nil {
 				return err
 			}
 		}
 		return nil
+	case nil:
+		return writeHashLeaf(h, hashTagNull, "")
 	default:
 		return fmt.Errorf("unsupported type for value during hash: %+v", v)
-	}
-}
-
-// writeHashHeader writes a container header — the type tag, the element count,
-// and a ':' terminator (e.g. "A3:" or "O2:").
-func writeHashHeader(buf *bytes.Buffer, tag byte, n int) {
-	buf.WriteByte(tag)
-	writeUint(buf, uint64(n))
-	buf.WriteByte(':')
-}
-
-// writeHashToken writes a length-delimited leaf token — the type tag, the byte
-// length of s, a ':' terminator, and then s itself. The length prefix is what
-// makes adjacent tokens unambiguous: "ab"+"c" (S2:abS1:c) can never match
-// "a"+"bc" (S1:aS2:bc).
-func writeHashToken(buf *bytes.Buffer, tag byte, s string) {
-	buf.WriteByte(tag)
-	writeUint(buf, uint64(len(s)))
-	buf.WriteByte(':')
-	buf.WriteString(s)
-}
-
-// writeUint appends the decimal digits of n to buf one byte at a time. The
-// scratch array is indexed only (never passed as a slice to an escaping call),
-// so it stays on the stack — this is what keeps the encoder allocation-free per
-// token, unlike strconv.AppendInt into a heap-escaping buffer.
-func writeUint(buf *bytes.Buffer, n uint64) {
-	if n == 0 {
-		buf.WriteByte('0')
-		return
-	}
-	var tmp [20]byte
-	i := len(tmp)
-	for n > 0 {
-		i--
-		tmp[i] = byte('0' + n%10)
-		n /= 10
-	}
-	for ; i < len(tmp); i++ {
-		buf.WriteByte(tmp[i])
 	}
 }
 

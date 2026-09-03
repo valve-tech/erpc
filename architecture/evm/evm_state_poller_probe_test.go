@@ -74,7 +74,7 @@ func TestCheckProbe_RoutesEachProbeToItsOwnMethod(t *testing.T) {
 	}{
 		{common.EvmProbeBlockHeader, []string{"eth_getBlockByNumber"}},
 		{common.EvmProbeEventLogs, []string{"eth_getBlockByNumber", "eth_getLogs"}},
-		{common.EvmProbeCallState, []string{"eth_getBalance"}},
+		{common.EvmProbeCallState, []string{"eth_call"}},
 		{common.EvmProbeTraceData, []string{"eth_getBlockByNumber", "trace_block"}},
 	}
 	for _, tc := range cases {
@@ -89,6 +89,12 @@ func TestCheckProbe_RoutesEachProbeToItsOwnMethod(t *testing.T) {
 			})
 			up.on("trace_block", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 				return jsonResult(req, `[{"type":"call"}]`)
+			})
+			// The callState probe (upstream #1109) asks a canary contract for
+			// the height it is executing at. 0x64 is the 100 the probe asks
+			// for, so the node reports it executed where it was told to.
+			up.on("eth_call", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+				return jsonResult(req, `"0x64"`)
 			})
 			p := newGateTestPoller(t, up)
 
@@ -380,9 +386,21 @@ func TestCheckEventLogsProbe(t *testing.T) {
 	})
 }
 
-// --- checkCallStateProbe ---
+// --- checkBalanceStateProbe ---
+//
+// Upstream #1109 split this probe in two. checkCallStateProbe now sends an
+// eth_call to a canary that returns the EXECUTION height, and compares it to
+// the height asked for, so a node that answers from the wrong block is caught.
+// The older "eth_getBalance came back non-null" test moved verbatim into
+// checkBalanceStateProbe, which the new probe still falls back to.
+//
+// These cases assert that fallback contract, so they follow the behaviour to
+// its new home rather than being deleted. Upstream covers the canary path in
+// TestCheckCallStateProbe_ExecutionCanary.
 
-func TestCheckCallStateProbe(t *testing.T) {
+func TestCheckBalanceStateProbe(t *testing.T) {
+	// The negative-block guard sits on checkCallStateProbe, the entry point,
+	// not on the balance fallback, so this case stays with the outer probe.
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		p := newGateTestPoller(t, up)
@@ -403,7 +421,7 @@ func TestCheckCallStateProbe(t *testing.T) {
 		})
 		p := newGateTestPoller(t, up)
 
-		ok, unsupported, err := p.checkCallStateProbe(context.Background(), 4096)
+		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
 		assert.True(t, ok)
 		assert.False(t, unsupported)
@@ -420,7 +438,7 @@ func TestCheckCallStateProbe(t *testing.T) {
 		})
 		p := newGateTestPoller(t, up)
 
-		ok, unsupported, err := p.checkCallStateProbe(context.Background(), 4096)
+		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.False(t, unsupported)
@@ -435,7 +453,7 @@ func TestCheckCallStateProbe(t *testing.T) {
 		})
 		p := newGateTestPoller(t, up)
 
-		ok, unsupported, err := p.checkCallStateProbe(context.Background(), 4096)
+		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.False(t, unsupported)
@@ -448,7 +466,7 @@ func TestCheckCallStateProbe(t *testing.T) {
 		})
 		p := newGateTestPoller(t, up)
 
-		ok, unsupported, err := p.checkCallStateProbe(context.Background(), 4096)
+		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.True(t, unsupported)
@@ -461,7 +479,7 @@ func TestCheckCallStateProbe(t *testing.T) {
 		})
 		p := newGateTestPoller(t, up)
 
-		ok, unsupported, err := p.checkCallStateProbe(context.Background(), 4096)
+		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.False(t, unsupported)

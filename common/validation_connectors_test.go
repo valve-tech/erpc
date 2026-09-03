@@ -326,13 +326,18 @@ func TestConnectorConfig_Validate_RejectsUnsupportedFailsafePolicies(t *testing.
 		require.Contains(t, err.Error(), "failsafeForSets[0]")
 	})
 
-	t.Run("hedge quantile is refused", func(t *testing.T) {
+	// Upstream lifted this restriction in #1112. The rejection existed because
+	// a connector has no latency metric source, so a quantile had nothing to
+	// read. AdaptiveDuration now answers that itself: with Quantile > 0 and no
+	// quantile data, it returns Min rather than a meaningless value (see
+	// adaptive_duration.go). The knob is therefore safe at connector scope, and
+	// this test follows upstream instead of re-imposing a rejection it deleted.
+	t.Run("hedge quantile is accepted since upstream #1112", func(t *testing.T) {
 		fs := &FailsafeConfig{
 			MatchMethod: "*",
 			Hedge:       &HedgePolicyConfig{Delay: &AdaptiveDuration{Quantile: 0.9, Base: Duration(50 * time.Millisecond)}},
 		}
-		require.ErrorContains(t, base(fs, true).Validate(),
-			"hedge quantile is not supported for connector-level failsafe")
+		require.NoError(t, base(fs, true).Validate())
 	})
 
 	t.Run("a fixed hedge delay is accepted", func(t *testing.T) {
