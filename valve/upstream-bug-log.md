@@ -5089,6 +5089,30 @@ what an operator does to debug the cache. Found while auditing 67.
 upstream defeats the check consensus exists to make. **Confirmed by direct
 probe**, not by reading the code.
 
+REPORTED PRIVATELY, 2026-09-04, as GHSA-3v27-7q7h-wp3f (state: triage,
+severity high, CWE-697). A private advisory rather than a public issue,
+because a public one is a disclosure for everyone running the consensus
+policy. Do not open a public issue for this, and do not cite the GHSA id
+outside this file until upstream publishes it.
+
+Re-verified before reporting, on a clean upstream/main worktree at 58d41037:
+
+    {"a":{"b":"0x1"}}  vs  {"a":"{\"b\":1}"}     815ce690...  COLLIDES
+    {"removed":true}   vs  {"removed":"true"}    6cc414d3...  COLLIDES
+    {"a":"x","b":"y"}  vs  {"a":"x\",\"b\":\"y"}  distinct    (control)
+
+The control pair is the point: it stays distinct, so the probe
+discriminates rather than passing trivially. The same three pairs against
+the fork's encoding are all distinct.
+
+The 0.2.0 rebase nearly lost this fix. Upstream's #1098 fixed CacheHash
+aliasing — the same defect class, on the request path — which made taking
+their common/json_rpc.go look correct. It is not: #1098 does not touch
+canonicalizeTo, and canonicalizeTo is what consensus compares. The tests
+in this entry caught it within one run. If a future rebase offers that
+file again, resolve it back to the fork's version unless upstream has
+fixed the response path too.
+
 This is bug 118's defect class, in the other hash. `canonicalizeTo`
 (`common/json_rpc.go`) writes the canonical form of a response, and consensus
 compares upstreams by the SHA-256 of that byte stream. It wrote the JSON
