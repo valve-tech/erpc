@@ -78,6 +78,51 @@ That last one is not hypothetical. `DEFAULT_CU` really was 20 until commit
 only silent failure mode. Two independent readers copied the wrong value from
 it before the source was checked. The monorepo fixed both in `d170faa`.
 
+## The overdraft tests measure a two-second window, and a loaded machine misses it
+
+`cpsBucketTTL` is 2 seconds (`valvebilling/overdraft_test.go:68`) — the lifetime
+`authorize.lua` arms on the cps bucket. The overdraft tests measure a rate
+against that bucket, so the whole burst has to land inside one window or the
+numbers mean nothing.
+
+`requireOneOverdraftWindow` (`overdraft_test.go:243`) enforces that. It asserts
+`credits == bucket` and fails with "the burst straddled a bucket expiry (took
+%v); the single-window numbers below are not valid".
+
+**That guard is doing its job, and it is not a billing defect.** A burst that
+crosses a bucket boundary produces a rate measured across two windows, which is
+a false number. The test refuses to report it. Read a failure here as "the
+machine could not run the burst fast enough", not as "the bound is wrong".
+
+Observed once, on 2026-09-04, during a single `go test` invocation covering 30
+packages while the container-backed `data` package was pulling and running
+DynamoDB, Postgres and Redis. Between four and seven of these tests failed, a
+different subset on each attempt, every one reporting a burst of 2.1 to 3.0
+seconds against the 2-second bucket.
+
+It did not reproduce. Same tree, same machine, same day:
+
+| how it was run | result |
+|---|---|
+| `go test ./valvebilling/` alone | ok, 42.0s |
+| the same, under 8 busy-loop processes on 8 CPUs | ok, 44.1s |
+| the full 30-package run again, machine otherwise quiet | ok, 49.8s |
+
+So synthetic CPU load does not trigger it. What did was a run where many test
+binaries and three containers competed for I/O at once. That is a narrower
+condition than "slow machine", and it is worth knowing before anyone widens the
+window to make a red run go green.
+
+**Do not widen `cpsBucketTTL` or relax the guard.** Either change makes the
+suite report a rate it did not measure, which is the one outcome worse than a
+failure. Re-run on a quiet machine, or use `go test -short ./valvebilling/`,
+which skips the timing work and passes in about 16 seconds.
+
+The real exposure is CI. A loaded runner fails here and the failure reads like a
+billing regression, because the test names are all about credits and bounds. If
+that happens, check the reported burst duration first — if it is above 2
+seconds, the machine is the finding.
+
 ## A precision limit in the shared script, recorded not fixed
 
 `authorize.lua` does `tonumber(ARGV[1])`, and Lua numbers are doubles, so
