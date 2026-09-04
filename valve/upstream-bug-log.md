@@ -2713,11 +2713,22 @@ where a bare `null` is malformed rather than a success.
 
 ## C. The circuit breaker wedges open on an ignored outcome
 
-**Status: FIXED in the fork.** Upstream still carries it. `Breaker.Record`
-(`failsafe/breaker.go:187`) now decrements `halfOpenInflight` before it returns
-on `OutcomeIgnore`, so the trial permit is released without counting the outcome
-as a success or a failure. Pinned by
-`TestBreaker_HalfOpenPermitReleasedOnIgnoredOutcome`.
+**Status: FIXED upstream, and the fork's patch is retired (2026-09-03).**
+Upstream reached the same fix independently in #1118 (`2b7e807d`, "breaker
+cannot recover on a miss-heavy cache connector"), released in 0.2.0. The
+0.2.0 rebase took upstream's `failsafe/breaker.go` whole, so `breaker.go` and
+`breaker_test.go` are now byte-identical to upstream and cannot conflict again.
+
+Do NOT re-apply the fork's patch. The mechanism is identical — `Breaker.Record`
+releases the half-open trial permit on `OutcomeIgnore` without counting the
+outcome — and only the comment wording differed.
+
+`TestBreaker_HalfOpenPermitReleasedOnIgnoredOutcome` no longer exists. Upstream
+pins the same property with `TestBreaker_HalfOpenIgnoreReleasesPermit`, which
+drives four ignore cycles past a trial capacity of two and then closes on
+successes. The fork's `TestBreaker_RepeatedIgnoredTrialsDoNotWedge` was not
+re-added: it asserts the same property at 50 iterations instead of 4, and
+keeping it would re-open a conflict in a file that now has none.
 
 The breaker returns early on `OutcomeIgnore` **without releasing the half-open
 trial permit**. The breaker then stays open until the process restarts.
@@ -6956,3 +6967,59 @@ it, and read by anything metering in front. That is upstream's to add and it
 belongs with `costHeaders`, whose contract it completes.
 
 Recorded in `valverelay/doc.go` as a known asymmetry.
+
+## 184. An upstream that never reports a head reads as zero blocks behind
+
+**Status:** open. No test asserts today's behaviour yet.
+
+`updateNetworkLagMetrics` skips an upstream whose polled head is not positive
+(`health/tracker.go:1255` in the Range fallback, `:1282` in the indexed path,
+both logging "ignoring lag tracking for non-positive value"). `BlockHeadLag`
+therefore keeps its zero value, and zero means **0 blocks behind** — the
+reading of a node at the chain tip.
+
+So the two selection predicates that exist to catch a lagging node,
+`blockNumberLagAbove` and `blockSecondsLagAbove`, cannot fire for a node that
+has never established a head at all. They read a counter nothing wrote.
+
+The guard's intent is sound: do not publish a multi-million-block lag in the
+window before an upstream's first poll lands. The defect is that it conflates
+two states — "not polled yet" and "polled, and this node has no head" — and
+answers healthy for both. Only the first is transient.
+
+**Measured on production, 2026-09-01 to 2026-09-03.** `direct-b-evm-11155111`
+was added to the pool by a config change and served for roughly 35 hours as
+`tags: [rank:1]`, `group: primary`. The box ran a firehose reader-node syncing
+from genesis: `valve-reth-sepolia` inactive, `valve-fireeth-reader` active,
+`127.0.0.1:8545` answering `eth_chainId` `0xaa36a7` correctly and
+`eth_blockNumber` `0x0`. Answering the chain-id check is enough to read as a
+live upstream.
+
+What the metrics showed while it was in rotation:
+
+- `erpc_upstream_latest_block_number` had **no series** for that upstream.
+  Every other upstream on chain 11155111 had one.
+- `erpc_selection_excluded_seconds` was 0 for every method, and the upstream
+  appeared in **no** `erpc_selection_exclusion_total` or
+  `erpc_selection_rejection_total` series. It was never excluded.
+- The circuit breaker was the only thing pushing back: `closed_to_open` 5,
+  `open_to_half_open` 611, `half_open_to_open` 606, `half_open_to_closed` 5
+  over 24 hours, against `halfOpenAfter: 30s`.
+
+The second gate does not cover the gap either. `errorRateAbove` sits behind
+`samplesAbove(10)` over a 15 s window, and this upstream saw 0.034 req/s —
+about 0.5 samples per window. It needed roughly 20x more traffic before the
+error-rate predicate could be evaluated at all. A low-traffic upstream with no
+head therefore has no working availability gate in front of it.
+
+**Weakening the design, not adding a threshold.** The fix is to separate the
+two states the guard merges rather than to tune a number: record when an
+upstream last produced a head (a `lastPollAt`, or a lag value that is
+explicitly unknown rather than zero), and let the predicates treat "never
+observed" as not-eligible rather than as not-lagging. No new operator knob.
+
+Note the tension with #1109, which deleted the state-proven bound on the
+reasoning that absence of proof must not block routing. That reasoning is
+right for a probe cadence that trails the head by a few blocks on a fast
+chain. It does not extend to an upstream that has published no head for its
+entire lifetime while accepting traffic — that absence is not cadence.
