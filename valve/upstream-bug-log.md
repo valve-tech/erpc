@@ -6972,6 +6972,10 @@ Recorded in `valverelay/doc.go` as a known asymmetry.
 
 **Status:** open. No test asserts today's behaviour yet.
 
+Reported upstream as erpc/erpc#1129 (2026-09-04), with the suggested fix
+below. Watch that issue before writing a fork patch — upstream may pick a
+different shape, and a fork patch would then be a rebase conflict for no gain.
+
 `updateNetworkLagMetrics` skips an upstream whose polled head is not positive
 (`health/tracker.go:1255` in the Range fallback, `:1282` in the indexed path,
 both logging "ignoring lag tracking for non-positive value"). `BlockHeadLag`
@@ -7023,3 +7027,47 @@ reasoning that absence of proof must not block routing. That reasoning is
 right for a probe cadence that trails the head by a few blocks on a fast
 chain. It does not extend to an upstream that has published no head for its
 entire lifetime while accepting traffic — that absence is not cadence.
+
+## 185. A hung upstream never opens its circuit breaker
+
+**Status:** open. No test asserts today's behaviour yet.
+
+`upstreamBreakerOutcome` (`upstream/upstream_executor.go:398`) classifies an
+endpoint timeout as `OutcomeIgnore`, so an upstream that accepts requests and
+never answers them never moves the breaker's counters. Fifty consecutive
+timeouts leave the breaker closed.
+
+Verified by executing the function against this tree, not by reading it:
+
+```
+ErrEndpointRequestTimeout -> IGNORE
+```
+
+It reads as a fall-through rather than a decision. The function names
+`ErrCodeEndpointRequestCanceled` (`common/errors.go:2273`) explicitly and
+ignores it. `ErrCodeEndpointRequestTimeout` (`:2252`) is a separate constant
+that the function never mentions, so it reaches the trailing
+`return failsafe.OutcomeIgnore`. The distinction the fix needs already exists
+in the error codes; the classifier just does not use it.
+
+This is the failure the breaker most obviously exists for. A reth node whose
+tokio blocking-thread pool saturates at its 512 default accepts and never
+answers `eth_getBalance`, `eth_call`, `eth_getCode`, `debug_*` and `trace_*`,
+while `eth_blockNumber` keeps answering in single-digit milliseconds because it
+does not run through `spawn_blocking`. Every held request resolves as a
+timeout, every timeout is ignored, and the breaker stays closed.
+
+A second effect compounds it and is worth recording here even though it is not
+the same defect. `Breaker.checkOpenLocked` (`failsafe/breaker.go:347`) returns
+early while `count < failureThresholdCapacity`, so a breaker scoped to a
+low-volume method cannot open even when every request to it fails. A 17-hour
+event of this shape carried six `eth_getBalance` requests in total, and a
+capacity-10 ring would never have filled. That is why a `matchMethod` failsafe
+policy on state reads delivers less than it appears to.
+
+Reported upstream as erpc/erpc#1130 (2026-09-04). The suggested fix adds
+`ErrCodeEndpointRequestTimeout` to the `OutcomeFailure` list while continuing
+to ignore cancellation, with an opt-in `circuitBreaker.countTimeouts` offered
+as the conservative alternative. Do not carry a fork patch for this until
+upstream picks a shape — the risk it trades against is a short per-attempt
+timeout tripping a slow-but-healthy upstream, and that judgement is theirs.
