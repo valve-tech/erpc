@@ -7160,12 +7160,27 @@ unlikely to conflict, but the `byPassMethodExclusion` argument and the
 that probes still carry their own request. The four tests above fail loudly if
 the sharing returns.
 
-A config stopgap shipped first, outside this repo: `routing.probe: false` on
-every public upstream, live 2026-09-09. It stopped the leak, and it cost 77%
-of re-admission probing. Remove it once a binary carrying this fix is
-deployed, and confirm that
-`erpc_selection_probe_requests_total{method=~"eth_.*"}` stays non-zero
-afterwards. Not reported upstream yet.
+**The config stopgap never worked, and this entry said it did.** A
+`routing.probe: false` veto on every public upstream shipped outside this repo
+on 2026-09-09. It was inert for its whole life: `ProbeMode` is a string enum,
+`yaml.v3` coerced the boolean to `"false"` with no error, and the gate never
+fired once. The leak therefore ran uninterrupted from 2026-07-31 until the
+binary shipped. See entry 187 for the trap itself.
+
+**Deployed 2026-09-16.** All three eRPC instances run `valve-ws-v3`
+(this fork at `3ec22bf8`), verified by version stamp and a live WebSocket
+upgrade on each. The now-redundant `routing.probe` veto was removed from the
+generator in the same session, because it is blanket: it suppresses ALL
+probing for an upstream, which is how an excluded upstream earns re-admission.
+
+A caveat on verification, stated because it is easy to misread: both gates only
+fire when the prober has a candidate, and a candidate requires an excluded
+upstream. With the fleet fully healthy, `erpc_selection_probe_skipped_total`
+has no series at all, which looks identical to a broken fix. Check
+`count(erpc_selection_position == -1)` before concluding anything from an empty
+counter.
+
+Reported upstream as erpc/erpc#1149, with both fixes offered.
 
 ## 187. An invalid `routing.probe` value is accepted, and then does nothing
 
@@ -7202,4 +7217,8 @@ values at config load and refuse anything else, which turns a silent no-op
 into a startup error naming the upstream. A config enum that only ever
 compares equal is worth validating wherever else the same shape appears.
 
-Reported upstream together with entry 186.
+Reported upstream as erpc/erpc#1150, alongside entry 186's erpc/erpc#1149.
+
+The fork's own generator now emits nothing at all here: the veto was removed
+once `valve-ws-v3` shipped, so the trap no longer has a live instance. It stays
+recorded because the next person to reach for `routing.probe` will meet it.
