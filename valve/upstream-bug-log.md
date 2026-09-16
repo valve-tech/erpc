@@ -7263,3 +7263,57 @@ Reported upstream as erpc/erpc#1150, alongside entry 186's erpc/erpc#1149.
 The fork's own generator now emits nothing at all here: the veto was removed
 once `valve-ws-v3` shipped, so the trap no longer has a live instance. It stays
 recorded because the next person to reach for `routing.probe` will meet it.
+
+## 188. An emptyish answer costs a full cross-upstream sweep, and the exemption is an exact method-name list
+
+**Status:** open. No test in the fork pins it. Measured in production on
+2026-09-16, against a live gateway.
+
+`erpc/networks.go`, inside the upstream loop:
+
+```go
+emptyish := r.IsResultEmptyish()
+acceptEmpty := !emptyish ||
+    (!failsafeExecutor.HasConsensus() &&
+        slices.Contains(failsafeExecutor.EmptyResultAccept(), method))
+if acceptEmpty { return r, nil }
+// otherwise emptyish results continue to the next upstream
+```
+
+Emptiness is decided by SHAPE. `util.IsBytesEmptyish` (`util/bytes.go:22`) is a
+pure value test: `null`, `[]`, `{}`, `""`, `0x` and `0` are empty, and it strips
+a `0x` prefix then trims leading zeros, so **`"0x0"` is empty**, quoted or not.
+
+The exemption is decided by NAME, as an exact-match `slices.Contains` with no
+wildcard and no shape predicate. Those two axes do not meet, and that is the
+defect: a method whose legitimate answer is `0x0`, `null` or `[]` pays a walk
+across every upstream, with `EmptyResultDelay` between attempts, every single
+time it answers correctly.
+
+`eth_getUncleCountByBlockNumber` is the clearest case. Post-merge it returns
+`"0x0"` for every block ever, so on a FULL block, with the data present on the
+first upstream, it still sweeps. Measured medians through the gateway, five runs
+each: uncle count 645 ms, `eth_getTransactionByBlockNumberAndIndex` → null
+645 ms, `eth_getTransactionReceipt` unknown hash → null 644 ms,
+`eth_getBlockByHash` unknown hash → null 644 ms, against controls of 107 ms for
+a non-empty answer and 110 ms for `eth_getLogs` → `[]`, which is on the accept
+list. The penalty follows the ANSWER, not the method.
+
+**It is not eRPC that returns the 5xx.** `determineResponseStatusCode`
+(`erpc/http_server.go:1643`) has no 502 branch at all, and
+`ErrEndpointMissingData` maps deliberately to 200. The customer-visible failure
+came from the fronting relay giving up: its per-attempt budget times its ring
+walk produced 9.1 s and 18.1 s, then a 502. Empty mainnet blocks failed that way
+for days. So the blast radius of this design depends on whatever fronts eRPC,
+which is exactly what makes it easy to misattribute.
+
+Distinguish it from `markEmptyAsErrorMethods` (entry-adjacent, and documented in
+`common/defaults.go`): that is a separate, stronger path that converts an empty
+into `ErrEndpointMissingData` and BYPASSES `emptyResultAccept` entirely. Only
+`trace_block` of the three methods measured was on it. The other two were slow
+purely through the line quoted above.
+
+The fix worth proposing upstream is a shape-based or config-derived acceptance —
+accept an emptyish answer unless the method is listed, or derive "empty is
+legitimate here" from the method config — rather than a name list that must grow
+by one entry per method forever. Not reported upstream yet.
