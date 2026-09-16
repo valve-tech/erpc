@@ -7173,12 +7173,37 @@ upgrade on each. The now-redundant `routing.probe` veto was removed from the
 generator in the same session, because it is blanket: it suppresses ALL
 probing for an upstream, which is how an excluded upstream earns re-admission.
 
-A caveat on verification, stated because it is easy to misread: both gates only
-fire when the prober has a candidate, and a candidate requires an excluded
-upstream. With the fleet fully healthy, `erpc_selection_probe_skipped_total`
-has no series at all, which looks identical to a broken fix. Check
-`count(erpc_selection_position == -1)` before concluding anything from an empty
-counter.
+**Measured after the deploy**, on matched 10-minute windows:
+
+| 10-minute window | 6h before | 3h before | after |
+| --- | --- | --- | --- |
+| forbidden-method calls reaching public upstreams | 9,223 | 9,231 | **0** |
+| probes to ignored namespaces | 7,520 | 7,629 | **0** |
+| servable `eth_*` probes | 18,897 | — | 210 |
+| distinct upstreams excluded (of 28) | 13 | 11 | 0 |
+
+The leak reads as closed. Two things about that table need saying, or the next
+reader will over-claim from it.
+
+The `eth_*` probe volume fell 98.9%, and that is NOT probing breaking. Probe
+volume scales with the number of excluded upstreams, and those went from 13 of
+28 to 0 of 28 against an unchanged denominator. The 210 probes that did fire
+reached three public upstreams, which is exactly what the removed
+`routing.probe` veto used to prevent, so re-admission is alive.
+
+**Both gates remain unexercised in production.** They only fire when the prober
+has a candidate, and a candidate requires an excluded upstream. With nothing
+excluded, `erpc_selection_probe_skipped_total` has no series at all, which looks
+identical to a broken fix. So zero ignored-namespace probes is partly explained
+by having few candidates, not solely by the method gate vetoing them. What pins
+the gate today is the test suite, not the fleet. Check
+`count(count by (upstream) (erpc_selection_position == -1))` before drawing any
+conclusion from an empty counter, and treat a `method_ignored` sample as the
+first real production evidence when one appears.
+
+One sampling caveat on the table: slot cardinality was 1,727 series against
+3,238 before, because slots rebuild lazily after a restart. The exclusion
+figures are therefore early, not final.
 
 Reported upstream as erpc/erpc#1149, with both fixes offered.
 
