@@ -7191,15 +7191,31 @@ volume scales with the number of excluded upstreams, and those went from 13 of
 reached three public upstreams, which is exactly what the removed
 `routing.probe` veto used to prevent, so re-admission is alive.
 
-**Both gates remain unexercised in production.** They only fire when the prober
-has a candidate, and a candidate requires an excluded upstream. With nothing
-excluded, `erpc_selection_probe_skipped_total` has no series at all, which looks
-identical to a broken fix. So zero ignored-namespace probes is partly explained
-by having few candidates, not solely by the method gate vetoing them. What pins
-the gate today is the test suite, not the fleet. Check
+**Fix 1 is proven in production**, 2026-09-16, once an exclusion finally gave
+the prober candidates:
+
+```
+erpc_selection_probe_skipped_total{reason="method_ignored"}  16
+probes that still fired                                     505   (all eth_*)
+probes to ignored namespaces                                  0
+forbidden-method calls reaching public upstreams, 15m         0
+```
+
+Both halves matter. The gate vetoed 16 probes for methods an upstream's own
+config forbids, and it let 505 through for methods those same upstreams serve,
+spread across four public upstreams. A gate that simply stopped probing would
+show the first number and not the second, and would strand every excluded
+upstream — which is exactly what the removed `routing.probe` veto did.
+
+`opt_out` will never appear again, by design: the veto it counts was deleted
+once this binary shipped.
+
+A diagnostic note worth keeping, because it cost real time: both gates only
+fire when the prober has a candidate, and a candidate requires an excluded
+upstream. On a fully healthy fleet `erpc_selection_probe_skipped_total` has no
+series at all, which is indistinguishable from a broken fix. Check
 `count(count by (upstream) (erpc_selection_position == -1))` before drawing any
-conclusion from an empty counter, and treat a `method_ignored` sample as the
-first real production evidence when one appears.
+conclusion from an empty counter.
 
 One sampling caveat on the table: slot cardinality was 1,727 series against
 3,238 before, because slots rebuild lazily after a restart. The exclusion
