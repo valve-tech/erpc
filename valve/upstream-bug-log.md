@@ -7166,3 +7166,40 @@ of re-admission probing. Remove it once a binary carrying this fix is
 deployed, and confirm that
 `erpc_selection_probe_requests_total{method=~"eth_.*"}` stays non-zero
 afterwards. Not reported upstream yet.
+
+## 187. An invalid `routing.probe` value is accepted, and then does nothing
+
+**Status:** open. No test in the fork pins it. The behaviour was measured by
+unmarshalling each spelling into the real struct, not inferred from the docs.
+
+`ProbeMode` (`common/config.go`) is a string enum with exactly two values,
+`"on"` and `"off"`. A config that writes a YAML boolean parses without error
+and produces a value that matches neither:
+
+```
+probe: false  -> ProbeMode("false")  equalsProbeModeOff=false
+probe: "off"  -> ProbeMode("off")    equalsProbeModeOff=true
+probe: off    -> ProbeMode("off")    equalsProbeModeOff=true
+```
+
+`yaml.v3` coerces the boolean into the string `"false"` and returns a nil
+error, so the upstream keeps being probed while the config reads as though
+probing is switched off. Nothing logs a warning, because nothing failed.
+
+Bare `off` works, because YAML resolves it against the target type. That is
+what makes this expensive: the documented spelling and the quoted spelling both
+work, and only the boolean is silently wrong.
+
+**What it cost here.** The config stopgap for entry 186 shipped on 2026-09-09
+emitting `probe: false` on twelve public upstreams. It was inert for a week.
+`erpc_selection_probe_skipped_total{reason="opt_out"}` had no series at all on
+any of the three instances, while an excluded public upstream kept taking
+9,290 `trace_block` probes an hour. The generator's own test asserted
+`.toBe(false)` — the same wrong value — so it passed throughout.
+
+**The fix upstream** is to validate `routing.probe` against the two known
+values at config load and refuse anything else, which turns a silent no-op
+into a startup error naming the upstream. A config enum that only ever
+compares equal is worth validating wherever else the same shape appears.
+
+Reported upstream together with entry 186.
