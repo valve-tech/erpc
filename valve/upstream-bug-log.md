@@ -7361,9 +7361,21 @@ reason matters more than the outcome: a stamp is
 checks the work against the block the message NAMES, with the board holding
 messages for about twenty minutes. So a mirrored write is valid only while its
 named block is still acceptable. The rejection is blockHash binding, not nonce
-reuse. A probe mirrored fast enough — inside that window — would reach the
-acceptance path. The safety is incidental and time-bounded, which is precisely
-why the gate should not be the thing that is missing.
+reuse.
+
+**There are TWO independent barriers, and only one of them expires.** An earlier
+version of this entry said the protection was "incidental and time-bounded", and
+concluded that a probe mirrored fast enough would reach the acceptance path.
+That is wrong, and the msgboard owners verified why in their own source rather
+than leaving it as inference: `insert_checked`
+(`crates/net/msgboard/src/board.rs:508`) returns
+`Err(MsgboardError::MessageExists)` when the index already holds the message, and
+`add_local_msg` (line 388) is the path the `msgboard_addMessage` RPC handler
+takes to reach it. The identity is content-derived — `MsgID`
+(`crates/net/msgboard-types/src/msg_id.rs`) is 121 bytes of version, block hash,
+size, work multiplier and divisor, category hash and message hash — so
+byte-identical replays collide by construction. That barrier holds for as long
+as the original is on the board. Only the blockHash window expires.
 
 The gate itself works for what it knows — `write_method` skips ran 2,202 and
 2,193 and 24 per day across the three instances. It simply cannot know a
@@ -7373,10 +7385,13 @@ that serve it.
 
 **A correction to this entry's first severity claim.** It said the failure mode
 is a duplicate chain write that nothing undoes. That is wrong for msgboard, and
-the msgboard owners supplied the reason: the board is keyed by message hash, so
-a replay of identical bytes dedupes rather than double-posting, and their
-archive's primary key is `(hash, chain_id)` behind an idempotent sink, so a
-landed replay writes the row it already holds. Both hold regardless of timing.
+the msgboard owners supplied the reason, and later confirmed both halves in
+source: the node REFUSES a replayed identical message outright on the write path
+(`MessageExists`, see below) rather than merely deduping it, and their archive
+declares `PRIMARY KEY (hash, chain_id)` (`packages/history/src/archive.ts:95`)
+and inserts with `ON CONFLICT (hash, chain_id) DO NOTHING` (line 128), so the
+archivist cannot write a duplicate row even if a node ever accepted one. Both
+hold regardless of timing.
 Cross-chain replay is impossible for the same blockHash-binding reason — a 369
 stamp names a block a Sepolia node will not accept. The worst case is a no-op
 write.
