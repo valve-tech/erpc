@@ -24,6 +24,20 @@ type stubProbeUpstream struct {
 	// hold a probe in-flight to assert the inflight counter is
 	// enforced.
 	blockUntil chan struct{}
+
+	// handleMethod overrides ShouldHandleMethod when set. It models an
+	// upstream whose own config ignores the method (`ignoreMethods`).
+	handleMethod func(method string) (bool, error)
+
+	// seenReq records the request object Forward received, so a test can
+	// assert the prober did NOT hand over the caller's own request.
+	seenReq atomic.Pointer[common.NormalizedRequest]
+
+	// writeLVR makes Forward store a valid response into the request it
+	// was given, exactly as the real Upstream.Forward does at
+	// upstream/upstream.go:795. Without this the stub cannot reproduce
+	// the response-contamination bug.
+	writeLVR bool
 }
 
 func (s *stubProbeUpstream) Id() string           { return s.id }
@@ -40,18 +54,31 @@ func (s *stubProbeUpstream) Tracker() common.HealthTracker {
 }
 func (s *stubProbeUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, byPass, isHedge bool) (*common.NormalizedResponse, error) {
 	s.calls.Add(1)
+	s.seenReq.Store(nq)
 	if s.blockUntil != nil {
 		select {
 		case <-s.blockUntil:
 		case <-ctx.Done():
 		}
 	}
+	if s.writeLVR {
+		resp := common.NewNormalizedResponse().
+			WithJsonRpcResponse(common.MustNewJsonRpcResponse(1, "0xdeadbeef", nil))
+		resp.SetUpstream(s)
+		nq.SetLastValidResponse(ctx, resp)
+		return resp, nil
+	}
 	return nil, nil
 }
-func (s *stubProbeUpstream) Cordon(method, reason string)                   {}
-func (s *stubProbeUpstream) Uncordon(method, reason string)                 {}
-func (s *stubProbeUpstream) IgnoreMethod(method string)                     {}
-func (s *stubProbeUpstream) ShouldHandleMethod(method string) (bool, error) { return true, nil }
+func (s *stubProbeUpstream) Cordon(method, reason string)   {}
+func (s *stubProbeUpstream) Uncordon(method, reason string) {}
+func (s *stubProbeUpstream) IgnoreMethod(method string)     {}
+func (s *stubProbeUpstream) ShouldHandleMethod(method string) (bool, error) {
+	if s.handleMethod != nil {
+		return s.handleMethod(method)
+	}
+	return true, nil
+}
 
 // stubEngine implements the narrow proberDeps interface so we can
 // drive the prober without standing up a full Engine.

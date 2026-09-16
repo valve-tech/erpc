@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"strings"
 	"sync"
@@ -217,6 +218,25 @@ func (p *Prober) onRequest(ctx context.Context, req *common.NormalizedRequest) {
 	}
 
 	for _, u := range excluded {
+		if u == nil {
+			continue
+		}
+		// The upstream's own method config gets a vote. mirror() calls
+		// Forward with byPassMethodExclusion=true, which skips
+		// ShouldHandleMethod entirely, so without this gate the prober
+		// sends an operator-ignored method to an upstream configured
+		// never to serve it. Measured on the fleet: 82% of all probe
+		// traffic was exactly that.
+		//
+		// The bypass flag still earns its keep for every method the
+		// upstream CAN serve: an upstream wrongly tagged as
+		// non-supporting needs probe traffic to prove itself. Only the
+		// operator's own `ignoreMethods`/`allowMethods` verdict stops a
+		// probe here. An error means no verdict, so the probe proceeds.
+		if handle, herr := u.ShouldHandleMethod(method); herr == nil && !handle {
+			telemetry.MetricSelectionProbeSkipped.WithLabelValues(p.networkID, "method_ignored").Inc()
+			continue
+		}
 		if !p.tryReserveProbe(u, cfg) {
 			continue
 		}
@@ -393,7 +413,16 @@ func (p *Prober) mirror(req *common.NormalizedRequest, u common.Upstream, cfg *P
 	defer cancel()
 
 	method, _ := req.Method()
-	finality := req.Finality(ctx)
+
+	// Give the probe its own request object. See probeRequestFrom.
+	preq, cerr := probeRequestFrom(ctx, req)
+	if cerr != nil {
+		telemetry.MetricSelectionProbeSkipped.WithLabelValues(p.networkID, "request_copy_failed").Inc()
+		p.logger.Debug().Err(cerr).Str("method", method).Str("upstreamId", u.Id()).
+			Msg("probe skipped: could not build an independent request")
+		return
+	}
+	finality := preq.Finality(ctx)
 
 	start := time.Now()
 	telemetry.MetricSelectionProbeRequests.WithLabelValues(p.networkID, u.Id(), method).Inc()
@@ -402,10 +431,18 @@ func (p *Prober) mirror(req *common.NormalizedRequest, u common.Upstream, cfg *P
 	// byPassMethodExclusion=true: an excluded upstream that returned
 	// method-not-supported errors might still be tagged as
 	// non-supporting; we want probe traffic to reach the upstream so
-	// it can prove (or disprove) itself. isHedgeAttempt=false — probes
-	// are not hedge fan-outs.
-	_, err := u.Forward(ctx, req, true, false)
+	// it can prove (or disprove) itself. The operator's own method
+	// config is honoured by onRequest before the probe is reserved.
+	// isHedgeAttempt=false — probes are not hedge fan-outs.
+	resp, err := u.Forward(ctx, preq, true, false)
 	duration := time.Since(start)
+
+	// The probe owns its response: it is stored only in preq, which dies
+	// with this goroutine. Nothing downstream can release it, so release
+	// it here rather than leaving the buffers to the GC.
+	if resp != nil {
+		resp.Release()
+	}
 
 	isSuccess := err == nil
 	// "probe" composite-type label keeps probe samples grouped under
@@ -416,6 +453,49 @@ func (p *Prober) mirror(req *common.NormalizedRequest, u common.Upstream, cfg *P
 		p.tracker.RecordUpstreamFailure(u, method, finality, err)
 		telemetry.MetricSelectionProbeErrors.WithLabelValues(p.networkID, u.Id(), method, classifyProbeErr(err)).Inc()
 	}
+}
+
+// probeRequestFrom builds an INDEPENDENT request for one probe.
+//
+// The prober used to hand the caller's own *NormalizedRequest to the
+// probed upstream. Upstream.Forward writes into whatever request it is
+// given — `SetLastValidResponse` (upstream/upstream.go:795) among
+// others — and the network layer serves that stored response when the
+// caller's own attempts come back empty, without checking which
+// upstream produced it. A probe's answer therefore reached real
+// callers. `SetLastValidResponse` prefers a non-empty body over an
+// empty one, so the probe won the slot precisely when our own upstreams
+// answered empty.
+//
+// Copying the request DELETES the shared state instead of guarding one
+// write to it. A guard would have to name every field Forward touches
+// today and stay correct as Forward grows; an independent object is
+// also correct for the writes nobody has thought of yet. The cost is
+// one clone per probe.
+//
+// By the time a request reaches the probe bus the network path has
+// already parsed it, so JsonRpcRequest here is an atomic load rather
+// than a parse.
+func probeRequestFrom(ctx context.Context, src *common.NormalizedRequest) (*common.NormalizedRequest, error) {
+	jrq, err := src.JsonRpcRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if jrq == nil {
+		return nil, errors.New("request carries no json-rpc payload")
+	}
+	// Clone deep-copies the params. The EVM layer interpolates block
+	// tags in place, so a shared params slice is a live race, not just a
+	// stale read.
+	preq := common.NewNormalizedRequestFromJsonRpcRequest(jrq.Clone())
+	if dirs := src.Directives(); dirs != nil {
+		preq.SetDirectives(dirs.Clone())
+	}
+	// Keep the labels a probe carried before this change: the tracker
+	// reads the network label, the user and the agent off the request.
+	preq.CopyHttpContextFrom(src)
+	preq.SetNetwork(src.Network())
+	return preq, nil
 }
 
 // isProbeUnsafeMethod returns true for any method whose execution may
