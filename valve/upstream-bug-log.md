@@ -7355,21 +7355,51 @@ refused the replay. The gate did not stop it; the receiving node did. It is
 still live: 13 and 15 probes reached `direct-b-evm-11155111`(+ws) in the three
 hours after the 2026-09-16 deploy.
 
+**Why the replays fail, from the msgboard owners** (2026-09-16), because the
+reason matters more than the outcome: a stamp is
+`sha256(version || blockHash || payloadHash || M || D || nonce)` and the node
+checks the work against the block the message NAMES, with the board holding
+messages for about twenty minutes. So a mirrored write is valid only while its
+named block is still acceptable. The rejection is blockHash binding, not nonce
+reuse. A probe mirrored fast enough — inside that window — would reach the
+acceptance path. The safety is incidental and time-bounded, which is precisely
+why the gate should not be the thing that is missing.
+
 The gate itself works for what it knows — `write_method` skips ran 2,202 and
 2,193 and 24 per day across the three instances. It simply cannot know a
 namespace it was not told about, and entry 186's fix does not help here: on our
 OWN nodes msgboard is not in `ignoreMethods`, because those nodes are the ones
 that serve it.
 
+**A correction to this entry's first severity claim.** It said the failure mode
+is a duplicate chain write that nothing undoes. That is wrong for msgboard, and
+the msgboard owners supplied the reason: the board is keyed by message hash, so
+a replay of identical bytes dedupes rather than double-posting, and their
+archive's primary key is `(hash, chain_id)` behind an idempotent sink, so a
+landed replay writes the row it already holds. Both hold regardless of timing.
+Cross-chain replay is impossible for the same blockHash-binding reason — a 369
+stamp names a block a Sepolia node will not accept. The worst case is a no-op
+write.
+
+**The case for fixing it is narrower than I first wrote, and still stands.** The
+prober performs writes nobody sanctioned, and they are harmless today only
+because of properties of the msgboard design that eRPC neither knows about nor
+depends on. The next custom namespace need not dedupe by content hash or key its
+archive idempotently, and it will be unguarded by default.
+
 **The axis is wrong, and it is the same wrong axis as entry 188.** Enumerating
-known writes means every new namespace is unguarded until someone remembers to
-add it, and the failure mode is a duplicate chain write rather than a slow
-response. Mirroring is an optimisation; being wrong about it is not recoverable.
-So the default for an UNRECOGNISED method should be "do not mirror", with reads
-identified positively — eRPC already carries per-method definitions and finality
-classification that say which methods are reads. Inverting the default costs
-some probe coverage on methods nobody has classified, which is the cheap side of
-the trade.
+write prefixes fails OPEN for every namespace nobody has thought of. An
+allowlist of mirrorable READ methods fails closed. So the default for an
+UNRECOGNISED method should be "do not mirror", with reads identified positively
+— eRPC already carries per-method definitions and finality classification that
+say which methods are reads. Inverting the default costs some probe coverage on
+methods nobody has classified, which is the cheap side of the trade. The
+msgboard owners proposed the same allowlist shape independently, which is weak
+evidence that it is the obvious repair rather than a clever one.
+
+Note that entry 186's method gate cannot reach this: msgboard is deliberately
+absent from `ignoreMethods` on our own nodes, because those are the nodes that
+serve it.
 
 Not reported upstream yet. The same enumeration exists in upstream's own code,
 so this is not a fork-only defect.
