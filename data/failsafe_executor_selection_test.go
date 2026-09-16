@@ -13,37 +13,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// finalityNetwork is a stand-in Network that reports one fixed finality. The
+// selectionFinalityNetwork is a stand-in Network that reports one fixed finality. The
 // real finality calculation needs an upstream state poller; the executor
 // selection under test only reads the answer, so a fixed one is enough.
-type finalityNetwork struct {
+type selectionFinalityNetwork struct {
 	finality common.DataFinalityState
 }
 
-var _ common.Network = (*finalityNetwork)(nil)
+var _ common.Network = (*selectionFinalityNetwork)(nil)
 
-func (n *finalityNetwork) Id() string        { return "evm:1" }
-func (n *finalityNetwork) Label() string     { return "evm:1" }
-func (n *finalityNetwork) ProjectId() string { return "test_project" }
-func (n *finalityNetwork) Architecture() common.NetworkArchitecture {
+func (n *selectionFinalityNetwork) Id() string        { return "evm:1" }
+func (n *selectionFinalityNetwork) Label() string     { return "evm:1" }
+func (n *selectionFinalityNetwork) ProjectId() string { return "test_project" }
+func (n *selectionFinalityNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }
-func (n *finalityNetwork) Config() *common.NetworkConfig { return nil }
-func (n *finalityNetwork) Logger() *zerolog.Logger {
+func (n *selectionFinalityNetwork) Config() *common.NetworkConfig { return nil }
+func (n *selectionFinalityNetwork) Logger() *zerolog.Logger {
 	lg := zerolog.Nop()
 	return &lg
 }
-func (n *finalityNetwork) GetMethodMetrics(method string) common.TrackedMetrics { return nil }
-func (n *finalityNetwork) Forward(ctx context.Context, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+func (n *selectionFinalityNetwork) GetMethodMetrics(method string) common.TrackedMetrics { return nil }
+func (n *selectionFinalityNetwork) Forward(ctx context.Context, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	return nil, errors.New("not used in this test")
 }
-func (n *finalityNetwork) GetFinality(ctx context.Context, req *common.NormalizedRequest, resp *common.NormalizedResponse) common.DataFinalityState {
+func (n *selectionFinalityNetwork) GetFinality(ctx context.Context, req *common.NormalizedRequest, resp *common.NormalizedResponse) common.DataFinalityState {
 	return n.finality
 }
 
 func requestWithMethodAndFinality(method string, finality common.DataFinalityState) context.Context {
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","method":"` + method + `","params":[],"id":1}`))
-	req.SetNetwork(&finalityNetwork{finality: finality})
+	req.SetNetwork(&selectionFinalityNetwork{finality: finality})
 	return context.WithValue(context.Background(), common.RequestContextKey, req)
 }
 
@@ -131,7 +131,7 @@ func TestPickCacheExecutor_FourTierPriority(t *testing.T) {
 func TestBuildCacheExecutors_AlwaysAppendsADefault(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
-	executors, err := buildCacheExecutors(context.Background(), &logger, "memory-1", []*common.FailsafeConfig{
+	executors, err := buildCacheExecutors(context.Background(), &logger, "memory-1", "get", []*common.FailsafeConfig{
 		{MatchMethod: "eth_getLogs", Retry: &common.RetryPolicyConfig{MaxAttempts: 2}},
 		nil, // a nil entry in the list must be skipped, not panic
 	})
@@ -142,7 +142,7 @@ func TestBuildCacheExecutors_AlwaysAppendsADefault(t *testing.T) {
 	assert.Empty(t, executors[1].MatchFinality())
 
 	t.Run("an unsupported policy fails the whole build", func(t *testing.T) {
-		_, err := buildCacheExecutors(context.Background(), &logger, "memory-1", []*common.FailsafeConfig{
+		_, err := buildCacheExecutors(context.Background(), &logger, "memory-1", "get", []*common.FailsafeConfig{
 			{Consensus: &common.ConsensusPolicyConfig{}},
 		})
 		require.Error(t, err, "consensus has no meaning on a cache connector and must be refused")
