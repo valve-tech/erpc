@@ -473,12 +473,19 @@ func (e *Engine) GetExcluded(networkID, method, finality string) []common.Upstre
 	return nil
 }
 
-// PublishRequest hands a freshly-served request to the network's
-// probe-bus (if a Prober exists for this network). Non-blocking —
-// drops on bus overflow with a metric. Called from the request path
-// AFTER the primary upstream's response is determined; the probe
-// subsystem runs entirely on its own goroutines so the user's
-// response is never delayed.
+// PublishRequest hands an in-flight request to the network's probe-bus
+// (if a Prober exists for this network). Non-blocking — drops on bus
+// overflow with a metric. The probe subsystem runs entirely on its own
+// goroutines, so the user's response is never delayed.
+//
+// Called from the request path BEFORE the primary upstream is
+// dispatched (erpc/networks.go publishes, then forwards), so probes run
+// CONCURRENTLY with the caller's own attempts — they do not trail them.
+// This comment previously claimed the opposite, and that claim hid a
+// race for months: the prober handed the caller's own request object to
+// a probed upstream, which wrote its response into it. The prober now
+// copies the request (see probeRequestFrom); do not reintroduce sharing
+// on the assumption that the caller is already finished.
 //
 // No-op when no Prober is registered for the network (the chain
 // doesn't include `probeExcluded` OR the engine hasn't ticked yet).

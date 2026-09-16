@@ -7095,3 +7095,74 @@ to ignore cancellation, with an opt-in `circuitBreaker.countTimeouts` offered
 as the conservative alternative. Do not carry a fork patch for this until
 upstream picks a shape — the risk it trades against is a short per-attempt
 timeout tripping a slow-but-healthy upstream, and that judgement is theirs.
+
+## 186. The selection prober ignores `ignoreMethods`, and lends the caller's request to a public upstream
+
+**Status: FIXED in the fork.** Four tests in
+`internal/policy/prober_isolation_test.go` pin it:
+`TestProber_SkipsAMethodTheUpstreamIgnores`,
+`TestProber_DoesNotTouchTheCallersRequest`,
+`TestProbeRequestFrom_SharesNothingMutable` and
+`TestProber_ProbesWhenTheMethodVerdictErrors`.
+
+Two defects sit on the same path, and the second one serves wrong answers.
+
+**The method gate never runs for a probe.** `Prober.mirror` calls
+`Upstream.Forward` with `byPassMethodExclusion=true`
+(`internal/policy/prober.go`), and that flag skips the whole
+`ShouldHandleMethod` check at `upstream/upstream.go:587`. The flag exists to
+re-admit an upstream that eRPC wrongly tagged as non-supporting. It is too
+broad: it also cancels the operator's own `ignoreMethods`. `ignoreMethods`
+itself is not a policy step, so a method-ineligible upstream carries no probe
+verdict, and the zero value means "probe it".
+
+**The prober lent the caller's request object to the upstream it probed.**
+`onRequest` passed the caller's live `*NormalizedRequest` straight to
+`mirror`, with no copy. `Forward` writes into whatever request it receives —
+`nrq.SetLastValidResponse` at `upstream/upstream.go:795`. The network layer
+then serves that stored response when the caller's own attempts return empty,
+and adopts its upstream, with no check on which upstream produced it.
+`SetLastValidResponse` prefers a non-empty body over an empty one, so the
+probe won the slot exactly when our own upstreams answered empty.
+
+Measured on the fleet over 24 hours, before the fix: 512,334 probes a day went
+to an upstream whose config forbids the method, which is 82% of all probe
+traffic; and 485 `txpool_*` probes a day were answered by a public node. Each
+answer was a stranger's mempool, eligible to be served as ours.
+
+The doc comment on `PublishRequest` (`internal/policy/engine.go`) said the
+publish happens "AFTER the primary upstream's response is determined". That is
+false — the network publishes before it dispatches, so probes run beside the
+caller's own attempts. The comment hid the race for months, and the fix
+corrects it.
+
+**The fix, and why it is shaped this way.** The method gate is a precise
+addition: `onRequest` now skips a candidate whose own `ShouldHandleMethod`
+says no, and counts `erpc_selection_probe_skipped_total{reason="method_ignored"}`.
+An error from that call is not a verdict, so the probe still fires; otherwise
+a bad wildcard would silently end re-admission.
+
+The sharing fix DELETES the shared state rather than guarding one write to it.
+`probeRequestFrom` builds an independent request for each probe, and clones
+the params, because the EVM layer interpolates block tags in place. Guarding
+`SetLastValidResponse` alone would have committed us to today's list of fields
+`Forward` writes, and that list grows. A copy is also correct for the writes
+nobody has thought of. The cost is one clone per probe, against roughly six
+probes a second.
+
+The fork also releases the probe's response now. The probe owns it, because
+nothing downstream holds it any more.
+
+**Rebase warning.** This patch lives in code the fork inherits. Upstream has
+not touched `internal/policy/prober.go` since 2026-08-10, so a rebase is
+unlikely to conflict, but the `byPassMethodExclusion` argument and the
+`SetLastValidResponse` call are both upstream code. If either moves, re-check
+that probes still carry their own request. The four tests above fail loudly if
+the sharing returns.
+
+A config stopgap shipped first, outside this repo: `routing.probe: false` on
+every public upstream, live 2026-09-09. It stopped the leak, and it cost 77%
+of re-admission probing. Remove it once a binary carrying this fix is
+deployed, and confirm that
+`erpc_selection_probe_requests_total{method=~"eth_.*"}` stays non-zero
+afterwards. Not reported upstream yet.
