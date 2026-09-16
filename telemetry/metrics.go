@@ -323,7 +323,7 @@ var (
 	MetricSelectionProbeSkipped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "selection_probe_skipped_total",
-		Help:      "Probe candidates that were skipped before firing. reason ∈ {write_method, opt_out, sampled_out, max_concurrent, no_method}. `write_method` and `opt_out` are safety/policy gates; `sampled_out` and `max_concurrent` are throughput controls.",
+		Help:      "Probe candidates that were skipped before firing. reason ∈ {write_method, method_ignored, opt_out, sampled_out, max_concurrent, no_method, request_copy_failed}. `write_method`, `method_ignored` and `opt_out` are safety/policy gates — `method_ignored` means the upstream's own `ignoreMethods`/`allowMethods` config forbids the method; `sampled_out` and `max_concurrent` are throughput controls; `request_copy_failed` means the probe could not be given its own request object and was dropped rather than sharing the caller's.",
 	}, []string{"network", "reason"})
 
 	MetricSelectionProbeDropped = promauto.NewCounterVec(prometheus.CounterOpts{
