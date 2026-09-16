@@ -7317,3 +7317,59 @@ The fix worth proposing upstream is a shape-based or config-derived acceptance �
 accept an emptyish answer unless the method is listed, or derive "empty is
 legitimate here" from the method config — rather than a name list that must grow
 by one entry per method forever. Not reported upstream yet.
+
+## 189. The prober's write gate enumerates known writes, so it mirrors a custom namespace's write
+
+**Status:** open. No fork fix yet — the change is to the production request path
+and is not made here. Measured on the fleet 2026-09-16.
+
+`isProbeUnsafeMethod` (`internal/policy/prober.go`) decides what the selection
+prober must never mirror, and it decides it by NAME:
+
+```go
+if svm.IsNonRetryableWriteMethod(method) { return true }
+lower := strings.ToLower(method)
+if strings.HasPrefix(lower, "eth_send") { return true }
+if strings.HasPrefix(lower, "eth_sign") { return true }
+if strings.HasPrefix(lower, "personal_sign") { return true }
+if strings.HasPrefix(lower, "personal_sendtransaction") { return true }
+return false
+```
+
+A write in a custom namespace matches none of those prefixes, so the prober
+mirrors it. `msgboard_addMessage` posts a proof-of-work-gated message to the
+board — a chain write — and the prober has been firing it at upstreams,
+including a PUBLIC one:
+
+| upstream | probes, 24h | errors, 24h |
+| --- | --- | --- |
+| `direct-b-evm-11155111` | 360 | 360 |
+| `direct-b-evm-11155111-ws` | 337 | 337 |
+| `ethereum-rpc-publicnode-com-1` | 100 | 100 |
+| `rpc-pulsechain-g4mm4-io-369` | 16 | 16 |
+
+**Nothing was double-posted, and that is the point.** Requests equal errors
+exactly on every upstream, so every mirrored write was rejected — public
+endpoints do not implement `msgboard_addMessage` at all, and our own replicas
+refused the replay. The gate did not stop it; the receiving node did. It is
+still live: 13 and 15 probes reached `direct-b-evm-11155111`(+ws) in the three
+hours after the 2026-09-16 deploy.
+
+The gate itself works for what it knows — `write_method` skips ran 2,202 and
+2,193 and 24 per day across the three instances. It simply cannot know a
+namespace it was not told about, and entry 186's fix does not help here: on our
+OWN nodes msgboard is not in `ignoreMethods`, because those nodes are the ones
+that serve it.
+
+**The axis is wrong, and it is the same wrong axis as entry 188.** Enumerating
+known writes means every new namespace is unguarded until someone remembers to
+add it, and the failure mode is a duplicate chain write rather than a slow
+response. Mirroring is an optimisation; being wrong about it is not recoverable.
+So the default for an UNRECOGNISED method should be "do not mirror", with reads
+identified positively — eRPC already carries per-method definitions and finality
+classification that say which methods are reads. Inverting the default costs
+some probe coverage on methods nobody has classified, which is the cheap side of
+the trade.
+
+Not reported upstream yet. The same enumeration exists in upstream's own code,
+so this is not a fork-only defect.
