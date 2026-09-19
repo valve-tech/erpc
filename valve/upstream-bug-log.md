@@ -7416,5 +7416,23 @@ Note that entry 186's method gate cannot reach this: msgboard is deliberately
 absent from `ignoreMethods` on our own nodes, because those are the nodes that
 serve it.
 
+**Archive audit, 2026-09-17: nothing landed.** The msgboard owners read the
+whole `message_archive` table on the production box — chain 1 = 181,384 rows,
+369 = 183,489, 943 = 991,274, 11155111 = 13,577 — and sampled every group whose
+`category_text` is NULL (780,662 rows, which means "hash not reversed", not
+"unknown author"). Every sampled group is theirs: deploy probes, the
+proof-of-work cutover probe, SDK and subscription tests, lorem-ipsum spam
+bodies, a games writer, and a 768,185-row group of bare hex payloads from their
+load writer. The count of rows they did not author is zero. A structural bar
+also holds on 369: every public PulseChain node runs erigon-pulse v2.4.1 with
+the LEGACY proof of work against our 2026-08-21 revised scheme, so the two
+boards reject each other's messages, and 70 of 70 `msgboard_addMessage` attempts
+against public endpoints returned -32601.
+
+That confirms the mirror never placed a message. It does not lower the severity:
+the prober still aimed a real write at our nodes, and it failed only because two
+replay barriers refused it — one of which, the blockHash binding, expires in
+about twenty minutes.
+
 Not reported upstream yet. The same enumeration exists in upstream's own code,
 so this is not a fork-only defect.
