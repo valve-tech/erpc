@@ -79,7 +79,12 @@ func TestNormalizedRequest_Validate_RejectsEveryUnusableShape(t *testing.T) {
 		err := NewNormalizedRequest([]byte(`{"id":1,"method":"","params":[]}`)).Validate()
 		require.Error(t, err)
 		require.True(t, HasErrorCode(err, ErrCodeInvalidRequest))
-		require.Contains(t, err.Error(), "method is required")
+		// Since upstream #1162 parses the body once, a blank method in a BODY is
+		// rejected by that parse as unresolvable, before Validate's own
+		// "method is required" guard (which a request built in code still hits).
+		// What matters is unchanged: it is not reported as an unreadable body.
+		require.True(t, HasErrorCode(err, ErrorCode("ErrJsonRpcRequestUnresolvableMethod")))
+		require.False(t, HasErrorCode(err, ErrCodeJsonRpcRequestUnmarshal))
 	})
 }
 
@@ -152,7 +157,9 @@ func TestNormalizedRequest_JsonRpcRequest_RejectsABodyWithoutAMethod(t *testing.
 
 	_, err := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"params":[]}`)).JsonRpcRequest()
 	require.Error(t, err)
-	require.True(t, HasErrorCode(err, ErrorCode("ErrJsonRpcRequestUnresolvableMethod")))
+	// Since upstream #1162 unified parsing, a body with no `method` member
+	// reports the unmarshal code (-32700) here, the same as Validate does.
+	require.True(t, HasErrorCode(err, ErrCodeJsonRpcRequestUnmarshal))
 }
 
 // TestNormalizedRequest_Method_ReadsTheBodyWithoutFullyParsingIt covers the

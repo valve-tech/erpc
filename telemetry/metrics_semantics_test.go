@@ -39,8 +39,7 @@ func TestUpstreamRequestTotal_CountsInternalPollerTrafficToo(t *testing.T) {
 	// traffic — the `category` label holds the METHOD, so poller probes appear
 	// as ordinary eth_blockNumber / eth_getBlockByNumber rows.
 	lc := newTestLabeledCounter(t, "test_upstream_request_total",
-		[]string{"project", "vendor", "network", "upstream", "category", "attempt", "composite", "finality", "user", "agent_name"},
-		nil, nil)
+		[]string{"project", "vendor", "network", "upstream", "category", "attempt", "composite", "finality", "user", "agent_name"})
 
 	// A client call and a state-poller probe, side by side.
 	lc.WithLabelValues("p", "alchemy", "evm:1", "up1", "eth_getBalance", "0", "none", "unfinalized", "user-1", "curl").Inc()
@@ -90,43 +89,21 @@ func TestDroppingTheUpstreamLabelKeepsTheSumButLosesTheAttribution(t *testing.T)
 	// attribution impossible — and any billing query grouping by it silently
 	// returns one merged row instead of failing.
 	schema := []string{"project", "upstream", "category"}
-	lc := newTestLabeledCounter(t, "test_drop_upstream_total", schema, []string{"upstream"}, nil)
+	lc := newTestLabeledCounter(t, "test_drop_upstream_total", schema, dropLabel("upstream"))
 
 	lc.WithLabelValues("p", "up1", "eth_getBalance").Inc()
 	lc.WithLabelValues("p", "up2", "eth_getBalance").Inc()
 	lc.WithLabelValues("p", "up3", "eth_getBalance").Inc()
 
 	require.Equal(t, 1, testutil.CollectAndCount(lc), "three upstreams collapse into one series")
-	require.Equal(t, float64(3), testutil.ToFloat64(lc.vec.WithLabelValues("p", "eth_getBalance")),
+	require.Equal(t, float64(3), testutil.ToFloat64(lc.state.Load().vec.WithLabelValues("p", "eth_getBalance")),
 		"the total must be preserved exactly — only the dimension is lost")
-}
-
-func TestLabeledCounter_RebuildAppliesAFilterChangedAfterConstruction(t *testing.T) {
-	// The package counters are built at init, before the config is read.
-	// Rebuild is the only way a counterDropLabels setting can reach them:
-	// Prometheus freezes a metric's label-set hash for the registry's life, so
-	// unregister-and-re-register cannot change it.
-	schema := []string{"network", "agent_name"}
-	before := newTestLabeledCounter(t, "test_rebuild_total", schema, nil, nil)
-	require.Len(t, before.activeIdx, 2, "no filter yet: the full schema is active")
-
-	SetCounterLabelFilter([]string{"agent_name"}, nil)
-	after := before.Rebuild()
-	require.Len(t, after.activeIdx, 1, "Rebuild must pick up the filter installed after construction")
-
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(after)
-	after.WithLabelValues("evm:1", "agent-a").Inc()
-	after.WithLabelValues("evm:1", "agent-b").Inc()
-	require.Equal(t, 1, testutil.CollectAndCount(after))
-
-	require.Len(t, before.activeIdx, 2, "Rebuild must return a NEW counter, not mutate the old one")
 }
 
 func TestLabeledCounter_ResetClearsEverySeries(t *testing.T) {
 	// Reset is used when metrics are rebuilt at config reload. Leaving stale
 	// series behind would double-count the pre-reload traffic.
-	lc := newTestLabeledCounter(t, "test_reset_total", []string{"network"}, nil, nil)
+	lc := newTestLabeledCounter(t, "test_reset_total", []string{"network"})
 	lc.WithLabelValues("evm:1").Inc()
 	lc.WithLabelValues("evm:137").Inc()
 	require.Equal(t, 2, testutil.CollectAndCount(lc))
@@ -139,7 +116,7 @@ func TestLabeledCounter_DeleteLabelValuesUsesTheFullSchema(t *testing.T) {
 	// Call sites hold full-schema tuples. If Delete expected post-filter
 	// values, the idle sweep would silently delete nothing and the /metrics
 	// page would grow without bound under a method flood.
-	lc := newTestLabeledCounter(t, "test_delete_total", []string{"network", "agent_name"}, []string{"agent_name"}, nil)
+	lc := newTestLabeledCounter(t, "test_delete_total", []string{"network", "agent_name"}, dropLabel("agent_name"))
 	lc.WithLabelValues("evm:1", "agent-a").Inc()
 	require.Equal(t, 1, testutil.CollectAndCount(lc))
 
@@ -153,8 +130,9 @@ func TestLabeledCounter_DeleteLabelValuesUsesTheFullSchema(t *testing.T) {
 func TestLabeledHistogram_DeleteAndResetHonourTheFullSchema(t *testing.T) {
 	// Same contract as the counter. The health tracker's idle sweep calls both
 	// with full-schema tuples; a mismatch leaks series forever.
-	t.Cleanup(func() { SetHistogramLabelFilter(nil, nil) })
-	SetHistogramLabelFilter([]string{"user"}, nil)
+	origPolicy := currentPolicy()
+	t.Cleanup(func() { setPolicy(origPolicy) })
+	setPolicy(mustPolicy(t, dropLabel("user")))
 
 	schema := []string{"network", "user"}
 	lh := NewLabeledHistogram(prometheus.HistogramOpts{Name: "test_lh_delete_seconds"}, schema)
@@ -177,8 +155,9 @@ func TestLabeledHistogram_DeleteAndResetHonourTheFullSchema(t *testing.T) {
 }
 
 func TestLabeledHistogram_UnfilteredActiveLabelValuesReturnTheInput(t *testing.T) {
-	t.Cleanup(func() { SetHistogramLabelFilter(nil, nil) })
-	SetHistogramLabelFilter(nil, nil)
+	origPolicy := currentPolicy()
+	t.Cleanup(func() { setPolicy(origPolicy) })
+	setPolicy(mustPolicy(t))
 	lh := NewLabeledHistogram(prometheus.HistogramOpts{Name: "test_lh_passthrough_seconds"}, []string{"network", "user"})
 	require.Equal(t, []string{"evm:1", "user-a"}, lh.ActiveLabelValues([]string{"evm:1", "user-a"}))
 }
@@ -212,9 +191,10 @@ func TestObserverHandle_FilteredHistogramTuplesShareOneCacheEntry(t *testing.T) 
 	// Under a label filter several full-schema tuples resolve to ONE underlying
 	// observer. Keying the cache on the full tuple would create several entries
 	// for one series, which is exactly the bug the counter cache had.
-	t.Cleanup(func() { SetHistogramLabelFilter(nil, nil) })
+	origPolicy := currentPolicy()
+	t.Cleanup(func() { setPolicy(origPolicy) })
 	t.Cleanup(ResetHandleCache)
-	SetHistogramLabelFilter([]string{"user"}, nil)
+	setPolicy(mustPolicy(t, dropLabel("user")))
 	ResetHandleCache()
 
 	lh := NewLabeledHistogram(prometheus.HistogramOpts{Name: "test_obs_handle_seconds"}, []string{"network", "user"})

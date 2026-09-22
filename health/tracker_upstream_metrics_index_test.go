@@ -22,7 +22,11 @@ func TestGetUpstreamMetrics_ReturnsPollerDataBeforeAnyRequestTraffic(t *testing.
 	fast := common.NewFakeUpstream("fast")
 	slow := common.NewFakeUpstream("slow")
 
+	// The network head is the second-highest reporter (upstream #1154), so a
+	// SECOND upstream at the tip is what puts the head there. With only two
+	// reporters the head collapses to the laggard and no lag is visible.
 	tracker.SetLatestBlockNumber(fast, 1000, 0)
+	tracker.SetLatestBlockNumber(common.NewFakeUpstream("peer"), 1000, 0)
 	tracker.SetLatestBlockNumber(slow, 940, 0)
 
 	out := tracker.GetUpstreamMetrics(slow)

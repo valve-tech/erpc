@@ -45,7 +45,11 @@ func TestSetLatestBlockNumber_WritesTheWildcardBucketWithoutAnyRequestTraffic(t 
 	fast := common.NewFakeUpstream("fast")
 	slow := common.NewFakeUpstream("slow")
 
+	// The network head is the second-highest reporter (upstream #1154), so a
+	// SECOND upstream at the tip is what puts the head there. With only two
+	// reporters the head collapses to the laggard and no lag is visible.
 	tracker.SetLatestBlockNumber(fast, 1000, 0)
+	tracker.SetLatestBlockNumber(common.NewFakeUpstream("peer"), 1000, 0)
 	tracker.SetLatestBlockNumber(slow, 940, 0)
 
 	require.EqualValues(t, 0, wildcardLag(tracker, fast), "the upstream at the tip has no lag")
@@ -53,18 +57,27 @@ func TestSetLatestBlockNumber_WritesTheWildcardBucketWithoutAnyRequestTraffic(t 
 		"a lagging upstream's lag must reach {*, All} even with zero request traffic")
 }
 
-func TestSetLatestBlockNumber_NetworkHeadIsTheMaxAcrossUpstreams(t *testing.T) {
+func TestSetLatestBlockNumber_ASingleLaggardCannotLowerTheNetworkHead(t *testing.T) {
 	// Lag is measured against the network head. If a lagging upstream could
 	// lower it, every peer's lag would read as 0 and the whole fleet would look
 	// caught up while serving stale data.
-	tracker := newSeamTracker(t, "seam-network-head")
+	//
+	// Since upstream #1154 the head is the SECOND-highest reporter, not the max.
+	// That still holds this line with three or more reporters: one laggard is
+	// outvoted. With exactly TWO reporters it does not — the head becomes the
+	// lower of the pair and a lagging node reads as caught up, so the lag gate
+	// cannot exclude it. That trade was made upstream to stop a single
+	// wrong-chain upstream making every honest one look millions of blocks
+	// behind.
+	tracker := newSeamTracker(t, "seam-head-laggard")
 	net := common.NewFakeUpstream("a").NetworkId()
 
 	tracker.SetLatestBlockNumber(common.NewFakeUpstream("a"), 1000, 0)
+	tracker.SetLatestBlockNumber(common.NewFakeUpstream("c"), 1000, 0)
 	tracker.SetLatestBlockNumber(common.NewFakeUpstream("b"), 800, 0)
 
 	require.EqualValues(t, 1000, tracker.getMetadata(metadataKey{nil, net}).evmLatestBlockNumber.Load(),
-		"a lower sample must not drag the network head down")
+		"a single lower sample must not drag the network head down while two peers agree")
 }
 
 func TestSetLatestBlockNumber_LagUpdatesForEveryPeerWhenTheTipAdvances(t *testing.T) {
@@ -82,13 +95,15 @@ func TestSetLatestBlockNumber_LagUpdatesForEveryPeerWhenTheTipAdvances(t *testin
 	tracker.SetLatestBlockNumber(c, 1000, 0)
 	require.EqualValues(t, 0, wildcardLag(tracker, b))
 
-	// Only a's poller fires and moves the tip forward by 50.
+	// One upstream advancing alone does not move a corroborated head (#1154):
+	// it takes a second reporter at the new height.
 	tracker.SetLatestBlockNumber(a, 1050, 0)
+	tracker.SetLatestBlockNumber(b, 1050, 0)
 
 	require.EqualValues(t, 0, wildcardLag(tracker, a))
-	require.EqualValues(t, 50, wildcardLag(tracker, b),
-		"a peer that did not poll must still show the new lag")
-	require.EqualValues(t, 50, wildcardLag(tracker, c))
+	require.EqualValues(t, 0, wildcardLag(tracker, b))
+	require.EqualValues(t, 50, wildcardLag(tracker, c),
+		"c's poller never fired after the tip moved, so its lag must be recomputed on the peers' reports")
 }
 
 func TestSetLatestBlockNumber_LagReachesThePerMethodBucketsToo(t *testing.T) {
@@ -106,6 +121,10 @@ func TestSetLatestBlockNumber_LagReachesThePerMethodBucketsToo(t *testing.T) {
 
 	tracker.SetLatestBlockNumber(b, 900, 0)
 	tracker.SetLatestBlockNumber(a, 1000, 0)
+	// The network head is the second-highest reporter (upstream #1154), so a
+	// SECOND upstream at the tip is what puts the head there. With only two
+	// reporters the head collapses to the laggard and no lag is visible.
+	tracker.SetLatestBlockNumber(common.NewFakeUpstream("peer"), 1000, 0)
 
 	perMethod := tracker.GetUpstreamMethodMetrics(b, "eth_getBalance", common.DataFinalityStateAll)
 	require.EqualValues(t, 100, perMethod.BlockHeadLag.Load(),
@@ -161,9 +180,12 @@ func TestSetLatestBlockNumber_ALargeRollbackRederivesTheNetworkHead(t *testing.T
 	net := bogus.NetworkId()
 
 	tracker.SetLatestBlockNumber(healthy, 1000, 0)
+	tracker.SetLatestBlockNumber(common.NewFakeUpstream("healthy2"), 1000, 0)
 	tracker.SetLatestBlockNumber(bogus, 50_000_000, 0)
-	require.EqualValues(t, 50_000_000, tracker.getMetadata(metadataKey{nil, net}).evmLatestBlockNumber.Load(),
-		"precondition: the bogus sample became the network head")
+	// Before upstream #1154 this sample BECAME the network head. The head is now
+	// the second-highest reporter, so a lone far-ahead report never captures it.
+	require.EqualValues(t, 1000, tracker.getMetadata(metadataKey{nil, net}).evmLatestBlockNumber.Load(),
+		"a single far-ahead sample must not become the network head")
 
 	// The provider corrects itself — and lands BELOW the healthy peer, which is
 	// the case that separates "re-derive from all upstreams" from "adopt this
@@ -174,7 +196,7 @@ func TestSetLatestBlockNumber_ALargeRollbackRederivesTheNetworkHead(t *testing.T
 	require.EqualValues(t, 900, tracker.getMetadata(metadataKey{bogus, net}).evmLatestBlockNumber.Load(),
 		"a large decrease must be accepted as a correction")
 	require.EqualValues(t, 1000, tracker.getMetadata(metadataKey{nil, net}).evmLatestBlockNumber.Load(),
-		"the network head must be re-derived as the max over ALL upstreams, not adopted from the correcting one")
+		"the network head must be re-derived from ALL upstreams, not adopted from the correcting one")
 	require.EqualValues(t, 0, wildcardLag(tracker, healthy),
 		"the healthy upstream is the tip and must read as caught up once the bogus head is gone")
 	require.EqualValues(t, 100, wildcardLag(tracker, bogus),
@@ -217,21 +239,4 @@ func TestSetLatestBlockNumber_BlockTimeIgnoresRepeatedSamplesOfTheSameHead(t *te
 	}
 	require.EqualValues(t, 0, tracker.GetNetworkBlockTime(a.NetworkId()),
 		"a stuck head must produce no block-time estimate rather than a zero one")
-}
-
-func TestSetLatestBlockNumberForNetwork_SetsTheHeadDirectly(t *testing.T) {
-	// The shared-state path writes the network head without an upstream
-	// attached. It must land in the same place SetLatestBlockNumber reads, or
-	// two eRPC instances sharing state will disagree about the tip.
-	tracker := newSeamTracker(t, "seam-network-direct")
-	a := common.NewFakeUpstream("a")
-	net := a.NetworkId()
-
-	tracker.SetLatestBlockNumberForNetwork(net, 2000)
-	require.EqualValues(t, 2000, tracker.getMetadata(metadataKey{nil, net}).evmLatestBlockNumber.Load())
-
-	// An upstream at 1900 must now read as 100 behind.
-	tracker.SetLatestBlockNumber(a, 1900, 0)
-	require.EqualValues(t, 100, wildcardLag(tracker, a),
-		"lag must be measured against the externally-set network head")
 }

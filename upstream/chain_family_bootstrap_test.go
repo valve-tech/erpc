@@ -133,8 +133,19 @@ func TestChainFamilyBootstrap_HealthyUpstreamLearnsItsNetworkId(t *testing.T) {
 
 	// The bootstrap probe must publish the tip, or the first request ranks an
 	// unmeasured pool. A second upstream 45 blocks behind is what makes that
-	// observable: head lag is derived from the highest tip in the network, so a
-	// lag of 45 can only appear if BOTH probes reached the tracker.
+	// observable: head lag is derived from the network head, so a lag of 45 can
+	// only appear if the probes reached the tracker. The head is the SECOND-
+	// highest reporter (upstream #1154), so a second upstream at the tip is what
+	// puts it there; with two reporters it would collapse to the laggard.
+	peer := newTestUpstream(t, ctx, &common.UpstreamConfig{
+		Id: "u3", Type: common.UpstreamType(fakeFamilyName),
+		Endpoint: "http://peer.localhost:1234", Chain: "mainnet",
+	})
+	peer.metricsTracker = u.metricsTracker
+	if err := peer.detectFeatures(ctx); err != nil {
+		t.Fatalf("detectFeatures for the peer at the tip: %v", err)
+	}
+
 	fam.probe = common.ChainProbe{Liveness: common.ChainHealthy, Tip: 812300}
 	behind := newTestUpstream(t, ctx, &common.UpstreamConfig{
 		Id: "u2", Type: common.UpstreamType(fakeFamilyName),
