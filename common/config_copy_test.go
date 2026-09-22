@@ -231,7 +231,7 @@ func fillForCopy(t *testing.T, v reflect.Value, seed *int, depth int) {
 		// Keep it inside (0,1] so fields validated as a quantile stay sane.
 		v.SetFloat(1.0 / float64(n+1))
 	case reflect.String:
-		v.SetString("v" + itoa(n))
+		v.SetString("v" + copyTestItoa(n))
 	case reflect.Ptr:
 		v.Set(reflect.New(v.Type().Elem()))
 		fillForCopy(t, v.Elem(), seed, depth+1)
@@ -296,7 +296,7 @@ func findSharedRefs(orig, cp reflect.Value, path string, out []string) []string 
 			return append(out, path)
 		}
 		for i := 0; i < orig.Len() && i < cp.Len(); i++ {
-			out = findSharedRefs(orig.Index(i), cp.Index(i), path+"["+itoa(i)+"]", out)
+			out = findSharedRefs(orig.Index(i), cp.Index(i), path+"["+copyTestItoa(i)+"]", out)
 		}
 		return out
 	case reflect.Map:
@@ -339,7 +339,7 @@ func hasMutableInterior(t reflect.Type) bool {
 	}
 }
 
-func itoa(n int) string {
+func copyTestItoa(n int) string {
 	if n == 0 {
 		return "0"
 	}

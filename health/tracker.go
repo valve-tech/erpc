@@ -1059,7 +1059,6 @@ func (t *Tracker) RecordUpstreamFailure(up common.Upstream, method string, final
 		return
 	}
 
-
 	nowMs := time.Now().UnixMilli()
 	for _, k := range t.getUpsKeys(up, method, finality) {
 		tm := t.getUpsMetrics(k)

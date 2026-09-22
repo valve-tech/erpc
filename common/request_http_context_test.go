@@ -353,7 +353,13 @@ func TestValidate_RejectsEveryRequestThatCannotNameAMethod(t *testing.T) {
 	blank := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":""}`))
 	err = blank.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "method is required")
+	// Since upstream #1162 parses the body once, a blank method in a BODY is
+	// rejected by that parse as unresolvable, before Validate's own
+	// "method is required" guard (which a request built in code still hits).
+	// What matters is unchanged: it is not reported as an unreadable body.
+	require.True(t, HasErrorCode(err, ErrorCode("ErrJsonRpcRequestUnresolvableMethod")))
+	require.False(t, HasErrorCode(err, ErrCodeJsonRpcRequestUnmarshal),
+		"a blank method must not be reported as an unreadable body")
 
 	// A request built in code, with a JsonRpcRequest that names no method,
 	// reaches the same guard by a different route.
