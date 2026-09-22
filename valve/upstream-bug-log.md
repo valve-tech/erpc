@@ -7052,6 +7052,21 @@ right for a probe cadence that trails the head by a few blocks on a fast
 chain. It does not extend to an upstream that has published no head for its
 entire lifetime while accepting traffic — that absence is not cadence.
 
+**Upstream 0.3.0 does not fix this** (checked 2026-09-22). #1154 changed how the
+network head is derived — it is now the SECOND-highest reporter rather than the
+max — but the `upsValue <= 0` guard still short-circuits before any lag is
+computed (`health/tracker.go:1266` and `:1293` in this tree). A headless upstream
+still reads as zero blocks behind. Do not retire this entry on the strength of
+#1154.
+
+#1154 also introduces a trade-off on the same gate, worth knowing beside this
+one. With exactly TWO reporting upstreams the head collapses to the lower of the
+pair, so a lagging node reads as caught up and `blockNumberLagAbove` cannot
+exclude it. With three or more, one laggard is outvoted. Upstream accepted that
+to stop a single wrong-chain upstream making every honest one look millions of
+blocks behind. The fork's own tests now pin the three-reporter behaviour
+(`TestSetLatestBlockNumber_ASingleLaggardCannotLowerTheNetworkHead`).
+
 ## 185. A hung upstream never opens its circuit breaker
 
 **Status:** open. No test asserts today's behaviour yet.
@@ -7316,7 +7331,14 @@ purely through the line quoted above.
 The fix worth proposing upstream is a shape-based or config-derived acceptance —
 accept an emptyish answer unless the method is listed, or derive "empty is
 legitimate here" from the method config — rather than a name list that must grow
-by one entry per method forever. Not reported upstream yet.
+by one entry per method forever.
+
+Reported upstream as erpc/erpc#1168 (2026-09-21) by another session, narrowed
+to the tightest defensible ask: the four block and uncle COUNT methods meet the
+default list's own "zero value is a real value, not absence" test and are
+missing from it. Receipts are left out deliberately, citing upstream's own
+markEmptyAsErrorMethods reasoning. The shape-versus-name argument above is named
+there only as the deeper fix.
 
 ## 189. The prober's write gate enumerates known writes, so it mirrors a custom namespace's write
 
@@ -7436,3 +7458,36 @@ about twenty minutes.
 
 Not reported upstream yet. The same enumeration exists in upstream's own code,
 so this is not a fork-only defect.
+
+## 190. Upstream 0.3.0 ships a test race: the parse-once flag against testify's argument formatting
+
+**Status:** open. `TestEvmJsonRpcCache_BlockAgeValidation` reproduces it under
+`-race`; no fork test pins it.
+
+Three upstream changes meet. #1162 made `NormalizedRequest.JsonRpcRequest()`
+run `r.bodyCleared.CompareAndSwap(false, true)` on EVERY call
+(`common/request.go`). #876 made `EvmJsonRpcCache.Get` fan out to each cache
+connector on its own goroutine, all sharing one request. And in tests,
+`data.MockConnector.Get` hands that live request to testify's `m.Called(...)`,
+whose `Arguments.Diff` formats every argument with `fmt.Sprintf("%v")` —
+reflecting over the whole `*NormalizedRequest` and reading `bodyCleared`
+non-atomically while another goroutine CASes it.
+
+Measured, not inferred: pure `upstream/main` at `6a4d702a` fails the test under
+`-race` in 3 of 3 runs; this fork's pre-rebase tree ran the same tests with 0
+races. So it arrived with 0.3.0 and is not caused by fork code.
+
+It is a TEST-HARNESS race, not a production memory-safety bug: nothing in
+production reflect-formats a whole request (it logs through
+`MarshalZerologObject`). It still costs something real. `make test` runs
+`-race`, and the race detector fails whichever parallel tests are running when
+it fires — `TestPollBlockHeadsOnce_*` failed alongside it and pass 3 of 3 alone.
+
+**A fix that does NOT work, recorded so nobody tries it:** parsing the request
+once before the fan-out. The CAS runs on every call, not only the first, so the
+goroutines still touch the flag atomically while testify reads it plainly.
+
+The repair belongs in the mock: stop handing the live request to testify's
+formatter — pass a stable projection such as method and id, or match by
+predicate. That is upstream test code, so it is not carried as a fork patch.
+Not reported upstream yet.
