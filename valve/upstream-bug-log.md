@@ -7491,3 +7491,56 @@ The repair belongs in the mock: stop handing the live request to testify's
 formatter — pass a stable projection such as method and id, or match by
 predicate. That is upstream test code, so it is not carried as a fork patch.
 Not reported upstream yet.
+
+## 191. A caller's own gas or fee cap is graded as a server fault, and opens the breaker on healthy nodes
+
+**Status: FIXED in the fork.** `TestExtractJsonRpcError_CallerGasAndFeeLimits`
+(`architecture/evm/error_normalizer_test.go`) pins it. Upstream `main` at
+`989cfe60` has the same gap. Not reported upstream yet.
+
+`ExtractJsonRpcError` (`architecture/evm/error_normalizer.go`) did not
+recognise two replies that every EVM node gives when the caller's own limit is
+too low:
+
+- `gas required exceeds allowance (N)`, from `eth_estimateGas` or `eth_call`
+  with a `gas` cap below what the call needs;
+- `max fee per gas less than block base fee` (reth, geth), also seen wrapped as
+  `failed with N gas: max fee per gas less than block base fee: …`, and as
+  `fee cap less than block base fee: …` from another vendor.
+
+Both fell through to `ErrEndpointServerSideException`. `upstreamBreakerOutcome`
+(`upstream/upstream_executor.go`) counts that code as a breaker failure, and the
+network retries it on every upstream. A deterministic answer about the caller's
+request became evidence against each node that gave it.
+
+Measured in production, 2026-09-24 15:00–17:00Z. One Node.js client sent
+~18,800 `eth_estimateGas` calls on chain 1 with gas caps of 1, 2, and other tiny
+values. The eRPC journal on edge-a shows the node message for all of them was
+`gas required exceeds allowance`, plus 58 vendor rate-limit replies. Each call
+swept all six chain-1 upstreams for about 2.5 s. The shared state-read breaker
+(`eth_call|eth_getBalance|…|eth_estimateGas`) on both own nodes opened 116 times.
+Every chain-1 caller paid for it:
+
+| hour (UTC) | state-read failure % | `eth_call` mean |
+|---|---|---|
+| 14:00 | 5.8 | 32 ms |
+| 15:00 | 18.9 | 290 ms |
+| 16:00 | 29.6 | 520 ms |
+| 17:00 | 4.9 | 30 ms |
+
+About 3,400 `eth_call` requests spilled to a third-party fallback in those two
+hours. In the three days before, no other burst happened, and no other chain's
+upstreams recorded a breaker transition.
+
+The fork fix adds the two phrases to the existing "transaction rejected / out
+of gas" branch. That branch returns `ErrEndpointExecutionException`: not
+retried, not counted by the breaker. `eth_sendRawTransaction` keeps its
+failover there, which suits the base-fee case, because the base fee moves every
+block. The base-fee phrase has not appeared in production traffic yet. It is
+included because the same request reproduced it on five upstreams through the
+live gateway.
+
+The deeper question, for an upstream report: the unknown-message fallthrough
+for a simulation method is "server fault", so every new client-side wording
+trips the breaker until someone adds a string. Upstream's #1173 (Monad
+"reserve balance violation") is the same shape, found the same way.

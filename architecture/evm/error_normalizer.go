@@ -474,12 +474,20 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 		//----------------------------------------------------------------
 		// "Transaction rejected" or "out of gas" errors
 		// Note: This comes AFTER nonce/duplicate detection to avoid masking those errors.
+		//
+		// "gas required exceeds allowance" and "... less than block base fee"
+		// are the caller's own gas or fee cap, not a node fault. As server-side
+		// exceptions they counted toward the breaker: one client's bad
+		// eth_estimateGas calls opened the state-read breaker on healthy nodes
+		// for every caller (2026-09-24).
 		//----------------------------------------------------------------
 
 		if code == common.JsonRpcErrorTransactionRejected ||
 			strings.Contains(msg, "out of gas") ||
 			strings.Contains(msg, "gas too low") ||
-			strings.Contains(msg, "IntrinsicGas") {
+			strings.Contains(msg, "IntrinsicGas") ||
+			strings.Contains(msg, "gas required exceeds allowance") ||
+			strings.Contains(msg, "less than block base fee") {
 
 			execErr := common.NewErrEndpointExecutionException(
 				common.NewErrJsonRpcExceptionInternal(

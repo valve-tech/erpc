@@ -136,6 +136,96 @@ func TestExtractJsonRpcError_InsufficientFunds_TracingMethodsRetryable(t *testin
 	}
 }
 
+// TestExtractJsonRpcError_CallerGasAndFeeLimits verifies that a simulation the
+// caller capped too low — a gas allowance below what the call needs, or a fee
+// cap below the block's base fee — is an execution verdict, not an endpoint
+// failure. Every node gives the same answer, so a retry cannot change it.
+//
+// These replies used to fall through to ErrEndpointServerSideException, which
+// the upstream breaker counts as a failure. On 2026-09-24 15:00-17:00Z one
+// client sent ~18,800 eth_estimateGas calls with gas caps of 1, 2, ... ; each
+// swept all six chain-1 upstreams, the state-read breaker on both own nodes
+// opened 116 times, and chain-1 eth_call for every caller went from ~30 ms to
+// 520 ms mean with state-read failures at 30%.
+//
+// For eth_sendRawTransaction the base fee moves every block and pool policy is
+// node-local, so that method keeps its failover.
+func TestExtractJsonRpcError_CallerGasAndFeeLimits(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		method        string
+		message       string
+		wantRetryable bool
+	}{
+		{
+			name:    "estimateGas with a gas cap below the need (geth/reth wording)",
+			method:  "eth_estimateGas",
+			message: "gas required exceeds allowance (1)",
+		},
+		{
+			name:    "eth_call with a gas cap below the need",
+			method:  "eth_call",
+			message: "gas required exceeds allowance (21000)",
+		},
+		{
+			name:    "estimateGas with maxFeePerGas below base fee (reth/geth wording)",
+			method:  "eth_estimateGas",
+			message: "max fee per gas less than block base fee",
+		},
+		{
+			name:    "estimateGas base-fee reply wrapped in a gas prefix",
+			method:  "eth_estimateGas",
+			message: "failed with 16777216 gas: max fee per gas less than block base fee: address 0x28C6c06298d514Db089934071355E5743bf21d60, maxFeePerGas: 1, baseFee: 191788347",
+		},
+		{
+			name:    "estimateGas base-fee reply in fee-cap wording",
+			method:  "eth_estimateGas",
+			message: "fee cap less than block base fee: address 0x28C6c06298d514Db089934071355E5743bf21d60, feeCap: 1 baseFee: 191788347",
+		},
+		{
+			name:          "sendRawTransaction below base fee keeps its failover",
+			method:        "eth_sendRawTransaction",
+			message:       "max fee per gas less than block base fee",
+			wantRetryable: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := common.NewNormalizedRequest([]byte(
+				`{"jsonrpc":"2.0","method":"` + tc.method + `","params":[],"id":1}`))
+			nr := common.NewNormalizedResponse().WithRequest(req)
+
+			r := &http.Response{StatusCode: 200, Header: http.Header{}}
+			jrErr := common.NewErrJsonRpcExceptionExternal(
+				int(common.JsonRpcErrorCallException),
+				tc.message,
+				"",
+			)
+			jr := common.MustNewJsonRpcResponse(1, nil, jrErr)
+
+			err := ExtractJsonRpcError(r, nr, jr, nil)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if common.HasErrorCode(err, common.ErrCodeEndpointServerSideException) {
+				t.Fatalf("a caller's own limit was classified as a server fault; the breaker counts it: %v", err)
+			}
+			if !common.HasErrorCode(err, common.ErrCodeEndpointExecutionException) {
+				t.Fatalf("expected ErrEndpointExecutionException, got %T: %v", err, err)
+			}
+			if got := common.IsRetryableTowardNetwork(err); got != tc.wantRetryable {
+				t.Fatalf("IsRetryableTowardNetwork: got %v, want %v (method=%s)", got, tc.wantRetryable, tc.method)
+			}
+		})
+	}
+}
+
 // TestExtractJsonRpcError_ResponseTooBig_JsonRpseeSizeCap verifies that
 // jsonrpsee's oversized-response rejection — used by reth and anything else
 // built on it — normalizes to ErrEndpointRequestTooLarge, so the eth_getLogs /
