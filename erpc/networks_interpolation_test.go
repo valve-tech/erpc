@@ -1487,7 +1487,11 @@ func TestInterpolation_DebugTraceCall_SecondParam(t *testing.T) {
 
 // eth_estimateGas sent without a block parameter reaches the upstream pinned to
 // the network's latest block number, the same as eth_call.
-func TestInterpolation_EthEstimateGas_MissingBlockParamPinnedToLatestNumber(t *testing.T) {
+// Upstream #1171 pins an eth_estimateGas sent without a block to "latest".
+// This fork keeps "latest" as a tag for state reads rather than translating it
+// to the poller's block number (see TestInterpolation_StateMethods_PreserveLatestByDefault),
+// so the pinned param reaches the upstream as the literal tag.
+func TestInterpolation_EthEstimateGas_MissingBlockParamPinnedToLatestTag(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
 	util.SetupMocksForEvmStatePoller()
@@ -1499,7 +1503,7 @@ func TestInterpolation_EthEstimateGas_MissingBlockParamPinnedToLatestNumber(t *t
 		Filter(func(r *http.Request) bool {
 			body := util.SafeReadBody(r)
 			return strings.Contains(body, "eth_estimateGas") &&
-				strings.Contains(body, `},"0x`)
+				strings.Contains(body, `},"latest"`)
 		}).
 		Reply(200).
 		JSON(map[string]interface{}{
