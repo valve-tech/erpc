@@ -7540,6 +7540,13 @@ block. The base-fee phrase has not appeared in production traffic yet. It is
 included because the same request reproduced it on five upstreams through the
 live gateway.
 
+**Client-visible change.** The branch normalizes the code, so a client now
+receives `-32003` (transaction rejected) where it used to receive `-32000`.
+The message text passes through unchanged. A client that matches on the text
+sees no difference. A client that matches on the numeric code misses these
+errors. Deployed in `valve-ws-v5` on 2026-09-24 at about 22:07Z (canary), and
+on both edges by 22:19Z.
+
 The deeper question, for an upstream report: the unknown-message fallthrough
 for a simulation method is "server fault", so every new client-side wording
 trips the breaker until someone adds a string. Upstream's #1173 (Monad
