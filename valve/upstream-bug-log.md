@@ -7496,7 +7496,7 @@ Not reported upstream yet.
 
 **Status: FIXED in the fork.** `TestExtractJsonRpcError_CallerGasAndFeeLimits`
 (`architecture/evm/error_normalizer_test.go`) pins it. Upstream `main` at
-`989cfe60` has the same gap. Not reported upstream yet.
+`989cfe60` has the same gap. Reported upstream as erpc/erpc#1175 (2026-09-24).
 
 `ExtractJsonRpcError` (`architecture/evm/error_normalizer.go`) did not
 recognise two replies that every EVM node gives when the caller's own limit is
