@@ -67,8 +67,6 @@ const (
 // cpsBucketTTL is the lifetime authorize.lua arms on the cps bucket.
 const cpsBucketTTL = 2 * time.Second
 
-const overdraftRedisBinary = "/usr/local/bin/redis-server"
-
 // newOverdraftRedis starts a private redis-server and returns a client for it.
 //
 // It listens on a unix socket inside a temporary directory rather than on a
@@ -78,13 +76,14 @@ const overdraftRedisBinary = "/usr/local/bin/redis-server"
 // few seconds and then dies.
 func newOverdraftRedis(t *testing.T, poolSize int) *redis.Client {
 	t.Helper()
-	if _, err := os.Stat(overdraftRedisBinary); err != nil {
-		t.Skipf("no redis-server at %s: %v", overdraftRedisBinary, err)
+	bin, err := exec.LookPath("redis-server")
+	if err != nil {
+		t.Skipf("no redis-server on PATH: %v", err)
 	}
 	dir, err := os.MkdirTemp("", "vbod")
 	require.NoError(t, err)
 	sock := filepath.Join(dir, "r.sock")
-	cmd := exec.Command(overdraftRedisBinary,
+	cmd := exec.Command(bin,
 		"--port", "0",
 		"--unixsocket", sock,
 		"--save", "",

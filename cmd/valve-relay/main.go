@@ -85,6 +85,7 @@ func run() error {
 	pricesPath := flag.String("prices", env("VALVE_BILLING_PRICES", ""), "pricing export: rows, methodCu and defaultCu in one file (required when billing is enabled)")
 	maxRequestBytes := flag.Int64("max-request-bytes", 8<<20, "largest request body this relay reads")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "how long shutdown waits for in-flight requests")
+	readHeaderTimeout := flag.Duration("read-header-timeout", 10*time.Second, "how long a client may take to send request headers")
 	flag.Parse()
 
 	// Both are operational bounds, so both may move; neither may vanish. A
@@ -96,6 +97,11 @@ func run() error {
 	}
 	if *shutdownTimeout <= 0 {
 		return fmt.Errorf("-shutdown-timeout must be greater than zero, got %s", *shutdownTimeout)
+	}
+	// Zero means no limit, and a client that sends headers one byte at a
+	// time then holds a connection open forever.
+	if *readHeaderTimeout <= 0 {
+		return fmt.Errorf("-read-header-timeout must be greater than zero, got %s", *readHeaderTimeout)
 	}
 
 	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).With().Timestamp().Logger()
@@ -136,7 +142,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /evm/{chainId}", handler(&logger, billing, backend, limits, *maxRequestBytes))
 
-	srv := &http.Server{Addr: *listen, Handler: mux}
+	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: *readHeaderTimeout}
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), *shutdownTimeout)

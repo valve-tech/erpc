@@ -54,7 +54,7 @@ func LoadPriceTable(path string) (*valvebilling.PriceTable, error) {
 }
 
 func readJSON(path string, into interface{}) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the operator names this file with -prices
 	if err != nil {
 		return fmt.Errorf("valverelay: reading %s: %w", path, err)
 	}

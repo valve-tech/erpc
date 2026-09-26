@@ -34,6 +34,10 @@ jobs:
         run: make setup
       - name: Build
         run: make build
+      # valve: the valvebilling tests measure real Redis, and
+      # TestRealRedisIsAvailable fails the run when redis-server is absent.
+      - name: Install redis-server
+        run: sudo apt-get update && sudo apt-get install -y redis-server
       - name: Test with the Go CLI
         run: make test-fast
 

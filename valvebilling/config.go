@@ -102,7 +102,7 @@ func LoadConfigFromEnv() (Config, error) {
 const (
 	EnvSlowThresholdUSD  = "SLOW_MODE_THRESHOLD_USD"
 	EnvFullCreditsPerSec = "FULL_CREDITS_PER_SEC"
-	EnvSlowCreditsPerSec = "SLOW_CREDITS_PER_SEC"
+	EnvSlowCreditsPerSec = "SLOW_CREDITS_PER_SEC" // #nosec G101 -- an env var name, not a credential
 	EnvFullRateRPS       = "FULL_RATE_RPS"
 	EnvSlowRateRPS       = "SLOW_RATE_RPS"
 )
@@ -122,7 +122,7 @@ const (
 // Required configuration turns a mismatch into a deployment error instead of a
 // silent divergence. One value, supplied once, read by everything that needs
 // it.
-const EnvCreditsPerUSD = "VALVE_CREDITS_PER_USD"
+const EnvCreditsPerUSD = "VALVE_CREDITS_PER_USD" // #nosec G101 -- an env var name, not a credential
 
 // LoadTierLimitsFromEnv reads the five deployment-wide tier numbers.
 //

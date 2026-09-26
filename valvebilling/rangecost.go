@@ -309,7 +309,7 @@ func (p RangePrice) Credits(span Span) (int64, error) {
 // and the half that is missing would silently be zero.
 const (
 	EnvBlocksPerUnit  = "VALVE_BLOCKS_PER_UNIT"
-	EnvCreditsPerUnit = "VALVE_CREDITS_PER_BLOCK_UNIT"
+	EnvCreditsPerUnit = "VALVE_CREDITS_PER_BLOCK_UNIT" // #nosec G101 -- an env var name, not a credential
 )
 
 // LoadRangePriceFromEnv reads the block-span tariff.
