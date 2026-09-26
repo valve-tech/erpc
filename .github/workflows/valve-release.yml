@@ -5,6 +5,12 @@
 # `github.repository_owner == 'erpc'`, targets blacksmith runners we don't have,
 # and drives a release-PR/changelog flow that fights our tag convention.
 #
+# Those six (CodeQL, release, publish-npm, benchmark, xray, Dependency Review)
+# are disabled as a repo setting with `gh workflow disable`, not by editing
+# their files: upstream owns the files, and an edit conflicts at every rebase.
+# A rebase can switch them back on — the 0.3.0 rebase did. After each one, run
+# `gh workflow list -R valve-tech/erpc --all` and disable any that is active.
+#
 # This produces exactly what valve consumes, and nothing else:
 #
 #   * linux/amd64  — the fleet. Byte-for-byte the same build the on-box
@@ -115,7 +121,9 @@ jobs:
           # Only linux/amd64 is executable on this runner. It is also the one
           # the fleet runs, so a --version that reports the tag proves the
           # ldflags stamping survived; "dev" here means the stamp path broke.
-          # TAG goes through env, not `${{ }}` interpolation into the script.
+          # TAG goes through env, not expression interpolation into the script.
+          # Never write the expression opener in a comment here: GitHub parses
+          # it inside run: blocks, and the whole file then fails to load.
           chmod +x dist/erpc-linux-amd64
           OUT=$(./dist/erpc-linux-amd64 --version)
           echo "$OUT"
