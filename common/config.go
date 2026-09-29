@@ -859,6 +859,7 @@ type NetworkDefaults struct {
 	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm" tstype:"TsSvmNetworkConfigForDefaults"`
 	Multiplexing      *bool                    `yaml:"multiplexing,omitempty" json:"multiplexing"`
 	Failover          *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
+	CacheKeySuffix    string                   `yaml:"cacheKeySuffix,omitempty" json:"cacheKeySuffix"`
 }
 
 // FailoverConfig controls within-request escalation to the fallback
@@ -2553,6 +2554,11 @@ type NetworkConfig struct {
 	// config and cache key. One shared field, rather than one config block per
 	// chain, is what keeps adding a chain a config exercise.
 	Chain string `yaml:"chain,omitempty" json:"chain,omitempty"`
+
+	// CacheKeySuffix, when set, is inserted into the JSON-RPC cache partition
+	// key as {networkId}:{suffix}:{blockRef} so two networks that share a
+	// chainId (and a Redis) do not collide. Empty keeps {networkId}:{blockRef}.
+	CacheKeySuffix string `yaml:"cacheKeySuffix,omitempty" json:"cacheKeySuffix"`
 }
 
 // StaticResponseConfig declares a canned JSON-RPC response for a specific
@@ -3412,6 +3418,15 @@ type RateLimitStoreConfig struct {
 	Redis          *RedisConnectorConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
 	CacheKeyPrefix string                `yaml:"cacheKeyPrefix,omitempty" json:"cacheKeyPrefix"`
 	NearLimitRatio float32               `yaml:"nearLimitRatio,omitempty" json:"nearLimitRatio"`
+}
+
+// CachePartitionKey builds the JSON-RPC cache partition key.
+// Empty suffix keeps {networkId}:{ref}; a set suffix yields {networkId}:{suffix}:{ref}.
+func CachePartitionKey(networkId, suffix, ref string) string {
+	if suffix == "" {
+		return networkId + ":" + ref
+	}
+	return networkId + ":" + suffix + ":" + ref
 }
 
 func (c *NetworkConfig) NetworkId() string {
