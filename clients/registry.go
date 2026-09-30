@@ -147,9 +147,10 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					cerr = fmt.Errorf("failed to create WebSocket client for upstream %v: %w", cfg.Id, cerr)
 				}
 			case "grpc", "grpc+bds":
-				grpcPoolSize := 0
+				grpcPoolSize, grpcHealthCheckService := 0, ""
 				if cfg.Grpc != nil {
 					grpcPoolSize = cfg.Grpc.PoolSize
+					grpcHealthCheckService = cfg.Grpc.HealthCheckService
 				}
 				c, cerr = NewGrpcBdsClient(
 					appCtx,
@@ -158,6 +159,7 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					ups,
 					parsedUrl,
 					grpcPoolSize,
+					grpcHealthCheckService,
 				)
 				if cerr != nil {
 					cerr = fmt.Errorf("failed to create gRPC BDS client for upstream: %v: %w", cfg.Id, cerr)

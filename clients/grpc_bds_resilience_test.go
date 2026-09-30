@@ -91,7 +91,7 @@ func TestGrpcBdsClient_HardTimeoutFreesGoroutineWithinCap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	// Join the pool maintainer before the test returns; see newTestClient.
 	t.Cleanup(client.(*GenericGrpcBdsClient).pool.Shutdown)
@@ -153,7 +153,7 @@ func TestGrpcBdsClient_WatchdogReplacesWedgedConn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
 	t.Cleanup(gen.pool.Shutdown)
@@ -197,7 +197,7 @@ func TestGrpcBdsClient_WatchdogIgnoresCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
 	t.Cleanup(gen.pool.Shutdown)
@@ -242,7 +242,7 @@ func TestGrpcBdsClient_WatchdogIgnoresCallerDynamicTimeoutCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	gen := client.(*GenericGrpcBdsClient)
 	t.Cleanup(gen.pool.Shutdown)

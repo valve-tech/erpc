@@ -109,7 +109,7 @@ func TestGrpcBdsClientAppliesUpstreamGrpcHeaders(t *testing.T) {
 		},
 	}))
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", ups, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", ups, parsedURL, 0, "")
 	require.NoError(t, err)
 
 	gc, ok := client.(*GenericGrpcBdsClient)
@@ -130,7 +130,7 @@ func TestGrpcBdsClientNilUpstreamNoHeaders(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 
 	gc, ok := client.(*GenericGrpcBdsClient)
@@ -146,7 +146,7 @@ func TestGrpcBdsClientQueryMethodsDoNotShortCircuit(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	t.Cleanup(client.(*GenericGrpcBdsClient).pool.Shutdown)
 

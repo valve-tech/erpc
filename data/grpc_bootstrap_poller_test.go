@@ -45,7 +45,7 @@ func dialFake(t *testing.T, addr string) clients.GrpcBdsClient {
 	lg := zerolog.Nop()
 	parsed, err := url.Parse("grpc://" + addr)
 	require.NoError(t, err)
-	cli, err := clients.NewGrpcBdsClient(ctx, &lg, "<cache>", nil, parsed, 1)
+	cli, err := clients.NewGrpcBdsClient(ctx, &lg, "<cache>", nil, parsed, 1, "")
 	require.NoError(t, err)
 	return cli
 }
