@@ -351,8 +351,8 @@ func (a *consensusAnalysis) getBestEmpty() *responseGroup {
 // A group only qualifies when it actually holds an error. An
 // infrastructure-error group can hold none: classifyAndHashResponse files a
 // participant that produced no readable payload and no failure under
-// ResponseTypeInfrastructureError, and the grouping loop sets FirstError only
-// from a member whose Err is set. The single caller returns FirstError to the
+// ResponseTypeInfrastructureError, and the grouping loop sets RepresentativeError only
+// from a member whose Err is set. The single caller returns RepresentativeError to the
 // client, so an error-free group here becomes an empty body with no
 // explanation. Skipping such a group lets the caller either serve a real error
 // from a smaller group or fall through to its low-participants branch.
@@ -360,7 +360,7 @@ func (a *consensusAnalysis) getBestError() *responseGroup {
 	if a.cachedBestError == nil {
 		var best *responseGroup
 		for _, group := range a.groups {
-			if group.FirstError == nil {
+			if group.RepresentativeError == nil {
 				continue
 			}
 			if group.ResponseType == ResponseTypeConsensusError || group.ResponseType == ResponseTypeInfrastructureError {
