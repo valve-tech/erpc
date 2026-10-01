@@ -552,6 +552,26 @@ func pagedNodesServer(t *testing.T, pages int) (*httptest.Server, func() int) {
 		if page == 0 {
 			page = 1
 		}
+		// The server sees a new connection's StateNew before it sees the
+		// previous one's StateClosed, even when the client closed the old body
+		// first. Give a closed connection a moment to be reported, then sample.
+		// A client that holds its bodies open never settles, so the sample
+		// still shows one connection per page.
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			settled := open <= 1
+			mu.Unlock()
+			if settled {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		mu.Lock()
+		if open > maxOpen {
+			maxOpen = open
+		}
+		mu.Unlock()
 		next := "null"
 		if page < pages {
 			next = fmt.Sprintf(`"%s/?page=%d"`, srv.URL, page+1)
@@ -573,9 +593,6 @@ func pagedNodesServer(t *testing.T, pages int) (*httptest.Server, func() int) {
 		switch s {
 		case http.StateNew:
 			open++
-			if open > maxOpen {
-				maxOpen = open
-			}
 		case http.StateClosed, http.StateHijacked:
 			open--
 		}
@@ -608,12 +625,11 @@ func TestChainstackFetchNodes_ReleasesEachPageBeforeTheNextRequest(t *testing.T)
 
 	require.NoError(t, err)
 	assert.Len(t, nodes, pages, "the walk must collect every page")
-	// The bound is 2, not 1. The decoder stops before the padding, so Go
-	// cannot return the connection to its pool and closes the socket instead.
-	// The server's ConnState hook can see the next StateNew before it sees
-	// that StateClosed, which shows up as a second connection. What matters
-	// is that the count stays flat: leave the close to the end of the walk
-	// and it becomes `pages`.
-	assert.LessOrEqual(t, maxOpen(), 2,
+	// The decoder stops before the padding, so Go cannot return the connection
+	// to its pool and closes the socket instead. The server samples the open
+	// count once per request, after giving the previous socket's close time to
+	// be reported, so the count is one when each page is closed in turn. Leave
+	// the close to the end of the walk and it becomes `pages`.
+	assert.LessOrEqual(t, maxOpen(), 1,
 		"page N's body must close before page N+1 is requested; deferring the close to the end of the walk holds one connection per page")
 }
