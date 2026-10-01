@@ -62,7 +62,7 @@ export type ArchitectureHandler = any;
 // source: architecture_evm.go
 
 export const UpstreamTypeEvm: UpstreamType = "evm";
-export type EvmUpstream = 
+export type EvmUpstream =
     Upstream;
 /**
  * EvmStateProvenWriter is the OPTIONAL, separately-asserted surface the
@@ -148,7 +148,7 @@ export type SlotSharedVariable = any;
  * tiny sub-interface avoids committing the full Upstream struct to common/ and
  * parallels the existing EvmUpstream pattern.
  */
-export type SvmUpstream = 
+export type SvmUpstream =
     Upstream;
 /**
  * SvmStatePoller is the per-upstream slot/health tracker. Concrete type lives in
@@ -2525,14 +2525,14 @@ export type Network = any;
  * EvmHighestLatestBlockNumber / EvmHighestFinalizedBlockNumber / EvmLeaderUpstream
  * helpers below, which type-assert and degrade to zero-value on mismatch.
  */
-export type EvmNetwork = 
+export type EvmNetwork =
     Network;
 /**
  * SvmNetwork is the SVM-specific view of a Network. Production Network
  * implementations satisfy this automatically when the underlying network is
  * SVM; EVM networks correctly fail the assertion.
  */
-export type SvmNetwork = 
+export type SvmNetwork =
     Network;
 export type QuantileTracker = any;
 export type TrackedMetrics = any;

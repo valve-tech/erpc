@@ -100,10 +100,10 @@ Concretely, for every design and review in this repo:
    util.ResetGock()
    defer util.ResetGock()
    util.SetupMocksForEvmStatePoller()
-   
+
    // Set up your test-specific mocks here
    gock.New("http://rpc1.localhost")...
-   
+
    // THEN initialize network/services
    network := setupTestNetwork(t, ctx, ...)
    ```
@@ -221,7 +221,7 @@ Concretely, for every design and review in this repo:
   // ✅ GOOD: Simple, readable mocks
   gock.New(url).Post("").Times(1).Reply(200).JSON(response1)
   gock.New(url).Post("").Times(1).Reply(200).JSON(response2)
-  
+
   // ❌ AVOID: Complex body generation functions
   ```
 
