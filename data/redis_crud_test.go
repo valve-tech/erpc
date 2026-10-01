@@ -94,7 +94,8 @@ func TestRedisConnector_Delete(t *testing.T) {
 func TestRedisConnector_DeleteRemovesReverseIndex(t *testing.T) {
 	ctx, connector, m := newReadyRedisConnector(t, "redis-delete-rvi")
 
-	require.NoError(t, connector.Set(ctx, "evm:123:0x7b", "eth_getBlockByNumber", []byte("block-body"), nil))
+	rvCtx := WithReverseIndex(ctx, "evm:123", "")
+	require.NoError(t, connector.Set(rvCtx, "evm:123:0x7b", "eth_getBlockByNumber", []byte("block-body"), nil))
 
 	reverseKey := fmt.Sprintf("%s#evm:123:*#eth_getBlockByNumber", redisReverseIndexPrefix)
 	require.True(t, m.Exists(reverseKey), "the reverse index entry must exist before the delete")
@@ -104,7 +105,7 @@ func TestRedisConnector_DeleteRemovesReverseIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("block-body"), resolved)
 
-	require.NoError(t, connector.Delete(ctx, "evm:123:0x7b", "eth_getBlockByNumber"))
+	require.NoError(t, connector.Delete(rvCtx, "evm:123:0x7b", "eth_getBlockByNumber"))
 
 	assert.False(t, m.Exists(reverseKey), "the reverse index entry must be deleted with its record")
 	assert.False(t, m.Exists("evm:123:0x7b:eth_getBlockByNumber"), "the record itself must be deleted")
@@ -120,7 +121,7 @@ func TestRedisConnector_DeleteRemovesReverseIndex(t *testing.T) {
 func TestRedisConnector_DeleteLeavesUnrelatedReverseIndexAlone(t *testing.T) {
 	ctx, connector, m := newReadyRedisConnector(t, "redis-delete-plain")
 
-	require.NoError(t, connector.Set(ctx, "evm:123:0x7b", "m", []byte("with-index"), nil))
+	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:123", ""), "evm:123:0x7b", "m", []byte("with-index"), nil))
 	require.NoError(t, connector.Set(ctx, "plainkey", "m", []byte("no-index"), nil))
 
 	evmReverse := fmt.Sprintf("%s#evm:123:*#m", redisReverseIndexPrefix)
@@ -165,8 +166,8 @@ func TestRedisConnector_List(t *testing.T) {
 func TestRedisConnector_ListReverseIndex(t *testing.T) {
 	ctx, connector, _ := newReadyRedisConnector(t, "redis-list-rvi")
 
-	require.NoError(t, connector.Set(ctx, "evm:1:0x10", "eth_getBlockByNumber", []byte("b1"), nil))
-	require.NoError(t, connector.Set(ctx, "evm:2:0x20", "eth_getBlockByNumber", []byte("b2"), nil))
+	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:1", ""), "evm:1:0x10", "eth_getBlockByNumber", []byte("b1"), nil))
+	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:2", ""), "evm:2:0x20", "eth_getBlockByNumber", []byte("b2"), nil))
 	require.NoError(t, connector.Set(ctx, "plainkey", "m", []byte("no-index"), nil))
 
 	results, _, err := connector.List(ctx, ConnectorReverseIndex, 100, "")

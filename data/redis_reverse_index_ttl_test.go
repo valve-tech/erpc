@@ -70,7 +70,7 @@ func TestRedisReverseIndexTTL_DetectsAnExpiredTarget(t *testing.T) {
 	concretePartitionKey := "evm:123:latest"
 	wildcardPartitionKey := "evm:123:*"
 
-	require.NoError(t, connector.Set(ctx, concretePartitionKey, rangeKey, []byte("tx-receipt-value"), nil))
+	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:123", ""), concretePartitionKey, rangeKey, []byte("tx-receipt-value"), nil))
 
 	// The control: while the target is present, the lookup resolves and the
 	// value comes back.
