@@ -11,11 +11,11 @@ import (
 // A participant can produce a response that carries neither a result nor an
 // error: `inner` returned (nil, nil). classifyAndHashResponse files it under
 // ResponseTypeInfrastructureError with the hash "error:generic", but the group
-// it lands in has no FirstError, because nothing failed. Two consensus rules
-// read FirstError off such a group and both are reached from real
+// it lands in has no RepresentativeError, because nothing failed. Two consensus rules
+// read RepresentativeError off such a group and both are reached from real
 // configurations, so this file pins what each one serves.
 //
-// Every other consensus rule reads FirstError only after its condition proved
+// Every other consensus rule reads RepresentativeError only after its condition proved
 // a real error exists.
 
 // emptyResult builds the response an inner function produces when it returns

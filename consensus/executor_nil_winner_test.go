@@ -18,7 +18,7 @@ import (
 // JSON-RPC payload and no error. classifyAndHashResponse has a branch for it
 // (analysis.go, "Successful response" -> jr == nil): it files the response
 // under ResponseTypeInfrastructureError with the hash "error:generic". The
-// group that response lands in holds no FirstError, because nothing failed.
+// group that response lands in holds no RepresentativeError, because nothing failed.
 //
 // getBestError ranked such a group alongside the groups that DO hold an error.
 // When the error-free group won the ranking, the low-participants +
@@ -39,7 +39,7 @@ import (
 // exactly like an absent one. The read now reports ErrResponseReleased. The
 // bug-69 shape survives, because resultToJsonRpcResponse (analysis.go) drops
 // the error and passes the nil payload straight to classifyAndHashResponse,
-// which files it under ResponseTypeInfrastructureError with no FirstError.
+// which files it under ResponseTypeInfrastructureError with no RepresentativeError.
 func unreadableResponse(t *testing.T) *common.NormalizedResponse {
 	t.Helper()
 	r := common.NewNormalizedResponse().WithBody(
@@ -63,7 +63,7 @@ func unreadableResponse(t *testing.T) *common.NormalizedResponse {
 // error-free infrastructure group of count 2. Two more revert with different
 // codes, so they form two consensus-valid groups of count 1 each and no group
 // leads uniquely. getBestError used to pick the count-2 group and read its nil
-// FirstError.
+// RepresentativeError.
 //
 // Run must answer with an error. An error the operator can read beats a silent
 // nil, and this round really did see reverts, so a revert is the honest answer.
