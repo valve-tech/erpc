@@ -108,6 +108,14 @@ type CounterInt64State struct {
 // promises, and it exists for the response cache, which knows a network but not
 // the block ref it wants.
 //
+// Memory and Redis do not derive the pointer's wildcard from the partition key
+// (a ref may itself contain ':', and a cacheKeySuffix adds another segment).
+// The caller supplies it on the context via WithReverseIndex(ctx, networkId,
+// suffix) — the same CachePartitionKey(networkId, suffix, "*") that a wildcard
+// Get uses. Set and Delete must both be given the same context value: a Set
+// without it writes no pointer, and a Delete without it leaves the pointer
+// behind.
+//
 // PostgreSQL additionally expands "*" anywhere in either key into a SQL LIKE
 // pattern. Treat that as a driver detail, not as contract. New code must not
 // depend on it. One existing caller does — see ConnectorApiKeyRangeKey — and
