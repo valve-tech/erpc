@@ -1,0 +1,33 @@
+# Dev CI on the self-hosted GitLab. Mirrors the unit-test job of
+# .github/workflows/test.yml (upstream runs `make test-fast`; this runs
+# plain vet + test, sized for slow untagged shared runners).
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - when: never
+
+default:
+  image: golang:1.25.1
+
+variables:
+  GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
+  GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+
+cache:
+  key:
+    files:
+      - go.sum
+  paths:
+    - .cache/go-mod
+    - .cache/go-build
+
+test:
+  timeout: 1h
+  before_script:
+    # valvebilling tests need a real redis-server (see test.yml).
+    - apt-get update -qq && apt-get install -y -qq redis-server
+  script:
+    - go vet ./...
+    - go test -p 2 -count 1 -parallel 2 -timeout 30m ./...
