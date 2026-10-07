@@ -554,6 +554,33 @@ func TestRule_PreferNonEmptyOverAgreedNothing(t *testing.T) {
 		requireRule(t, a, nonEmptyOverAgreedDesc, 0)
 		assert.Contains(t, resultText(t, winnerOf(cfg, a)), "0xaa")
 	})
+
+	t.Run("an empty answer that only ties for the lead still loses", func(t *testing.T) {
+		// Three empty against three real. a.groups is a map, so
+		// getBestByCount picks either tied group at random. Pin the pick
+		// to the real group: the rule used to look only at that pick, so
+		// it stood down and a later rule served the empty answer about
+		// half the time.
+		cfg := *cfg
+		cfg.maxParticipants = 6
+		u4, u5, u6 := taggedUpstream("u4"), taggedUpstream("u5"), taggedUpstream("u6")
+		a := analyze(&cfg, []*execResult{
+			emptyResultFrom(t, u1, 0),
+			emptyResultFrom(t, u2, 1),
+			emptyResultFrom(t, u3, 2),
+			resultFrom(t, u4, "0xaa", 3),
+			resultFrom(t, u5, "0xaa", 4),
+			resultFrom(t, u6, "0xaa", 5),
+		})
+		for _, g := range a.groups {
+			if g.ResponseType == ResponseTypeNonEmpty {
+				a.cachedBestByCount = g
+			}
+		}
+
+		requireRule(t, a, nonEmptyOverAgreedDesc, 0)
+		assert.Contains(t, resultText(t, winnerOf(&cfg, a)), "0xaa")
+	})
 }
 
 const nonEmptyOverEmptyBelowDesc = "accept-most-common below threshold prefers non-empty over empty"

@@ -7551,3 +7551,35 @@ The deeper question, for an upstream report: the unknown-message fallthrough
 for a simulation method is "server fault", so every new client-side wording
 trips the breaker until someone adds a string. Upstream's #1173 (Monad
 "reserve balance violation") is the same shape, found the same way.
+
+## 192. `preferNonEmpty` loses a tie at random, and serves the empty answer
+
+**Status: FIXED in the fork.** `TestRule_PreferNonEmptyOverAgreedNothing/an_empty_answer_that_only_ties_for_the_lead_still_loses`
+(`consensus/rules_decision_test.go`) pins it. Upstream `main` at `7fe2b17d` has
+the same code. Not yet reported upstream.
+
+The rule "accept-most-common + prefer-non-empty" (`consensus/rules.go`) fires
+only when the group that `getBestByCount()` returns is empty or a consensus
+error. `getBestByCount()` (`consensus/analysis.go`) walks `a.groups`, which is a
+Go map, and keeps the first group with the highest count. When an empty group
+and a non-empty group tie, the map's iteration order picks the leader at
+random.
+
+If the pick is the non-empty group, the rule stands down. The next rule,
+"consensus on result or error achieved if there is a valid group that meets the
+agreement threshold", also walks the map, so it serves the empty group about
+half the time. The client gets `[]` or `null`, although `preferNonEmpty` is on
+and as many upstreams returned the data.
+
+A tie needs every response to arrive before an early exit, so slow upstreams
+make it likely. It surfaced as a flaky
+`TestConsensusPolicy/prefer_non_empty_when_both_groups_above_threshold` on a
+loaded CI runner (GitLab pipeline 3116): expected `"0x33"`, got `[]`. A forced
+3–3 tie failed 6 of 40 runs before the fix and 0 of 40 after.
+
+The fork fix makes the rule look at every group that ties for the lead, not at
+the one random pick. It fires when any empty or consensus-error group ties for
+the lead at or above the threshold while a non-empty group exists.
+
+**Open:** the "valid group meets threshold" rule has the same random tie-break
+when two different non-empty groups tie. The fork does not change it here.
