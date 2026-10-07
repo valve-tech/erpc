@@ -30,6 +30,14 @@
 # docs/superpowers/specs/2026-07-25-multiarch-release-pipeline.md in the
 # monorepo.)
 #
+# Container image: the `image` job also publishes ghcr.io/valve-tech/erpc, a
+# linux/amd64 + linux/arm64 manifest list assembled from the linux binaries
+# above (Dockerfile.valve just COPYs them; no QEMU, no recompile). It is
+# tagged with the valve-* tag, its manifest digest goes in the job summary and
+# the release asset erpc-image-digest.txt, and it carries a build-provenance
+# attestation. A workflow_dispatch run builds the image but never pushes it.
+# After the first publish the ghcr package must be made public by hand.
+#
 # Triggered only by pushing a tag, or by hand. Never on push-to-main — a
 # release is a deliberate act.
 name: valve-release
@@ -45,11 +53,15 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
     steps:
       # Validate BEFORE the tag reaches `checkout`'s ref: or any run: block.
       # workflow_dispatch input is attacker-controlled in the general case
@@ -78,13 +90,13 @@ jobs:
           esac
           printf 'tag=%s\n' "$RAW_TAG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Safe: validated against the allowlist above.
           ref: ${{ steps.vars.outputs.tag }}
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.25.x'
           cache: true
@@ -135,8 +147,18 @@ jobs:
           set -euo pipefail
           cd dist && sha256sum erpc-* > SHA256SUMS && cat SHA256SUMS
 
+      - name: Keep the linux binaries for the image job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-binaries
+          path: |
+            dist/erpc-linux-amd64
+            dist/erpc-linux-arm64
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.vars.outputs.tag }}
           files: |
@@ -152,3 +174,107 @@ jobs:
             ```
             sha256sum -c SHA256SUMS --ignore-missing
             ```
+
+  # Multi-arch container image from the binaries the build job produced.
+  # Push only for a real tag push; a manual dispatch builds and discards.
+  image:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/valve-tech/erpc
+      PUSH: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Validated by the build job's allowlist.
+          ref: ${{ needs.build.outputs.tag }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: linux-binaries
+          path: imgctx
+
+      - name: Stage the Dockerfile in the build context
+        run: cp Dockerfile.valve imgctx/Dockerfile
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.PUSH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on a tag) the multi-arch image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: imgctx
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.build.outputs.tag }}
+          # Provenance is the GitHub attestation below; BuildKit's own would
+          # add attestation manifests to the index and change what the digest
+          # names.
+          provenance: false
+          sbom: false
+
+      - name: Attest build provenance
+        if: env.PUSH == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Write the digest where jumpgate can pin it
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" | tee erpc-image-digest.txt
+          {
+            echo "### eRPC image ($TAG)"
+            echo
+            echo "pushed: $PUSH"
+            echo
+            echo '```'
+            cat erpc-image-digest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-digest
+          path: erpc-image-digest.txt
+
+  # Own job so the token that can write releases never sits beside the one
+  # that can write packages.
+  image-digest-asset:
+    needs: [build, image]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-digest
+      - name: Attach erpc-image-digest.txt to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: gh release upload "$TAG" erpc-image-digest.txt --clobber --repo "$GITHUB_REPOSITORY"

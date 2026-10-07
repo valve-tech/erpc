@@ -1,0 +1,28 @@
+# Valve release image. Used only by .github/workflows/valve-release.yml.
+#
+# It COPIES the static linux binaries that workflow already built and
+# smoke-tested; nothing is compiled here. Upstream's own Dockerfile is left
+# alone (it recompiles and pulls in the TS toolchain).
+#
+# Runtime contract, kept identical to the image jumpgate builds today from
+# upstream's Dockerfile, so a local build can be swapped for a digest pull
+# with no other change:
+#   - base: the same distroless static nonroot (uid 65532, CA certs, no shell)
+#   - /erpc-server, run as CMD with NO ENTRYPOINT (jumpgate appends no args;
+#     any arg after the image ref would replace CMD)
+#   - config: bind-mounted at /erpc.yaml, which erpc probes by default
+#   - EXPOSE 4000 (RPC) 4001 (metrics) 6060
+#   - no HEALTHCHECK (there is no shell or curl to run one)
+# Not carried over: the pprof binary and the /typescript + /node_modules
+# trees (only needed for erpc.ts/erpc.js configs; jumpgate renders YAML).
+#
+# Build context is the directory holding erpc-linux-amd64 and
+# erpc-linux-arm64:  docker buildx build -f Dockerfile.valve <ctxdir>
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+
+ARG TARGETARCH
+COPY --chmod=0755 erpc-linux-${TARGETARCH} /erpc-server
+
+EXPOSE 4000 4001 6060
+
+CMD ["/erpc-server"]
