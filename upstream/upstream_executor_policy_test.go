@@ -410,3 +410,17 @@ func TestUpstreamExecutor_StringDescribesTheConfiguredPolicies(t *testing.T) {
 		"upstreamExecutor{method=eth_get*,finalities=[finalized],retry=3,cb=true,hedge=2}",
 		e.String())
 }
+
+func TestShouldRetry_AnErrorNoNodeCanFixIsNotRetriedOnTheSameNode(t *testing.T) {
+	// The normalizer marks an error retryableTowardNetwork=false when no other
+	// node could answer differently. The same node cannot either, so a retry
+	// here only multiplies load.
+	e := newTestExecutor(t, &common.UpstreamFailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 3}})
+	req := requestFor(t, "eth_call")
+
+	generic := common.NewErrEndpointClientSideException(errors.New("invalid params"))
+	require.True(t, e.shouldRetry(req, nil, generic, 0), "sanity: an untagged client-side error still retries")
+
+	terminal := common.NewErrEndpointClientSideException(errors.New("invalid params")).WithRetryableTowardNetwork(false)
+	require.False(t, e.shouldRetry(req, nil, terminal, 0))
+}

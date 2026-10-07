@@ -21,6 +21,13 @@ func init() {
 // reth prints a revert as Debug text in the message and sends no "data" field.
 var rethRevertError = regexp.MustCompile(`RevertError \{ output: (?:Some\((0x[0-9a-fA-F]*)\)|None) \}`)
 
+// serdeDecodeRejection matches a serde_json decode failure, as reth (and any
+// Rust node) puts it in the "data" of a -32602. It needs both a serde phrase
+// and serde's "at line N column M" position, so a node-specific -32602 (a
+// range limit, an unsupported option) does not match and keeps its retry.
+var serdeDecodeRejection = regexp.MustCompile(
+	`(invalid (value|type|length)|missing field|unknown (variant|field)|duplicate field)\b.* at line \d+ column \d+`)
+
 func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *common.JsonRpcResponse, upstream common.Upstream) error {
 	if (jr != nil && jr.Error != nil) || r.StatusCode > 299 {
 		var details map[string]interface{} = make(map[string]interface{})
@@ -666,6 +673,19 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 					}
 				}
 			}
+		} else if code == -32602 && serdeDecodeRejection.MatchString(msg) {
+			// The node's JSON decoder rejected the request text itself (for
+			// example odd-length hex). Every node decodes the same bytes the
+			// same way, so no retry, on this node or another, can succeed.
+			return common.NewErrEndpointClientSideException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorInvalidArgument,
+					err.Message,
+					nil,
+					details,
+				),
+			).WithRetryableTowardNetwork(false)
 		} else if code == -32602 || code == -32600 {
 			// For generic invalid args/params errors, we retry.
 			return common.NewErrEndpointClientSideException(
