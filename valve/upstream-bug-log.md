@@ -7583,3 +7583,36 @@ the lead at or above the threshold while a non-empty group exists.
 
 **Open:** the "valid group meets threshold" rule has the same random tie-break
 when two different non-empty groups tie. The fork does not change it here.
+
+## 193. The consensus wait cap discards answers it already holds
+
+**Status: FIXED in the fork.** `TestNextResponse_DeliveredResponsesSurviveTheCap`
+and `TestNextResponse_NilDeliveryAfterTheCapIsReceived`
+(`consensus/wait_cap_test.go`) pin it. Upstream `main` at `7fe2b17d` has the
+same code. Not yet reported upstream.
+
+The collection loop in `consensus/executor.go` waited on one `select` with two
+cases: the participants' buffered `responseChan`, and the wait-cap timer
+(`maxWaitOnResult` or `maxWaitOnEmpty`). When the timer case won, the loop
+broke and resolved with the responses it had counted so far.
+
+Under load, the loop can reach that `select` after both cases are ready: the
+other participants have already written their answers, and the timer has
+expired. Go then picks a case at random. Picking the timer discarded answers
+the participants had already returned.
+
+The default `maxWaitOnResult` is the p50 latency, clamped to 5 ms–1 s
+(`common/defaults.go`), so a fast upstream set gets a 5 ms cap, and a short
+scheduler stall is enough. The client then gets a 200 response that carries
+`ErrConsensusLowParticipants`, although every upstream agreed. It surfaced as
+a flaky `TestHttpServer_EvmGetBlockByNumber/ShouldHandleSuccessfulConsensus`
+on a loaded CI runner (GitLab pipeline 3112): all three mocks returned the same
+block within about 4 ms, and consensus counted only the first. With a 30 ms
+delay forced into the loop after the first response, the test failed 23 of 40
+runs before the fix and 0 of 40 after.
+
+The fork fix moves the receive step into `nextResponse`. Once the cap has
+fired, it still takes every response already in the channel, and stops only
+when none is in hand. A response that lands just after the deadline can
+therefore still count, if the loop is slow to get to it. That answer is
+already in hand, so counting it costs nothing.
