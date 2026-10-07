@@ -36,12 +36,9 @@ test:
     # found" (pipeline 3059). Skip exactly those tests, by name: a new
     # container test still fails here, loudly, until someone adds it.
     # .github/workflows/test.yml has Docker and runs all of them.
-    # -p 1 -parallel 1: the erpc tests share gock's process-global mock and
-    # some are timing-sensitive. With -p 2 -parallel 2, pipeline 3112 failed
-    # three different erpc tests in two runs on Go code that 3111 passed.
     - |
       CONTAINER_TESTS='^(TestDynamoDBConnector_CRUD|TestDynamoDBConnectorInitialization|TestDynamoDBConnectorReverseIndex|TestDynamoDBDistributedLocking|TestPostgreConnectorInitialization|TestPostgreSQLDistributedLocking|TestPostgreSQLConnector_CRUD|TestPostgreSQLConnector_DatabasePaths|TestPostgreSQLConnector_SchemaAndListenerPaths|TestPostgreSQLConnector_MigratesALegacyTextValueColumn|TestPostgreSQLConnector_UnusableTableNameFailsAtStartup|TestPostgreSQLConnector_LockAndUnlockFailurePaths|TestPostgreSQLConnector_WatchCounterInt64_ReleasesTheListenerConnection|TestPostgreSQLConnector_WatchCounterInt64_AListenerSurvivesItsFirstWatcher|TestPostgreSQLConnector_Reconnect|TestPostgreSQLConnector_WatchCleanupLeaksItsFallbackPoller|TestRedisConnector_ListPaginatesOnRealRedis|TestRedisConnector_ApiKeyAddressRoundTripsOnRealRedis|TestRedisPubSubManager_Reconnect|TestEvmJsonRpcCache_DynamoDB|TestEvmJsonRpcCache_Redis)$'
-      go test -p 1 -count 1 -parallel 1 -timeout 30m -skip "$CONTAINER_TESTS" ./...
+      go test -p 2 -count 1 -parallel 2 -timeout 30m -skip "$CONTAINER_TESTS" ./...
     # The two *Initialization tests above also hold a subtest that needs no
     # container. -skip cannot drop one subtest without its siblings, so run
     # those siblings here.
