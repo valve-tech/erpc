@@ -46,6 +46,8 @@ on:
   push:
     tags:
       - 'valve-*'
+      # Version tags, such as 0.3.0.2-valve.
+      - '[0-9]*-valve'
   workflow_dispatch:
     inputs:
       tag:
@@ -67,7 +69,8 @@ jobs:
       # workflow_dispatch input is attacker-controlled in the general case
       # (here only by write-access users, but the cost of pinning it is zero),
       # and an unvalidated value in `ref:` is a ref-injection primitive.
-      # Anchored allowlist: this fork's releases are always `valve-*`.
+      # Anchored allowlist: this fork's releases are `valve-*` or a version
+      # tag `<digits...>-valve`, such as 0.3.0.2-valve.
       - name: Validate tag input
         id: vars
         env:
@@ -81,7 +84,8 @@ jobs:
           # character outside the allowed class anywhere in the string.
           case "$RAW_TAG" in
             valve-?*) ;;
-            *) echo "::error::refusing tag '$RAW_TAG' — must start with 'valve-'"; exit 1 ;;
+            [0-9]*-valve) ;;
+            *) echo "::error::refusing tag '$RAW_TAG' — must start with 'valve-' or be a version tag ending in '-valve'"; exit 1 ;;
           esac
           case "$RAW_TAG" in
             *[!A-Za-z0-9._-]*)
