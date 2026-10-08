@@ -7556,7 +7556,8 @@ trips the breaker until someone adds a string. Upstream's #1173 (Monad
 
 **Status: FIXED in the fork.** `TestRule_PreferNonEmptyOverAgreedNothing/an_empty_answer_that_only_ties_for_the_lead_still_loses`
 (`consensus/rules_decision_test.go`) pins it. Upstream `main` at `7fe2b17d` has
-the same code. Not yet reported upstream.
+the same code. Reported upstream as erpc/erpc#1215 (2026-10-08), fix
+proposed in erpc/erpc#1217.
 
 The rule "accept-most-common + prefer-non-empty" (`consensus/rules.go`) fires
 only when the group that `getBestByCount()` returns is empty or a consensus
@@ -7589,7 +7590,8 @@ when two different non-empty groups tie. The fork does not change it here.
 **Status: FIXED in the fork.** `TestNextResponse_DeliveredResponsesSurviveTheCap`
 and `TestNextResponse_NilDeliveryAfterTheCapIsReceived`
 (`consensus/wait_cap_test.go`) pin it. Upstream `main` at `7fe2b17d` has the
-same code. Not yet reported upstream.
+same code. Reported upstream as erpc/erpc#1216 (2026-10-08), fix proposed in
+erpc/erpc#1218.
 
 The collection loop in `consensus/executor.go` waited on one `select` with two
 cases: the participants' buffered `responseChan`, and the wait-cap timer
