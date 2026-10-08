@@ -21,12 +21,26 @@ func init() {
 // reth prints a revert as Debug text in the message and sends no "data" field.
 var rethRevertError = regexp.MustCompile(`RevertError \{ output: (?:Some\((0x[0-9a-fA-F]*)\)|None) \}`)
 
-// serdeDecodeRejection matches a serde_json decode failure, as reth (and any
-// Rust node) puts it in the "data" of a -32602. It needs both a serde phrase
-// and serde's "at line N column M" position, so a node-specific -32602 (a
-// range limit, an unsupported option) does not match and keeps its retry.
+// serdeDecodeRejection matches the serde_json decode failures reth puts in
+// the "data" of a -32602 when the request text itself is malformed, such as
+// odd-length hex or a wrong-length address. It is anchored at both ends and
+// needs serde's "at line N column M" position.
+//
+// It covers only the shapes production has shown. "invalid type", "missing
+// field" and "unknown variant/field" stay out on purpose: they depend on the
+// node's decoder version or vendor. An older reth rejects a field a newer one
+// accepts, and Envio rejects a block object other nodes accept. Those keep
+// their failover.
 var serdeDecodeRejection = regexp.MustCompile(
-	`(invalid (value|type|length)|missing field|unknown (variant|field)|duplicate field)\b.* at line \d+ column \d+`)
+	`^invalid (value|length)\b.* at line \d+ column \d+$`)
+
+// isDecodeRejection reports whether a -32602's "data" is a serde decode
+// failure of the request text. It reads "data" only, and only as a string:
+// the message, or a structured data object, never makes a -32602 final.
+func isDecodeRejection(data interface{}) bool {
+	s, ok := data.(string)
+	return ok && serdeDecodeRejection.MatchString(s)
+}
 
 func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *common.JsonRpcResponse, upstream common.Upstream) error {
 	if (jr != nil && jr.Error != nil) || r.StatusCode > 299 {
@@ -673,7 +687,7 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 					}
 				}
 			}
-		} else if code == -32602 && serdeDecodeRejection.MatchString(msg) {
+		} else if code == -32602 && isDecodeRejection(err.Data) {
 			// The node's JSON decoder rejected the request text itself (for
 			// example odd-length hex). Every node decodes the same bytes the
 			// same way, so no retry, on this node or another, can succeed.

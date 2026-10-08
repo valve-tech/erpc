@@ -20,10 +20,7 @@ func TestExtractJsonRpcError_ADecoderRejectionIsNotRetried(t *testing.T) {
 		data string
 	}{
 		{"odd-length hex (reth, live 2026-10-07)", `invalid value: string "0x70a082310", expected a valid hex string at line 1 column 72`},
-		{"wrong type", `invalid type: integer ` + "`5`" + `, expected a string at line 1 column 9`},
 		{"wrong length", `invalid length 19, expected a 20 byte address at line 1 column 50`},
-		{"missing field", `missing field ` + "`to`" + ` at line 1 column 30`},
-		{"unknown variant", `unknown variant ` + "`foo`" + `, expected one of ` + "`latest`" + ` at line 1 column 12`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +44,17 @@ func TestExtractJsonRpcError_ANodeSpecificInvalidParamsKeepsItsRetry(t *testing.
 		{"bare invalid params", "Invalid params", nil},
 		{"range limit worded as params", "Invalid params", "block range exceeds the node's limit of 1000"},
 		{"position without a decoder phrase", "Invalid params", "something at line 1 column 3"},
+		// Version skew: an older reth does not know a field or a tx type a
+		// newer node accepts. The error reads like a decoder rejection, but
+		// another node can serve the request, so it must fail over.
+		{"version skew: unknown field", "Invalid params", `unknown field ` + "`authorizationList`" + `, expected one of ` + "`from`, `to`" + ` at line 1 column 120`},
+		{"version skew: unknown variant", "Invalid params", `unknown variant ` + "`0x4`" + `, expected one of ` + "`0x0`, `0x1`, `0x2`" + ` at line 1 column 88`},
+		{"missing field", "Invalid params", `missing field ` + "`to`" + ` at line 1 column 30`},
+		{"wrong type", "Invalid params", `invalid type: integer ` + "`5`" + `, expected a string at line 1 column 9`},
+		// The rule reads "data" only, and only as a string.
+		{"decoder phrase in the message only", `invalid value: string "0x1", expected a valid hex string at line 1 column 72`, nil},
+		{"decoder phrase inside a data object", "Invalid params", map[string]interface{}{"reason": `invalid value: string "0x1", expected a valid hex string at line 1 column 72`}},
+		{"decoder phrase not at the start of data", "Invalid params", `upstream said: invalid value: string "0x1" at line 1 column 72`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
