@@ -1335,7 +1335,8 @@ the length of the walk.
 **Corroborated independently — see 144**, which adds the proof that the discard
 is guaranteed rather than likely.
 
-**Status: FIXED in the fork.** Upstream still carries it. **Severity was:
+**Status: FIXED in the fork.** Upstream still carries it; reported as erpc/erpc#1225,
+fix proposed in erpc/erpc#1226. **Severity was:
 high.** Verified under `-race`. An operator lost the "my policy is too slow"
 signal completely, and the `internal/policy/stdlib` suite flaked because of it.
 
@@ -7625,7 +7626,8 @@ already in hand, so counting it costs nothing.
 and `TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing`
 (`internal/policy/slot_eval_timeout_test.go`) pin it. Reported to this log as
 "bug 196"; no 194 or 195 existed on staging when it was written, so it takes
-the next free number.
+the next free number. Reported upstream together with entry 46 as
+erpc/erpc#1225, fix proposed in erpc/erpc#1226.
 
 The fork caused this, in its fix for entries 46 and 144 (`8ad1b4cf`). That fix
 made a timed-out eval keep the previous cache and discard the late result. Once
