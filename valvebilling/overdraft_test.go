@@ -168,8 +168,14 @@ func (b overdraftBurst) codeSummary() string {
 	return out
 }
 
-// saturate fires workers*perWorker authorizations concurrently and reports
-// what got through.
+// saturate fires up to workers*perWorker authorizations concurrently and
+// reports what got through.
+//
+// A worker stops at its first rejection. Inside one bucket window that loses
+// nothing: the bucket and the per-second counters only grow until they expire,
+// so every later request from that worker in the same window is refused too.
+// Those requests carry no information, but on a slow runner they stretch the
+// burst past the 2-second TTL, and then the burst measures two windows.
 //
 // keyIDs lets a caller spread the requests over several API keys on the SAME
 // account, which is how the per-key rate gate is told apart from the
@@ -198,14 +204,14 @@ func overdraftSaturate(t *testing.T, rdb *redis.Client, in AuthorizeInput, worke
 					firstErr.CompareAndSwap(nil, err)
 					return
 				}
-				if v.OK() {
-					atomic.AddInt64(&approved, 1)
-				} else {
-					atomic.AddInt64(&rejected, 1)
-				}
 				mu.Lock()
 				codes[v.Code]++
 				mu.Unlock()
+				if !v.OK() {
+					atomic.AddInt64(&rejected, 1)
+					return
+				}
+				atomic.AddInt64(&approved, 1)
 			}
 		}(w)
 	}
@@ -246,6 +252,40 @@ func requireOneOverdraftWindow(t *testing.T, b overdraftBurst) {
 		b.elapsed)
 }
 
+// overdraftWindowAttempts is how many bursts overdraftSaturateOneWindow fires
+// before it gives up. A burst that straddles an expiry measured two windows,
+// so it is discarded and fired again; it is never asserted on.
+const overdraftWindowAttempts = 5
+
+// overdraftSaturateOneWindow runs overdraftSaturate on a fresh account holding
+// balance credits and returns the first burst that stayed inside one bucket
+// lifetime.
+//
+// The bucket's window is a Redis TTL, so where it falls is a property of the
+// server's clock and of how fast this process runs, not of the code under
+// test. On a starved runner a burst can take longer than the 2-second TTL.
+// requireOneOverdraftWindow detects that exactly, so a straddled burst is
+// thrown away and the account is reset and burst again. Every assertion is
+// still made on a single, complete window. A machine too slow to fit one burst
+// in 2 seconds in overdraftWindowAttempts tries still fails.
+func overdraftSaturateOneWindow(t *testing.T, rdb *redis.Client, balance int64, in AuthorizeInput, workers, perWorker int, keyIDs []string) overdraftBurst {
+	t.Helper()
+	ctx := context.Background()
+	var b overdraftBurst
+	for attempt := 1; attempt <= overdraftWindowAttempts; attempt++ {
+		require.NoError(t, rdb.FlushAll(ctx).Err())
+		seedOverdraftBalance(t, rdb, balance)
+		b = overdraftSaturate(t, rdb, in, workers, perWorker, keyIDs)
+		if b.credits == b.bucket {
+			return b
+		}
+		t.Logf("attempt %d straddled a bucket expiry (took %v, credits=%d bucket=%d); starting over",
+			attempt, b.elapsed, b.credits, b.bucket)
+	}
+	requireOneOverdraftWindow(t, b)
+	return b
+}
+
 // requireCreditGateSilent fails unless every rejection came from the cps
 // bucket. It is the guard that keeps these tests honest: if the credit gate
 // started refusing, the measured ceiling would be a balance, not the bound
@@ -271,10 +311,9 @@ func requireCreditGateSilent(t *testing.T, rdb *redis.Client, b overdraftBurst) 
 // same way.
 func TestOverdraft_ABalanceIsReadAndNeverReserved(t *testing.T) {
 	rdb := newOverdraftRedis(t, 64)
-	seedOverdraftBalance(t, rdb, relayDefaultCU)
 
 	in := overdraftInput(relayDefaultCU)
-	b := overdraftSaturate(t, rdb, in, 64, 40, nil)
+	b := overdraftSaturateOneWindow(t, rdb, relayDefaultCU, in, 64, 40, nil)
 
 	requireOneOverdraftWindow(t, b)
 	requireCreditGateSilent(t, rdb, b)
@@ -305,7 +344,6 @@ func TestOverdraft_ABalanceIsReadAndNeverReserved(t *testing.T) {
 // LIMIT.
 func TestOverdraft_TheWindowCeilingIsFloorOfCpsOverCost(t *testing.T) {
 	rdb := newOverdraftRedis(t, 64)
-	ctx := context.Background()
 
 	type row struct{ cps, cost int64 }
 	rows := []row{
@@ -315,9 +353,6 @@ func TestOverdraft_TheWindowCeilingIsFloorOfCpsOverCost(t *testing.T) {
 	}
 	t.Logf("%8s %6s %10s %10s %12s %12s", "cps", "cost", "approved", "credits", "predicted", "overdraft")
 	for _, r := range rows {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, r.cost) // exactly one request's worth of credit
-
 		in := overdraftInput(r.cost)
 		in.Limits.SlowCPS = r.cps
 		// Just enough requests to fill the window and then be refused a few
@@ -325,7 +360,8 @@ func TestOverdraft_TheWindowCeilingIsFloorOfCpsOverCost(t *testing.T) {
 		// push the burst past the 2-second expiry under -race, and then the
 		// run would measure two windows instead of one.
 		perWorker := (int(r.cps/r.cost)+512)/64 + 1
-		b := overdraftSaturate(t, rdb, in, 64, perWorker, nil)
+		// The balance is exactly one request's worth of credit.
+		b := overdraftSaturateOneWindow(t, rdb, r.cost, in, 64, perWorker, nil)
 
 		requireOneOverdraftWindow(t, b)
 		requireCreditGateSilent(t, rdb, b)
@@ -350,17 +386,13 @@ func TestOverdraft_TheWindowCeilingIsFloorOfCpsOverCost(t *testing.T) {
 // LIMIT, and the load-bearing one for the periodic-state proposal.
 func TestOverdraft_TheSendRateDoesNotMoveTheBound(t *testing.T) {
 	rdb := newOverdraftRedis(t, 512)
-	ctx := context.Background()
 
 	const cost = relayDefaultCU
 	want := (relaySlowCPS / cost) * cost
 	t.Logf("%10s %10s %10s %10s %12s", "workers", "requests", "approved", "credits", "elapsed")
 	for _, workers := range []int{1, 8, 64, 256, 512} {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, cost)
-
 		perWorker := 2560/workers + 4
-		b := overdraftSaturate(t, rdb, overdraftInput(cost), workers, perWorker, nil)
+		b := overdraftSaturateOneWindow(t, rdb, cost, overdraftInput(cost), workers, perWorker, nil)
 
 		requireOneOverdraftWindow(t, b)
 		requireCreditGateSilent(t, rdb, b)
@@ -416,15 +448,12 @@ func TestOverdraft_TheCpsBucketIsTheOnlyThingBoundingIt(t *testing.T) {
 	})
 
 	t.Run("restoring SlowCPS restores the bound", func(t *testing.T) {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, cost)
-
 		in := overdraftInput(cost)
 		in.Limits.SlowCPS = relaySlowCPS
 		// Fewer requests than the run above, because with the bucket armed the
 		// burst has to finish inside one 2-second window to be readable.
 		const offered = 4096
-		b := overdraftSaturate(t, rdb, in, 64, offered/64, nil)
+		b := overdraftSaturateOneWindow(t, rdb, cost, in, 64, offered/64, nil)
 
 		requireOneOverdraftWindow(t, b)
 		requireCreditGateSilent(t, rdb, b)
@@ -454,14 +483,10 @@ func TestOverdraft_TheCpsBucketIsTheOnlyThingBoundingIt(t *testing.T) {
 // LIMIT.
 func TestOverdraft_TheRequestRateGateIsPerKeyAndDoesNotBoundTheAccount(t *testing.T) {
 	rdb := newOverdraftRedis(t, 64)
-	ctx := context.Background()
 	const cost = 1
 
 	t.Logf("%6s %14s %10s %10s %s", "keys", "rps allowance", "credits", "bucket", "codes")
 	for _, keys := range []int{1, 2, 5, 10} {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, cost)
-
 		keyIDs := make([]string, keys)
 		for i := range keyIDs {
 			keyIDs[i] = overdraftKeyID(i)
@@ -469,7 +494,7 @@ func TestOverdraft_TheRequestRateGateIsPerKeyAndDoesNotBoundTheAccount(t *testin
 
 		in := overdraftInput(cost)
 		in.Limits.SlowRPS = relaySlowRPS // 100 requests per key per second
-		b := overdraftSaturate(t, rdb, in, 20*keys, 60, keyIDs)
+		b := overdraftSaturateOneWindow(t, rdb, cost, in, 20*keys, 60, keyIDs)
 
 		requireOneOverdraftWindow(t, b)
 		requireCreditGateSilent(t, rdb, b)
@@ -573,14 +598,12 @@ func TestOverdraft_TheTwoSecondWindowTumblesAndNeverSlides(t *testing.T) {
 	})
 
 	// Deleting the key is exactly what expiry does to it, so this pins the
-	// "a fresh window grants a fresh allowance" half without a clock.
+	// "a fresh window grants a fresh allowance" half without a clock. Each
+	// burst starts from a reset account, and the reset deletes the bucket.
 	t.Run("a fresh bucket grants a fresh allowance", func(t *testing.T) {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, relayDefaultCU)
-		first := overdraftSaturate(t, rdb, in, 32, 40, nil)
+		first := overdraftSaturateOneWindow(t, rdb, relayDefaultCU, in, 32, 40, nil)
 		requireOneOverdraftWindow(t, first)
-		require.NoError(t, rdb.Del(ctx, cpsBucketKey("acct_1")).Err())
-		second := overdraftSaturate(t, rdb, in, 32, 40, nil)
+		second := overdraftSaturateOneWindow(t, rdb, relayDefaultCU, in, 32, 40, nil)
 		requireOneOverdraftWindow(t, second)
 
 		assert.Equal(t, first.credits, second.credits)
@@ -688,6 +711,19 @@ func TestOverdraft_PacingToTheWindowEdgeDoublesTheBurst(t *testing.T) {
 
 		start := time.Now()
 		tail := drain() + relayDefaultCU // the rest of window 1, plus the charge that opened it
+		// On a slow runner the drain can outlast the 150ms left on window 1
+		// and run on into window 2. Then window 2's bucket holds less than
+		// tail. If window 1 is still live, it holds exactly tail. If it is
+		// gone, it expired after the drain stopped, because a window 2 the
+		// drain opened would still have most of its 2 seconds left.
+		if left, err := rdb.Get(ctx, cpsBucketKey("acct_1")).Int64(); err != redis.Nil {
+			require.NoError(t, err)
+			if left != tail {
+				t.Logf("attempt %d: the drain ran past the window edge (bucket=%d, drained=%d); retrying",
+					attempt, left, tail)
+				continue
+			}
+		}
 		for {
 			n, err := rdb.Exists(ctx, cpsBucketKey("acct_1")).Result()
 			require.NoError(t, err)
@@ -729,6 +765,15 @@ func TestOverdraft_PacingToTheWindowEdgeDoublesTheBurst(t *testing.T) {
 // So the honest figure at the defaults is 3,486 credits — $0.0000035 — and
 // 3,000 is neither the aligned nor the worst-case answer.
 //
+// The span ends on the SERVER's clock, not this process's. The ceiling key is
+// seeded with a 12-second TTL, so once Redis expires it every later script
+// sees an effective balance of zero and answers no_credits. A client-side
+// deadline cannot end the span exactly: a worker that checks the deadline
+// just before it and is then descheduled reaches Redis after it, and on a
+// starved runner such stragglers opened a seventh window inside the "aligned"
+// span (3,156 credits). Redis runs scripts one at a time against its own
+// expiry clock, so no approval can land after the span.
+//
 // LIMIT.
 func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) {
 	if testing.Short() {
@@ -737,12 +782,26 @@ func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) 
 	const inFlight = 12 * time.Second
 	const perWindow = (relaySlowCPS / relayDefaultCU) * relayDefaultCU // 498
 
-	measure := func(t *testing.T, rdb *redis.Client, in AuthorizeInput, preOpen bool) int64 {
+	// measure reports the credits approved over the span. lined is false when
+	// an unaligned run missed window 1's edge; that run measured something
+	// else and must be discarded, not asserted on.
+	measure := func(t *testing.T, rdb *redis.Client, in AuthorizeInput, preOpen bool) (credits int64, lined bool) {
 		ctx := context.Background()
 		require.NoError(t, rdb.FlushAll(ctx).Err())
 		seedOverdraftBalance(t, rdb, relayDefaultCU)
 
+		// openSpan arms the server-side end of the span: the ceiling, and with
+		// it the account's only credit, expires inFlight from now.
+		openSpan := func() {
+			require.NoError(t, rdb.Set(ctx, ceilingKey("acct_1"), dec(relayDefaultCU), inFlight).Err())
+		}
+
 		var approved int64
+		if !preOpen {
+			// Arm the end before the first charge opens window 1, so the span
+			// is never longer than six windows.
+			openSpan()
+		}
 		if preOpen {
 			// Open the window early and start the span near its edge, which is
 			// what an arbitrary arrival time looks like.
@@ -753,25 +812,57 @@ func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) 
 			for {
 				pttl, err := rdb.PTTL(ctx, cpsBucketKey("acct_1")).Result()
 				require.NoError(t, err)
-				if pttl <= 0 || pttl < 150*time.Millisecond {
+				if pttl <= 0 {
+					return 0, false // the edge went past while we were lining up
+				}
+				if pttl < 150*time.Millisecond {
 					break
 				}
 				time.Sleep(2 * time.Millisecond)
+			}
+			openSpan()
+			// Take the rest of window 1 before the workers start, so the span
+			// is sure to collect its tail. A starved runner can fail to do
+			// that in the 150ms left, and the span then measures six windows
+			// and a fraction. Window 1's bucket holds exactly what was
+			// approved if the drain stayed inside it, and is gone if it then
+			// expired; a window 2 the drain opened would hold less.
+			for {
+				v, err := Authorize(ctx, rdb, in)
+				require.NoError(t, err)
+				if !v.OK() {
+					break
+				}
+				approved++
+			}
+			if left, err := rdb.Get(ctx, cpsBucketKey("acct_1")).Int64(); err != redis.Nil {
+				require.NoError(t, err)
+				if left != approved*relayDefaultCU {
+					return 0, false
+				}
 			}
 		}
 
 		var firstErr atomic.Value
 		var wg sync.WaitGroup
-		deadline := time.Now().Add(inFlight)
+		// giveUp only stops a hung run; the ceiling's expiry ends the span.
+		giveUp := time.Now().Add(inFlight + 30*time.Second)
 		for w := 0; w < 32; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for time.Now().Before(deadline) {
+				for {
+					if time.Now().After(giveUp) {
+						firstErr.CompareAndSwap(nil, fmt.Errorf("the ceiling did not expire within %v", inFlight+30*time.Second))
+						return
+					}
 					v, err := Authorize(ctx, rdb, in)
 					if err != nil {
 						firstErr.CompareAndSwap(nil, err)
 						return
+					}
+					if v.Code == "no_credits" {
+						return // Redis expired the ceiling: the span is over
 					}
 					if v.OK() {
 						atomic.AddInt64(&approved, 1)
@@ -783,14 +874,14 @@ func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) 
 		if err, ok := firstErr.Load().(error); ok && err != nil {
 			require.NoError(t, err)
 		}
-		return approved * relayDefaultCU
+		return approved * relayDefaultCU, true
 	}
 
 	rdb := newOverdraftRedis(t, 32)
 	in := overdraftInput(relayDefaultCU)
 
 	t.Run("aligned: six windows", func(t *testing.T) {
-		credits := measure(t, rdb, in, false)
+		credits, _ := measure(t, rdb, in, false)
 		windows := float64(credits) / float64(perWindow)
 		t.Logf("12s span starting at the window: %d credits = %.2f windows of %d; OVERDRAFT %d credits ($%.9f)",
 			credits, windows, perWindow, credits-relayDefaultCU, float64(credits-relayDefaultCU)/1e9)
@@ -801,7 +892,14 @@ func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) 
 	})
 
 	t.Run("unaligned: seven windows", func(t *testing.T) {
-		credits := measure(t, rdb, in, true)
+		var credits int64
+		lined := false
+		for attempt := 1; attempt <= 3 && !lined; attempt++ {
+			if credits, lined = measure(t, rdb, in, true); !lined {
+				t.Logf("attempt %d missed window 1's edge; retrying", attempt)
+			}
+		}
+		require.True(t, lined, "could not take window 1's tail before its edge in three attempts")
 		windows := float64(credits) / float64(perWindow)
 		t.Logf("12s span starting at a window edge: %d credits = %.2f windows of %d; OVERDRAFT %d credits ($%.9f)",
 			credits, windows, perWindow, credits-relayDefaultCU, float64(credits-relayDefaultCU)/1e9)
@@ -833,17 +931,13 @@ func TestOverdraft_TheReachableBoundOverATwelveSecondInFlightSpan(t *testing.T) 
 // today's numbers, not of the design.
 func TestOverdraft_TheTierIsAConfiguredNumberNotAnInvariant(t *testing.T) {
 	rdb := newOverdraftRedis(t, 64)
-	ctx := context.Background()
 	const balance = 600 // $0.0000006
 
 	t.Logf("%18s %8s %10s %12s", "threshold", "tier", "credits", "overdraft")
 	for _, thresh := range []int64{relaySlowThreshold, 1000, balance} {
-		require.NoError(t, rdb.FlushAll(ctx).Err())
-		seedOverdraftBalance(t, rdb, balance)
-
 		in := overdraftInput(relayDefaultCU)
 		in.Limits.SlowThreshold = thresh
-		b := overdraftSaturate(t, rdb, in, 64, 100, nil)
+		b := overdraftSaturateOneWindow(t, rdb, balance, in, 64, 100, nil)
 
 		requireOneOverdraftWindow(t, b)
 		requireCreditGateSilent(t, rdb, b)
