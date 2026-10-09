@@ -90,8 +90,54 @@ func TestSlot_EvalTimeout_CountsAndLogs(t *testing.T) {
 
 	require.Equal(t, 1.0, promUtil.ToFloat64(counter)-before,
 		`one timed-out tick must increment selection_eval_errors_total{kind="timeout"} exactly once`)
-	require.Contains(t, f.Logs.String(), "selection policy eval failed; retaining previous cache")
+	// The first tick has no previous cache, so it publishes its late result
+	// and says so; see TestSlot_EvalTimeout_FirstTickPublishesItsLateResult.
+	require.Contains(t, f.Logs.String(), "selection policy eval failed; no ordering exists yet, so publishing its late result")
 	require.Contains(t, f.Logs.String(), "selection policy eval timed out")
+
+	f.tick("evm:1", "*")
+	require.Equal(t, 2.0, promUtil.ToFloat64(counter)-before,
+		"a later timed-out tick counts once more")
+	require.Contains(t, f.Logs.String(), "selection policy eval failed; retaining previous cache")
+}
+
+// TestSlot_EvalTimeout_FirstTickPublishesItsLateResult pins the cold start.
+// The first eval runs inside RegisterNetwork, where a busy host can miss a
+// 100ms deadline. With no previous cache, discarding the late result left
+// the network on raw registration order, fallback tier included, until the
+// next tick 15s later. The late result is the policy's real answer, so the
+// slot publishes it, and the decision still records the timeout.
+func TestSlot_EvalTimeout_FirstTickPublishesItsLateResult(t *testing.T) {
+	f := newEngineFixture(t)
+	evalFunc := `(ups, _ctx) => {
+		const t = Date.now();
+		while (Date.now() - t < 300) {}
+		return ups.filter((u) => u.id === 'rpc2');
+	}`
+	f.register("evm:1", frozenPolicy(evalFunc, 20*time.Millisecond),
+		f.upstream("rpc1"), f.upstream("rpc2"))
+
+	require.Equal(t, []string{"rpc2"}, f.orderIDs("evm:1", "*"),
+		"the late first result is published; the slot must not stay empty")
+	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out",
+		"the decision still records the timeout")
+}
+
+// TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing: only a valid late
+// result is published. A first eval that overruns and then throws leaves the
+// slot empty, as before.
+func TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing(t *testing.T) {
+	f := newEngineFixture(t)
+	evalFunc := `(ups, _ctx) => {
+		const t = Date.now();
+		while (Date.now() - t < 300) {}
+		throw new Error('boom');
+	}`
+	f.register("evm:1", frozenPolicy(evalFunc, 20*time.Millisecond),
+		f.upstream("rpc1"), f.upstream("rpc2"))
+
+	require.Empty(t, f.orderIDs("evm:1", "*"), "a late throw publishes no ordering")
+	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out")
 }
 
 // TestSlot_EvalWithinTimeout_PublishesItsResult is the control. An eval

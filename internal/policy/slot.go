@@ -252,6 +252,9 @@ func (s *Slot) tickOnce() {
 	var (
 		evalRes *EvalResult
 		evalErr error
+		// lateFirst: the eval timed out, but this slot has never published an
+		// ordering, and the late result is valid. See below.
+		lateFirst bool
 	)
 	if timeout > 0 {
 		select {
@@ -259,11 +262,20 @@ func (s *Slot) tickOnce() {
 			evalRes, evalErr = o.res, o.err
 		case <-time.After(timeout):
 			evalErr = fmt.Errorf("%w after %s", ErrEvalTimeout, timeout)
-			// Wait for the goroutine, then DISCARD what it produced. sobek cannot be
-			// interrupted mid-call cleanly, so the eval has to run to completion; but a
-			// result that arrives after the deadline must not be published as though it
-			// arrived before it. The deadline is the answer the operator configured.
-			<-outcome
+			// Wait for the goroutine; sobek cannot be interrupted mid-call cleanly, so
+			// the eval has to run to completion. Once the slot holds an ordering, the
+			// late result is DISCARDED: the deadline is the answer the operator
+			// configured, and the previous cache stands.
+			//
+			// Before the first publish there is no previous cache. Discarding the late
+			// result then leaves the network on raw registration order, fallback tier
+			// included, until the next tick (15s by default). A first eval on a busy
+			// host can easily miss a 100ms deadline. A late answer from the policy beats
+			// no policy at all, so publish it, and still count the timeout.
+			o := <-outcome
+			if s.cache.Load() == nil && o.err == nil && o.res != nil {
+				evalRes, lateFirst = o.res, true
+			}
 		}
 	} else {
 		o := <-outcome
@@ -281,6 +293,19 @@ func (s *Slot) tickOnce() {
 			Metrics:     metrics,
 		},
 		State: state,
+	}
+
+	if lateFirst {
+		// The decision still carries the timeout, so it reaches the decisions
+		// ring and emitMetrics counts it as kind="timeout".
+		decision.Error = evalErr.Error()
+		s.engine.logger.Warn().
+			Str("network", s.networkID).
+			Str("method", s.method).
+			Str("tick_id", decision.ID).
+			Err(evalErr).
+			Msg("selection policy eval failed; no ordering exists yet, so publishing its late result")
+		evalErr = nil
 	}
 
 	if evalErr != nil {

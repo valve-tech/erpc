@@ -7618,3 +7618,32 @@ fired, it still takes every response already in the channel, and stops only
 when none is in hand. A response that lands just after the deadline can
 therefore still count, if the loop is slow to get to it. That answer is
 already in hand, so counting it costs nothing.
+
+## 194. A first selection eval that misses its deadline leaves the network on raw registration order for 15s
+
+**Status: FIXED in the fork.** `TestSlot_EvalTimeout_FirstTickPublishesItsLateResult`
+and `TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing`
+(`internal/policy/slot_eval_timeout_test.go`) pin it. Reported to this log as
+"bug 196"; no 194 or 195 existed on staging when it was written, so it takes
+the next free number.
+
+The fork caused this, in its fix for entries 46 and 144 (`8ad1b4cf`). That fix
+made a timed-out eval keep the previous cache and discard the late result. Once
+a slot holds an ordering, that is right. On the first eval there is no previous
+cache. `GetOrderedInLane` then returns nothing, and `Network.Forward`
+(`erpc/networks.go`, "Cold-start fallback") serves the raw registration order,
+fallback tier included, until the next tick: `evalInterval`, 15 s by default.
+
+The first eval runs synchronously inside `RegisterNetwork`, at startup, when a
+busy 2-CPU host can easily miss the 100 ms default `evalTimeout`. It reproduced
+as a flaky `TestStdlib_DefaultPolicy_FallbackEscape_Off` under CPU load.
+
+Upstream `main` does not discard the late result, but only by accident: its
+timeout branch has the data race entry 46 describes, and the late write
+overwrites the timeout error.
+
+The fork fix publishes the late result when the slot has never published an
+ordering and the late eval succeeded. The decision still carries the timeout,
+so `selection_eval_errors_total{kind="timeout"}` still counts it, and the log
+says the late result was published. After the first publish, a timeout keeps
+the previous cache as before. A late eval that throws publishes nothing.
