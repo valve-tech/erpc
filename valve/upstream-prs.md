@@ -21,6 +21,7 @@ Fork commit is the commit on `main` that carries the same change.
 | [#1223](https://github.com/erpc/erpc/pull/1223) | Ours | test(hedge): only the hedge answers in SimpleHedgePolicy | — | `01bc4a5b` | open |
 | [#1224](https://github.com/erpc/erpc/pull/1224) | Ours | test(evm): wait for the cached sub-range before split getLogs | — | `320c08ec` | open |
 | [#1226](https://github.com/erpc/erpc/pull/1226) | Ours | policy: eval timeout wins, without losing the first ordering | 46, 194 (issue #1225) | `8ad1b4cf` + `bc5a2246` | open |
+| [#1232](https://github.com/erpc/erpc/pull/1232) | Ours | test(hedge): check which delay the hedge used, not runner speed | — | `ab8aa74c` | open |
 | [#1197](https://github.com/erpc/erpc/pull/1197) | Waiting | evm: caller gas caps and rejected tracers are not server faults | 191 (issue #1175) | fork's own fix in 191 | open |
 | [#1184](https://github.com/erpc/erpc/pull/1184) | Pulled | docker: pin pnpm so release images build | — | upstream merge `39392b73` | merged upstream |
 | [#1180](https://github.com/erpc/erpc/pull/1180) | Pulled | consensus: hash missing-data by verdict | — | upstream merge `39392b73` | merged upstream |
@@ -30,7 +31,7 @@ Fork commit is the commit on `main` that carries the same change.
 To refresh the states:
 
 ```sh
-for n in 1217 1218 1219 1220 1221 1222 1223 1224 1226 1197; do
+for n in 1217 1218 1219 1220 1221 1222 1223 1224 1226 1232 1197; do
   gh pr view $n -R erpc/erpc --json number,state -q '"#\(.number) \(.state)"'
 done
 ```
