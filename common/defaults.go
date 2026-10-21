@@ -914,6 +914,9 @@ func (s *ServerConfig) SetDefaults() error {
 	if s.WebSocket.MaxSubscriptionsPerConnection == 0 {
 		s.WebSocket.MaxSubscriptionsPerConnection = 100
 	}
+	if s.WebSocket.NotifyBufferSize == 0 {
+		s.WebSocket.NotifyBufferSize = 256
+	}
 	// Safe defaults for client IP resolution
 	if len(s.TrustedIPForwarders) == 0 {
 		// Only loopback by default; do not trust private subnets unless explicitly configured

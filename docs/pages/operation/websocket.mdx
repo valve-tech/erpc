@@ -83,13 +83,13 @@ ws.onopen = () => {
 
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
-  
+
   if (msg.id) {
     // Subscription confirmation
     console.log("Subscription ID:", msg.result);
     // "0x2a151383161618ebffddfed9de4be5db"
   }
-  
+
   if (msg.method === "eth_subscription") {
     // New block notification
     console.log("New block:", msg.params.result.number);
@@ -264,7 +264,13 @@ server:
     pingInterval: 30s
     # Maximum active subscriptions per WebSocket connection (default: 100)
     maxSubscriptionsPerConnection: 100
+    # Notifications buffered per subscription before the slow-client policy applies (default: 256)
+    notifyBufferSize: 256
+    # On a full buffer, close the connection with code 4013 instead of evicting the oldest notification (default: false)
+    closeSlowSubscribers: false
 ```
+
+When a client reads slower than notifications arrive, its subscription buffer fills. By default eRPC then evicts the oldest queued notification. With `closeSlowSubscribers: true`, eRPC evicts nothing and closes the connection with code `4013`. The client must reconnect, resubscribe and back-fill the gap (for `logs`, with `eth_getLogs`). Either way, `erpc_ws_notifications_dropped_total{network, kind, reason}` counts every lost notification.
 
 ## Per-frame wire tracing
 

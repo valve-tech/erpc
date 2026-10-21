@@ -172,6 +172,17 @@ var (
 	// sustained regression as thousands. One sustained hold is +1 held, then +1
 	// failed_open if it never recovers — which is what makes any non-zero rate
 	// alert-worthy.
+	// MetricWsNotificationsDroppedTotal counts eth_subscription notifications
+	// that never reached a client's socket. reason="buffer_full": the oldest
+	// queued one was evicted for a slow client. reason="slow_close": the
+	// close policy closed the connection instead (code 4013), so the client
+	// can see the gap. Any nonzero rate means a subscriber missed events.
+	MetricWsNotificationsDroppedTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "ws_notifications_dropped_total",
+		Help:      "WebSocket subscription notifications that never reached the client, by network, event kind and reason (buffer_full = oldest evicted; slow_close = connection closed with 4013).",
+	}, []string{"network", "kind", "reason"})
+
 	MetricNetworkServedTipRegressionTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_served_tip_regression_total",

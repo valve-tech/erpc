@@ -455,7 +455,23 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 	if existing, ok := sm.conns.Load(wsc.id); ok {
 		return existing.(*connEntry)
 	}
-	adapter := wsclient.New(wsc.id, wsc, sm.logger)
+	wsCfg := wsc.server.serverCfg.WebSocket
+	opts := wsclient.Options{
+		BufferSize: wsCfg.NotifyBufferSize,
+		OnDrop: func(networkID string, kind indexer.EventKind, reason wsclient.DropReason) {
+			telemetry.MetricWsNotificationsDroppedTotal.
+				WithLabelValues(networkID, kind.String(), string(reason)).Inc()
+		},
+	}
+	if wsCfg.CloseSlowSubscribers {
+		// Close off the indexer's delivery goroutine: closeWithCode runs
+		// the connection cleanup, which detaches this adapter from the
+		// indexer that is calling us.
+		opts.OnSlow = func() {
+			go wsc.closeWithCode(SlowSubscriberCloseCode, "subscriber too slow; resubscribe and back-fill")
+		}
+	}
+	adapter := wsclient.New(wsc.id, wsc, sm.logger, opts)
 	detach := sm.idx.Attach(adapter)
 	entry := &connEntry{adapter: adapter, detach: detach}
 	if existing, loaded := sm.conns.LoadOrStore(wsc.id, entry); loaded {
@@ -603,4 +619,3 @@ var (
 	_ wsclient.NotificationWriter = (*WsConnection)(nil)
 	_ indexer.NetworkHandle       = (*networkHandle)(nil)
 )
-

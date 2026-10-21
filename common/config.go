@@ -323,6 +323,12 @@ type WebSocketServerConfig struct {
 	MaxMessageSize                int64     `yaml:"maxMessageSize,omitempty" json:"maxMessageSize"`
 	PingInterval                  *Duration `yaml:"pingInterval,omitempty" json:"pingInterval" tstype:"Duration"`
 	MaxSubscriptionsPerConnection int       `yaml:"maxSubscriptionsPerConnection,omitempty" json:"maxSubscriptionsPerConnection"`
+	// NotifyBufferSize is the per-subscription notification buffer depth.
+	NotifyBufferSize int `yaml:"notifyBufferSize,omitempty" json:"notifyBufferSize"`
+	// CloseSlowSubscribers closes the client connection with code 4013
+	// when a subscription's buffer is full, instead of evicting the
+	// oldest notification. Default off.
+	CloseSlowSubscribers bool `yaml:"closeSlowSubscribers,omitempty" json:"closeSlowSubscribers"`
 }
 
 // ExecutionHeadersMode controls how much per-request execution detail is

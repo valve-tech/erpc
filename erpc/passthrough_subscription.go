@@ -42,6 +42,12 @@ import (
 // "go away".
 const PassthroughCloseCode = 4009
 
+// SlowSubscriberCloseCode tells a client that one of its subscriptions fell
+// a full buffer behind and notifications were lost. The client should
+// reconnect, resubscribe, and back-fill the gap (eth_getLogs for logs).
+// Sent only when webSocket.closeSlowSubscribers is on.
+const SlowSubscriberCloseCode = 4013
+
 // IsGenericSubscribeMethod reports a `<ns>_subscribe` that is not eth's.
 //
 // The suffix is the whole test. eRPC cannot hold a list of namespaces: reth
