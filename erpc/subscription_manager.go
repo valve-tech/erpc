@@ -71,7 +71,32 @@ type SubscriptionManager struct {
 // the indexer detach handle.
 type connEntry struct {
 	adapter *wsclient.Adapter
-	detach  func()
+
+	// mu orders attach against detach: the subscribe that creates the
+	// entry attaches after publishing it, so a cleanup can run first.
+	mu       sync.Mutex
+	detachFn func()
+	detached bool
+}
+
+// attach registers the adapter with the indexer unless the entry was
+// already detached.
+func (c *connEntry) attach(idx *indexer.Indexer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.detached {
+		c.detachFn = idx.Attach(c.adapter)
+	}
+}
+
+func (c *connEntry) detach() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.detached = true
+	if c.detachFn != nil {
+		c.detachFn()
+		c.detachFn = nil
+	}
 }
 
 // subRecord is the per-subscription record kept for Unsubscribe /
@@ -472,14 +497,16 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 		}
 	}
 	adapter := wsclient.New(wsc.id, wsc, sm.logger, opts)
-	detach := sm.idx.Attach(adapter)
-	entry := &connEntry{adapter: adapter, detach: detach}
+	entry := &connEntry{adapter: adapter}
+	// Publish first, attach only if we won. Every adapter for a connection
+	// has the same indexer name, so a losing subscribe that attached would
+	// overwrite the winner's registration, and its detach would then
+	// remove it — leaving the connection with no egress at all.
 	if existing, loaded := sm.conns.LoadOrStore(wsc.id, entry); loaded {
-		// Lost the race with another Subscribe — drop our adapter.
-		detach()
 		adapter.Drain()
 		return existing.(*connEntry)
 	}
+	entry.attach(sm.idx)
 	return entry
 }
 
