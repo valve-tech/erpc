@@ -62,10 +62,11 @@ func NewDedupWindow(size int) *DedupWindow {
 	if size <= 0 {
 		size = DefaultDedupWindowSize
 	}
+	// Grow on demand: a window preallocated to size costs about 560 KiB at
+	// the default, for every distinct filter, even one that never matches.
 	return &DedupWindow{
-		size:  size,
-		seen:  make(map[string]struct{}, size),
-		order: make([]string, 0, size),
+		size: size,
+		seen: make(map[string]struct{}),
 	}
 }
 
