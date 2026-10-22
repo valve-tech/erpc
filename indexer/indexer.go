@@ -22,6 +22,9 @@ type Options struct {
 	// Now is the clock used for event timestamps. Tests inject a fake
 	// clock; nil falls back to time.Now.
 	Now func() time.Time
+	// FallbackGasLimit sizes notification queues on a network before its
+	// first head. 0 = DefaultFallbackGasLimit.
+	FallbackGasLimit uint64
 }
 
 // Indexer is the transport-neutral core: ingresses push StreamEvents via
@@ -39,6 +42,8 @@ type Indexer struct {
 	networks sync.Map // networkId -> *networkState
 	egresses sync.Map // egress Name() -> EventEgress
 	seq      atomic.Uint64
+
+	gasLimits *GasLimitTracker
 }
 
 // networkState holds the indexer's per-network bookkeeping: the
@@ -97,10 +102,14 @@ func New(logger *zerolog.Logger, opts Options) *Indexer {
 		opts.DedupWindowSize = DefaultDedupWindowSize
 	}
 	return &Indexer{
-		logger: logger,
-		opts:   opts,
+		logger:    logger,
+		opts:      opts,
+		gasLimits: NewGasLimitTracker(opts.FallbackGasLimit, logger),
 	}
 }
+
+// GasLimits returns the per-network gas limits seen on newHeads.
+func (i *Indexer) GasLimits() *GasLimitTracker { return i.gasLimits }
 
 // RegisterNetwork installs a NetworkHandle for the indexer to consult when
 // tagging lifecycle and routing per-source state-poller updates. Safe to
@@ -362,6 +371,10 @@ func (i *Indexer) Ingest(ev StreamEvent) {
 	// stalls on the first dup.
 	if ev.Kind == KindNewHead && !ev.Block.Zero() && ev.SourceId != "" {
 		ns.handle.SuggestLatestBlock(ev.SourceId, ev.Block.Number)
+	}
+	// A duplicate head still carries a valid gas limit.
+	if ev.Kind == KindNewHead && len(ev.Payload) > 0 {
+		i.gasLimits.Observe(ev.NetworkId, ev.Payload)
 	}
 
 	// Dedup.
