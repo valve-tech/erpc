@@ -50,38 +50,37 @@ func (b *ByteBudget) Used() int64 { return b.used.Load() }
 // Limit returns the budget's size in bytes.
 func (b *ByteBudget) Limit() int64 { return b.limit }
 
-// EvictLargest returns the open adapter holding the most queued bytes; ties
-// go to the newest. It returns nil, so the caller closes nobody, in two
-// cases:
+// EvictLargest decides what to do when a Reserve fails. It returns
+// fits=true when the bytes over the limit are all held by closing adapters:
+// those bytes go when their blocked writers return, within the write
+// deadline, so the caller queues and closes nobody. That bounds the
+// overshoot to bytes already on their way out.
 //
-//   - A closing adapter still holds bytes. The budget is recovering: those
-//     bytes go when its blocked writer returns, within the write deadline.
-//     Evicting again now would close healthy connections for bytes that are
-//     already on their way out.
-//   - No open adapter holds any bytes. A connection that is keeping up is
-//     never closed.
+// Otherwise it returns the open adapter holding the most bytes (ties go to
+// the newest), never one that holds 0 bytes. A nil victim with fits=false
+// means no open adapter holds bytes; the caller refuses its own payload.
 //
 // Largest, not oldest: the relay keeps one long-lived connection per client,
 // so the oldest connections are healthy bridges. A subscriber that keeps up
 // holds no bytes and is never chosen; the one furthest behind frees the most
 // memory with one close.
-func (b *ByteBudget) EvictLargest() *Adapter {
+func (b *ByteBudget) EvictLargest() (victim *Adapter, fits bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var victim *Adapter
-	var vBytes int64
+	var recovering, vBytes int64
 	var vSeq uint64
 	for a, seq := range b.adapters {
 		n := a.QueuedBytes()
 		if a.closing.Load() {
-			if n > 0 {
-				return nil
-			}
+			recovering += n
 			continue
 		}
 		if n > 0 && (victim == nil || n > vBytes || (n == vBytes && seq > vSeq)) {
 			victim, vBytes, vSeq = a, n, seq
 		}
 	}
-	return victim
+	if b.used.Load()-recovering <= b.limit {
+		return nil, true
+	}
+	return victim, false
 }

@@ -280,23 +280,31 @@ func TestBudgetEvictsSelfWhenLargest(t *testing.T) {
 }
 
 func TestBudgetTieGoesToNewest(t *testing.T) {
-	budget := NewByteBudget(1 << 30)
+	budget := NewByteBudget(1)
 	a := New("a", newBlockingWriter(), &nopLogger, Options{Budget: budget})
 	b := New("b", newBlockingWriter(), &nopLogger, Options{Budget: budget})
 	defer a.Drain()
 	defer b.Drain()
-	if got := budget.EvictLargest(); got != nil {
-		t.Fatal("no adapter holds bytes: nobody should be evicted")
+	if victim, fits := budget.EvictLargest(); victim != nil || !fits {
+		t.Fatal("under the limit: nobody should be evicted")
 	}
 	c := New("c", newBlockingWriter(), &nopLogger, Options{Budget: budget})
-	c.close(CloseSubCap) // closing with 0 bytes: skipped, not "recovering"
+	c.close(CloseSubCap) // closing with 0 bytes: recovers nothing
 	defer c.Drain()
-	pin(t, a)
-	pin(t, b) // both hold the same 5-byte in-flight pin
-	if got := budget.EvictLargest(); got != b {
+	// Both pin 5 bytes in flight; the 1-byte budget is over by 9 with no
+	// closing adapter holding any of it.
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	b.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	budget.used.Add(10)
+	a.queued.Add(5)
+	b.queued.Add(5)
+	if victim, fits := budget.EvictLargest(); fits || victim != b {
 		t.Fatal("tie should pick the newest adapter")
 	}
-	if budget.Limit() != 1<<30 {
+	budget.used.Add(-10)
+	a.queued.Add(-5)
+	b.queued.Add(-5)
+	if budget.Limit() != 1 {
 		t.Fatalf("limit = %d", budget.Limit())
 	}
 }
@@ -330,13 +338,22 @@ func TestBudgetNoCascadeWhileVictimDrains(t *testing.T) {
 		t.Fatalf("slow queued = %d, want only the in-flight %d", got, 900<<10)
 	}
 
-	// More over-budget deliveries: the budget is recovering, so healthy is
-	// never closed, however many arrive.
-	for i := 0; i < 20; i++ {
+	// More over-budget deliveries: while the bytes over the limit are only
+	// slow's, which are on their way out, healthy is not closed.
+	for i := 0; i < 8; i++ {
 		healthy.Deliver(logEvent(payloadOf(100 << 10)))
 	}
 	if _, closes, _, _ := rh.snapshot(); len(closes) != 0 {
 		t.Fatalf("healthy closes = %v, want none while slow's bytes drain", closes)
+	}
+	// The overshoot is bounded: once healthy itself holds more than the
+	// budget, it is the largest open connection and is closed.
+	healthy.Deliver(logEvent(payloadOf(100 << 10)))
+	if _, closes, _, _ := rh.snapshot(); len(closes) != 1 || closes[0] != CloseHostBudget {
+		t.Fatalf("healthy closes = %v, want [host_budget] past the bound", closes)
+	}
+	if over := budget.Used() - slow.QueuedBytes(); over > budget.Limit() {
+		t.Fatalf("budget used minus recovering = %d, want <= %d", over, budget.Limit())
 	}
 
 	// The blocked write returns: slow's bytes go, and it holds nothing.
@@ -358,7 +375,7 @@ func TestDrainedAdapterLeavesBudgetAfterInFlight(t *testing.T) {
 	if !stillRegistered {
 		t.Fatal("drained adapter left the budget with bytes still in flight")
 	}
-	if budget.EvictLargest() != nil {
+	if victim, _ := budget.EvictLargest(); victim != nil {
 		t.Fatal("a draining adapter's bytes must not trigger an eviction")
 	}
 	close(w.release)
@@ -384,7 +401,7 @@ func TestBudgetReleasedOnDrain(t *testing.T) {
 		t.Fatal("budget should hold the queued bytes")
 	}
 	a.Drain()
-	if budget.EvictLargest() != nil {
+	if victim, _ := budget.EvictLargest(); victim != nil {
 		t.Fatal("a drained adapter must leave the budget")
 	}
 	// Queued bytes go at once. A batch a writer already popped is still in
@@ -409,7 +426,9 @@ func TestWriterReleasesUnwrittenBatchOnStop(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		a.Deliver(logEvent(`12`))
 	}
-	waitFor(t, "writer to pop the batch", func() bool { return sub.q.depth() == 0 })
+	// The writer takes a batch (all three, or fewer if it woke early) and
+	// blocks on its first write.
+	waitFor(t, "writer to pop a batch", func() bool { return sub.q.depth() < 3 })
 	a.RemoveSubscription("s1")
 	close(w.release) // the first write completes, then the writer sees done
 	waitFor(t, "budget to drain", func() bool { return budget.Used() == 0 })

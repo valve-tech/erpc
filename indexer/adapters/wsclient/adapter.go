@@ -363,8 +363,8 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 
 	n := int64(len(payload))
 	if b := a.opts.Budget; b != nil && !b.Reserve(n) {
-		victim := b.EvictLargest()
-		if victim == a {
+		victim, fits := b.EvictLargest()
+		if !fits && (victim == nil || victim == a) {
 			b.Release(n)
 			a.logger.Warn().Str("clientSubId", sub.id).Int64("budgetBytes", b.Limit()).
 				Int64("queuedBytes", a.QueuedBytes()).
@@ -373,10 +373,10 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 			a.dropped(sub)
 			return
 		}
-		// Otherwise queue this one; the budget overshoots until the bytes
-		// held by a closing connection go. If another open connection holds
-		// the most, close it first.
-		if victim != nil {
+		// Otherwise queue this one. Either the overshoot is only bytes a
+		// closing connection is about to release, or another open
+		// connection holds the most and is closed now.
+		if !fits {
 			victim.logger.Warn().Int64("budgetBytes", b.Limit()).
 				Int64("queuedBytes", victim.QueuedBytes()).
 				Msg("notification byte budget spent and this connection holds the most; closing it")
