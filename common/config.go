@@ -1574,6 +1574,16 @@ type EvmUpstreamConfig struct {
 	// `integrity` block instead. Retained only so existing YAML still parses.
 	DeprecatedIntegrity *UpstreamIntegrityConfig `yaml:"integrity,omitempty" json:"integrity"`
 
+	// EmptyResultAuthoritativeMethods lists methods whose empty result from
+	// this upstream is the truth, not missing data. The network's
+	// markEmptyAsErrorMethods retry is skipped for them, so the empty result
+	// returns at once. Only a non-null empty value such as [] counts: a null
+	// result still means missing data and fails over. Use it for nodes you run, which report a block they
+	// lack as unavailable rather than as empty. Other upstreams keep the
+	// retry. Errors from this upstream, block unavailable included, retry as
+	// before.
+	EmptyResultAuthoritativeMethods []string `yaml:"emptyResultAuthoritativeMethods,omitempty" json:"emptyResultAuthoritativeMethods,omitempty"`
+
 	// @deprecated: use blockAvailability bounds instead; kept for config back-compat only
 	NodeType EvmNodeType `yaml:"nodeType,omitempty" json:"nodeType"`
 	// @deprecated: should be removed in a future release
@@ -1714,6 +1724,9 @@ func (c *EvmUpstreamConfig) Copy() *EvmUpstreamConfig {
 	}
 	if c.QueryShim != nil {
 		copied.QueryShim = c.QueryShim.Copy()
+	}
+	if c.EmptyResultAuthoritativeMethods != nil {
+		copied.EmptyResultAuthoritativeMethods = append([]string(nil), c.EmptyResultAuthoritativeMethods...)
 	}
 
 	return copied

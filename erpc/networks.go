@@ -2303,12 +2303,15 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			//    emptyResultAccept and consensus is not required,
 			//    because failsafe would accept the empty result anyway
 			//    so trying more upstreams just wastes time on slow ones.
+			//  - So does an emptyish result from an upstream whose config
+			//    marks it authoritative for the method.
 			//  - Otherwise emptyish results continue to the next upstream.
 			if err == nil && r != nil && !r.IsObjectNull() {
 				emptyish := r.IsResultEmptyish()
 				acceptEmpty := !emptyish ||
 					(!failsafeExecutor.HasConsensus() &&
-						slices.Contains(failsafeExecutor.EmptyResultAccept(), method))
+						(slices.Contains(failsafeExecutor.EmptyResultAccept(), method) ||
+							common.UpstreamEmptyIsAuthoritative(u, method, r)))
 				if acceptEmpty {
 					st := effectiveReq.ExecState()
 					st.MarkUpstreamAttemptWon(r.UpstreamId())
