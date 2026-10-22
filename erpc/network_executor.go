@@ -505,7 +505,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			// If the method is in the empty-result-accept list, treat empty as valid.
 			method, _ := req.Method()
 			// So is an empty answer from an upstream that is authoritative for it.
-			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method) {
+			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method, resp) {
 				return ""
 			}
 			for _, m := range e.emptyResultAccept {

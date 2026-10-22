@@ -147,6 +147,26 @@ func TestEmptyResultAuthoritative_BlockUnavailableStillRetries(t *testing.T) {
 	require.GreaterOrEqual(t, rpc2.Load(), int32(1))
 }
 
+// reth answers trace_block with null for a block it has not got yet. A
+// null is not an authoritative empty: it fails over and returns the traces.
+func TestEmptyResultAuthoritative_NullStillFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	rpc1 := mockTraceBlock("http://rpc1.localhost", nil, "")
+	rpc2 := mockTraceBlock("http://rpc2.localhost", []interface{}{map[string]interface{}{"type": "call"}}, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := setupEmptyAuthoritativeNetwork(t, ctx, "rpc1", "rpc2")
+
+	resp, _, err := forwardTraceBlock(t, ctx, network)
+	require.NoError(t, err)
+	require.Contains(t, resultOf(t, ctx, resp), `"call"`)
+	require.GreaterOrEqual(t, rpc1.Load(), int32(1))
+	require.GreaterOrEqual(t, rpc2.Load(), int32(1))
+}
+
 func TestEvmUpstreamConfigCopy_EmptyResultAuthoritativeMethods(t *testing.T) {
 	orig := &common.EvmUpstreamConfig{EmptyResultAuthoritativeMethods: []string{"trace_block"}}
 	cp := orig.Copy()

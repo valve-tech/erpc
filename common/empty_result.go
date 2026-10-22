@@ -62,21 +62,34 @@ func emptyResultAcceptFor(cfg *NetworkConfig, method string) []string {
 	return DefaultEmptyResultAccept()
 }
 
-// UpstreamEmptyIsAuthoritative reports whether u's config lists method in
-// evm.emptyResultAuthoritativeMethods: an empty result from u for that
-// method is the answer, not a sign the data is missing.
-func UpstreamEmptyIsAuthoritative(u Upstream, method string) bool {
-	if u == nil {
+// UpstreamEmptyIsAuthoritative reports whether resp is an empty answer that
+// u is authoritative for: u's config lists method in
+// evm.emptyResultAuthoritativeMethods, and the result is present and not
+// JSON null. An empty value such as [] is the answer. null, or no result,
+// is how a node says it has not got the block yet (reth answers trace_block
+// with null), so it stays missing data and fails over as before.
+func UpstreamEmptyIsAuthoritative(u Upstream, method string, resp *NormalizedResponse) bool {
+	if u == nil || resp == nil {
 		return false
 	}
 	cfg := u.Config()
 	if cfg == nil || cfg.Evm == nil {
 		return false
 	}
+	listed := false
 	for _, m := range cfg.Evm.EmptyResultAuthoritativeMethods {
 		if strings.EqualFold(m, method) {
-			return true
+			listed = true
+			break
 		}
 	}
-	return false
+	if !listed {
+		return false
+	}
+	jrr, err := resp.JsonRpcResponse()
+	if err != nil || jrr == nil {
+		return false
+	}
+	result := strings.TrimSpace(jrr.GetResultString())
+	return result != "" && result != "null"
 }
