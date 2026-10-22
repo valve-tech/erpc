@@ -1026,6 +1026,16 @@ export interface EvmUpstreamConfig {
    */
   integrity?: UpstreamIntegrityConfig;
   /**
+   * EmptyResultAuthoritativeMethods lists methods whose empty result from
+   * this upstream is the truth, not missing data. The network's
+   * markEmptyAsErrorMethods retry is skipped for them, so the empty result
+   * returns at once. Use it for nodes you run, which report a block they
+   * lack as unavailable rather than as empty. Other upstreams keep the
+   * retry. Errors from this upstream, block unavailable included, retry as
+   * before.
+   */
+  emptyResultAuthoritativeMethods?: string[];
+  /**
    * @deprecated: use blockAvailability bounds instead; kept for config back-compat only
    */
   nodeType?: EvmNodeType;

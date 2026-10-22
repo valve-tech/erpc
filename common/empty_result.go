@@ -1,5 +1,7 @@
 package common
 
+import "strings"
+
 // ResolveEmptyResultAccept returns the method list for which an emptyish
 // result is the canonical final answer rather than a "data is missing, retry
 // elsewhere" signal. A nil retry policy, or one that leaves EmptyResultAccept
@@ -58,4 +60,23 @@ func emptyResultAcceptFor(cfg *NetworkConfig, method string) []string {
 		return ResolveEmptyResultAccept(fs.Retry)
 	}
 	return DefaultEmptyResultAccept()
+}
+
+// UpstreamEmptyIsAuthoritative reports whether u's config lists method in
+// evm.emptyResultAuthoritativeMethods: an empty result from u for that
+// method is the answer, not a sign the data is missing.
+func UpstreamEmptyIsAuthoritative(u Upstream, method string) bool {
+	if u == nil {
+		return false
+	}
+	cfg := u.Config()
+	if cfg == nil || cfg.Evm == nil {
+		return false
+	}
+	for _, m := range cfg.Evm.EmptyResultAuthoritativeMethods {
+		if strings.EqualFold(m, method) {
+			return true
+		}
+	}
+	return false
 }

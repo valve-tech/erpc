@@ -305,8 +305,9 @@ func HandleUpstreamPostForward(ctx context.Context, n common.Network, u common.U
 		}
 	}
 
-	// Check if this method should have empty results marked as errors
-	shouldMarkEmpty := isMethodInMarkEmptyList(n, methodLower)
+	// Check if this method should have empty results marked as errors. An
+	// upstream that is authoritative for the method answers empty truthfully.
+	shouldMarkEmpty := isMethodInMarkEmptyList(n, methodLower) && !common.UpstreamEmptyIsAuthoritative(u, methodLower)
 
 	// Method-specific post-forward hooks with directive-based validation
 	switch methodLower {
