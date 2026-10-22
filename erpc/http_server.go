@@ -97,6 +97,9 @@ func NewHttpServer(
 		indexerOpts.CanonicalChainDepth = indexerCfg.CanonicalChainDepth
 		indexerOpts.DedupWindowSize = indexerCfg.DedupWindowSize
 	}
+	if cfg != nil && cfg.WebSocket != nil {
+		indexerOpts.FallbackGasLimit = cfg.WebSocket.FallbackGasLimit
+	}
 	idx := indexer.New(&indexerLogger, indexerOpts)
 
 	srv := &HttpServer{

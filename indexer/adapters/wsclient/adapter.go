@@ -1,9 +1,15 @@
 // Package wsclient adapts a single client WebSocket connection into an
 // indexer.EventEgress. One adapter per WsConnection. The adapter owns
-// per-subscription write buffers and writer goroutines — the slow-client
-// policy (oldest-drop, or close) lives here rather than in the indexer
-// core because future egresses (Kafka, webhook) will want different
-// policies.
+// per-subscription queues and writer goroutines — the slow-client policy
+// lives here rather than in the indexer core because future egresses
+// (Kafka, webhook) will want different policies.
+//
+// The policy: never evict. A subscription's queue grows on demand up to
+// the protocol's ceiling (two blocks of the most logs a block can hold),
+// and the process shares one byte budget. A subscriber past its cap, or
+// the largest one when the budget is spent, has its connection closed so
+// the client can see the gap, resubscribe and back-fill. Every
+// notification that is not written belongs to a closing connection.
 package wsclient
 
 import (
@@ -15,42 +21,45 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// DefaultNotifyBufferSize is the per-subscription buffer depth when the
-// caller does not set one.
-//
-// Retention scales with depth, not throughput: each buffered
-// notification pins the upstream-allocated json.RawMessage until the
-// writer drains it, so total GC-reachable heap from this path is roughly
-// N_subs × depth × payload_size. 256 × a 10 KB header is about 2.5 MB per
-// subscription at worst. A depth of 8 was too small: one busy block can
-// emit dozens of matching logs, and a slow peer stalls the writer for up
-// to the 10 s write deadline.
-const DefaultNotifyBufferSize = 256
-
 // DropReason says why a notification never reached the wire.
 type DropReason string
 
+// DropClosing: the connection is closing (or was just closed) because a
+// subscriber fell too far behind. The client gets a close, so the gap is
+// visible.
+const DropClosing DropReason = "closing"
+
+// CloseReason says why the adapter asked for its connection to close.
+type CloseReason string
+
 const (
-	// DropBufferFull: the buffer was full and the oldest queued
-	// notification was evicted to make room.
-	DropBufferFull DropReason = "buffer_full"
-	// DropSlowClose: the buffer was full, the close policy is on, and the
-	// connection is being closed instead. The client sees the gap.
-	DropSlowClose DropReason = "slow_close"
+	// CloseSubCap: one subscription queued more than its protocol cap.
+	CloseSubCap CloseReason = "sub_cap"
+	// CloseHostBudget: the process's byte budget was spent and this
+	// connection held the most queued bytes.
+	CloseHostBudget CloseReason = "host_budget"
 )
 
-// Options tunes the slow-client policy.
+// Options sets the queue limits and the callbacks.
 type Options struct {
-	// BufferSize is the per-subscription depth. Zero or less means
-	// DefaultNotifyBufferSize.
-	BufferSize int
+	// MinQueue is a floor on every subscription's cap (the notifyBufferSize
+	// setting). It never preallocates.
+	MinQueue int
+	// QueueCap returns the live protocol cap for a network. The cap is
+	// max(MinQueue, QueueCap); when both are 0 there is no cap, and only
+	// the budget bounds the queue.
+	QueueCap func(networkID string) int
+	// Budget is shared by every adapter in the process. It may be nil.
+	Budget *ByteBudget
 	// OnDrop is called once per notification that does not reach the
 	// writer. It may be nil.
 	OnDrop func(networkID string, kind indexer.EventKind, reason DropReason)
-	// OnSlow, when set, turns on the close policy: a full buffer evicts
-	// nothing and OnSlow is called once for the connection. The callee
-	// closes the connection. It must not block.
-	OnSlow func()
+	// OnClose is called once per adapter, the first time it must close. The
+	// callee closes the connection; it must not block. It may be nil.
+	OnClose func(reason CloseReason)
+	// OnQueue reports every change to a network's queued items and bytes.
+	// It may be nil.
+	OnQueue func(networkID string, deltaItems int, deltaBytes int64)
 }
 
 // NotificationWriter is what the adapter uses to push a delivered event
@@ -70,9 +79,15 @@ type Adapter struct {
 	writer NotificationWriter
 	logger *zerolog.Logger
 	opts   Options
-	// slow is set once the close policy has fired; later deliveries are
-	// dropped as DropSlowClose without calling OnSlow again.
-	slow atomic.Bool
+
+	// closing is set the first time the adapter asks for a close. From then
+	// on, every delivery is a DropClosing.
+	closing atomic.Bool
+	// queued is the bytes held across this adapter's subscriptions, both
+	// queued and popped but not yet written.
+	queued atomic.Int64
+
+	unregister func()
 
 	mu sync.RWMutex
 	// subs keyed by clientSubId. A single map supports both newHeads
@@ -96,9 +111,13 @@ type clientSub struct {
 	// filterHash is "" for newHeads.
 	filterHash string
 
-	notify chan json.RawMessage
-	done   chan struct{}
-	closed atomic.Bool
+	q notifyQueue
+	// pending counts notifications queued or popped but not yet written;
+	// the cap applies to it.
+	pending atomic.Int64
+	wake    chan struct{}
+	done    chan struct{}
+	closed  atomic.Bool
 }
 
 // New creates an adapter for a single client connection. The writer is
@@ -106,10 +125,7 @@ type clientSub struct {
 // concurrent use (typically an internal sync.Mutex on the WS connection).
 func New(connID string, writer NotificationWriter, logger *zerolog.Logger, opts Options) *Adapter {
 	lg := logger.With().Str("connId", connID).Logger()
-	if opts.BufferSize <= 0 {
-		opts.BufferSize = DefaultNotifyBufferSize
-	}
-	return &Adapter{
+	a := &Adapter{
 		connID: connID,
 		writer: writer,
 		logger: &lg,
@@ -117,10 +133,17 @@ func New(connID string, writer NotificationWriter, logger *zerolog.Logger, opts 
 		subs:   make(map[string]*clientSub),
 		routes: make(map[routeKey]map[string]struct{}),
 	}
+	if opts.Budget != nil {
+		a.unregister = opts.Budget.Register(a)
+	}
+	return a
 }
 
 // Name identifies the adapter in indexer registries and logs.
 func (a *Adapter) Name() string { return "ws:client:" + a.connID }
+
+// QueuedBytes returns the bytes this connection holds and has not written.
+func (a *Adapter) QueuedBytes() int64 { return a.queued.Load() }
 
 // InterestedIn: O(1) map lookup. Called by the indexer on every event.
 func (a *Adapter) InterestedIn(kind indexer.EventKind, networkID, filterHash string) bool {
@@ -130,10 +153,8 @@ func (a *Adapter) InterestedIn(kind indexer.EventKind, networkID, filterHash str
 	return ok
 }
 
-// Deliver enqueues the event on every matching per-sub channel. It never
-// blocks the indexer. If a sub's buffer is full, the adapter either
-// evicts the oldest queued notification, or (close policy) asks the
-// caller to close the connection. Every lost notification goes to OnDrop.
+// Deliver enqueues the event on every matching subscription. It never
+// blocks the indexer, and it never evicts a queued notification.
 func (a *Adapter) Deliver(ev indexer.IndexedEvent) {
 	a.mu.RLock()
 	routes, ok := a.routes[routeKey{kind: ev.Kind, networkID: ev.NetworkId, filterHash: ev.FilterHash}]
@@ -168,7 +189,7 @@ func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.Ev
 		kind:       kind,
 		networkID:  networkID,
 		filterHash: filterHash,
-		notify:     make(chan json.RawMessage, a.opts.BufferSize),
+		wake:       make(chan struct{}, 1),
 		done:       make(chan struct{}),
 	}
 
@@ -207,14 +228,12 @@ func (a *Adapter) RemoveSubscription(clientSubID string) (kind indexer.EventKind
 	}
 	a.mu.Unlock()
 
-	if sub.closed.CompareAndSwap(false, true) {
-		close(sub.done)
-	}
+	a.stop(sub)
 	return sub.kind, sub.networkID, sub.filterHash, true
 }
 
-// Drain stops every sub's writer — call on connection close before
-// detaching from the indexer.
+// Drain stops every sub's writer, releases every queued byte, and leaves
+// the budget — call on connection close before detaching from the indexer.
 func (a *Adapter) Drain() {
 	a.mu.Lock()
 	subs := a.subs
@@ -223,9 +242,20 @@ func (a *Adapter) Drain() {
 	a.mu.Unlock()
 
 	for _, sub := range subs {
-		if sub.closed.CompareAndSwap(false, true) {
-			close(sub.done)
-		}
+		a.stop(sub)
+	}
+	if a.unregister != nil {
+		a.unregister()
+	}
+}
+
+// stop closes a sub's queue, releases what it held, and stops its writer.
+// A batch the writer already popped is released by the writer itself.
+func (a *Adapter) stop(sub *clientSub) {
+	items, released := sub.q.reset()
+	a.release(sub, items, released)
+	if sub.closed.CompareAndSwap(false, true) {
+		close(sub.done)
 	}
 }
 
@@ -269,9 +299,20 @@ func (a *Adapter) runWriter(sub *clientSub) {
 		select {
 		case <-sub.done:
 			return
-		case payload, ok := <-sub.notify:
-			if !ok {
+		case <-sub.wake:
+		}
+		batch, _ := sub.q.popAll()
+		for i, payload := range batch {
+			select {
+			case <-sub.done:
+				// Stopped mid-batch: release what was popped and not written.
+				var rest int64
+				for _, p := range batch[i:] {
+					rest += int64(len(p))
+				}
+				a.release(sub, len(batch)-i, rest)
 				return
+			default:
 			}
 			if err := a.writer.WriteSubscriptionNotification(sub.id, payload); err != nil {
 				a.logger.Debug().Err(err).Str("clientSubId", sub.id).
@@ -279,45 +320,102 @@ func (a *Adapter) runWriter(sub *clientSub) {
 				// Errors are per-sub; the connection-close path will
 				// Drain us when the peer is truly gone.
 			}
+			a.release(sub, 1, int64(len(payload)))
 		}
 	}
 }
 
-// enqueue pushes a payload onto the sub's buffer. Never blocks.
+// --- enqueue ----------------------------------------------------------
+
+// enqueue queues one payload for sub. It never blocks and never evicts.
 func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
-	if a.slow.Load() {
-		a.dropped(sub, DropSlowClose)
+	if a.closing.Load() {
+		a.dropped(sub)
 		return
 	}
-	for {
-		select {
-		case sub.notify <- payload:
+	if limit := a.capFor(sub.networkID); limit > 0 && sub.pending.Load()+1 > int64(limit) {
+		a.logger.Warn().Str("clientSubId", sub.id).Str("kind", sub.kind.String()).
+			Str("networkId", sub.networkID).Int("cap", limit).
+			Msg("subscription queue reached its protocol cap; closing slow client connection")
+		a.close(CloseSubCap)
+		a.dropped(sub)
+		return
+	}
+
+	n := int64(len(payload))
+	if b := a.opts.Budget; b != nil && !b.Reserve(n) {
+		victim := b.EvictLargest()
+		if victim == nil || victim == a {
+			b.Release(n)
+			a.logger.Warn().Str("clientSubId", sub.id).Int64("budgetBytes", b.Limit()).
+				Int64("queuedBytes", a.QueuedBytes()).
+				Msg("notification byte budget spent and this connection holds the most; closing it")
+			a.close(CloseHostBudget)
+			a.dropped(sub)
 			return
-		default:
 		}
-		if a.opts.OnSlow != nil {
-			a.dropped(sub, DropSlowClose)
-			if a.slow.CompareAndSwap(false, true) {
-				a.logger.Warn().Str("clientSubId", sub.id).Str("kind", sub.kind.String()).
-					Int("bufferSize", a.opts.BufferSize).
-					Msg("subscription buffer full; closing slow client connection")
-				a.opts.OnSlow()
-			}
-			return
+		// Another connection holds more: close it and queue this one. The
+		// budget overshoots by this payload until the victim's bytes go.
+		victim.logger.Warn().Int64("budgetBytes", b.Limit()).
+			Int64("queuedBytes", victim.QueuedBytes()).
+			Msg("notification byte budget spent and this connection holds the most; closing it")
+		victim.close(CloseHostBudget)
+	}
+
+	if _, _, ok := sub.q.push(payload); !ok {
+		// The sub was removed while we were here.
+		if a.opts.Budget != nil {
+			a.opts.Budget.Release(n)
 		}
-		// Buffer full; evict the oldest and retry. If the writer drained
-		// the buffer between the two selects, the receive finds nothing
-		// and the retry succeeds — the new payload is never lost to that race.
-		select {
-		case <-sub.notify:
-			a.dropped(sub, DropBufferFull)
-		default:
-		}
+		return
+	}
+	sub.pending.Add(1)
+	a.queued.Add(n)
+	if a.opts.OnQueue != nil {
+		a.opts.OnQueue(sub.networkID, 1, n)
+	}
+	select {
+	case sub.wake <- struct{}{}:
+	default:
 	}
 }
 
-func (a *Adapter) dropped(sub *clientSub, reason DropReason) {
+// capFor is the live per-subscription cap: max(MinQueue, QueueCap).
+func (a *Adapter) capFor(networkID string) int {
+	limit := a.opts.MinQueue
+	if a.opts.QueueCap != nil {
+		if c := a.opts.QueueCap(networkID); c > limit {
+			limit = c
+		}
+	}
+	return limit
+}
+
+// close asks the caller to close the connection, once.
+func (a *Adapter) close(reason CloseReason) {
+	if a.closing.CompareAndSwap(false, true) && a.opts.OnClose != nil {
+		a.opts.OnClose(reason)
+	}
+}
+
+// release undoes the accounting for items that left sub's queue, written
+// or not.
+func (a *Adapter) release(sub *clientSub, items int, bytes int64) {
+	if items == 0 {
+		return
+	}
+	sub.pending.Add(-int64(items))
+	a.queued.Add(-bytes)
+	if a.opts.Budget != nil {
+		a.opts.Budget.Release(bytes)
+	}
+	if a.opts.OnQueue != nil {
+		a.opts.OnQueue(sub.networkID, -items, -bytes)
+	}
+}
+
+func (a *Adapter) dropped(sub *clientSub) {
 	if a.opts.OnDrop != nil {
-		a.opts.OnDrop(sub.networkID, sub.kind, reason)
+		a.opts.OnDrop(sub.networkID, sub.kind, DropClosing)
 	}
 }

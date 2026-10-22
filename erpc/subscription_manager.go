@@ -53,6 +53,10 @@ type SubscriptionManager struct {
 	// connection.
 	conns sync.Map
 
+	budgetOnce sync.Once
+	budget     *wsclient.ByteBudget
+	queueCaps  sync.Map // networkId -> int, last value set on the gauge
+
 	// bySubID maps a client-facing subscription ID to the record needed
 	// to route Unsubscribe/Cleanup without walking every connection.
 	bySubID sync.Map // clientSubId -> *subRecord
@@ -481,20 +485,27 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 		return existing.(*connEntry)
 	}
 	wsCfg := wsc.server.serverCfg.WebSocket
+	budget := sm.notifyBudget(wsCfg.NotifyBudgetBytes)
 	opts := wsclient.Options{
-		BufferSize: wsCfg.NotifyBufferSize,
+		MinQueue: wsCfg.NotifyBufferSize,
+		QueueCap: sm.queueCap,
+		Budget:   budget,
 		OnDrop: func(networkID string, kind indexer.EventKind, reason wsclient.DropReason) {
 			telemetry.MetricWsNotificationsDroppedTotal.
 				WithLabelValues(networkID, kind.String(), string(reason)).Inc()
 		},
-	}
-	if wsCfg.CloseSlowSubscribers {
-		// Close off the indexer's delivery goroutine: closeWithCode runs
-		// the connection cleanup, which detaches this adapter from the
-		// indexer that is calling us.
-		opts.OnSlow = func() {
+		OnClose: func(reason wsclient.CloseReason) {
+			telemetry.MetricWsBudgetClosesTotal.WithLabelValues(string(reason)).Inc()
+			// Close off the indexer's delivery goroutine: closeWithCode runs
+			// the connection cleanup, which detaches this adapter from the
+			// indexer that is calling us.
 			go wsc.closeWithCode(SlowSubscriberCloseCode, "subscriber too slow; resubscribe and back-fill")
-		}
+		},
+		OnQueue: func(networkID string, deltaItems int, deltaBytes int64) {
+			telemetry.MetricWsQueuedNotifications.WithLabelValues(networkID).Add(float64(deltaItems))
+			telemetry.MetricWsQueuedBytes.WithLabelValues(networkID).Add(float64(deltaBytes))
+			telemetry.MetricWsBudgetBytesUsed.WithLabelValues().Set(float64(budget.Used()))
+		},
 	}
 	adapter := wsclient.New(wsc.id, wsc, sm.logger, opts)
 	entry := &connEntry{adapter: adapter}
@@ -508,6 +519,34 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 	}
 	entry.attach(sm.idx)
 	return entry
+}
+
+// notifyBudget returns the process's notification byte budget, made from
+// the first connection's config. Every connection shares it.
+func (sm *SubscriptionManager) notifyBudget(limit int64) *wsclient.ByteBudget {
+	if limit <= 0 {
+		limit = common.DefaultNotifyBudgetBytes
+	}
+	sm.budgetOnce.Do(func() {
+		sm.budget = wsclient.NewByteBudget(limit)
+		telemetry.MetricWsBudgetBytesLimit.WithLabelValues().Set(float64(limit))
+		// Give an alert's increase() a series before the first close.
+		telemetry.MetricWsBudgetClosesTotal.WithLabelValues(string(wsclient.CloseSubCap))
+		telemetry.MetricWsBudgetClosesTotal.WithLabelValues(string(wsclient.CloseHostBudget))
+	})
+	return sm.budget
+}
+
+// queueCap is the live per-subscription cap on a network: two blocks of the
+// most logs a block can hold at the network's latest gas limit, so legal
+// back-to-back full blocks never trip it.
+func (sm *SubscriptionManager) queueCap(networkID string) int {
+	c := 2 * indexer.MaxLogsPerBlock(sm.idx.GasLimits().GasLimit(networkID))
+	if prev, ok := sm.queueCaps.Load(networkID); !ok || prev.(int) != c {
+		sm.queueCaps.Store(networkID, c)
+		telemetry.MetricWsQueueCap.WithLabelValues(networkID).Set(float64(c))
+	}
+	return c
 }
 
 // acquireRateLimits acquires rate-limit permits at both project and
