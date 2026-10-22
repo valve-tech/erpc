@@ -22,6 +22,13 @@ type Options struct {
 	// Now is the clock used for event timestamps. Tests inject a fake
 	// clock; nil falls back to time.Now.
 	Now func() time.Time
+	// FallbackGasLimit sizes notification queues on a network before its
+	// first head. 0 = DefaultFallbackGasLimit.
+	FallbackGasLimit uint64
+	// OnDedupLate is called for a filter event the dedup window could not
+	// vouch for: a fresh key from a block the window has already evicted
+	// keys of. It may be a delivered duplicate. May be nil.
+	OnDedupLate func(networkId string, kind EventKind)
 }
 
 // Indexer is the transport-neutral core: ingresses push StreamEvents via
@@ -39,6 +46,8 @@ type Indexer struct {
 	networks sync.Map // networkId -> *networkState
 	egresses sync.Map // egress Name() -> EventEgress
 	seq      atomic.Uint64
+
+	gasLimits *GasLimitTracker
 }
 
 // networkState holds the indexer's per-network bookkeeping: the
@@ -97,10 +106,14 @@ func New(logger *zerolog.Logger, opts Options) *Indexer {
 		opts.DedupWindowSize = DefaultDedupWindowSize
 	}
 	return &Indexer{
-		logger: logger,
-		opts:   opts,
+		logger:    logger,
+		opts:      opts,
+		gasLimits: NewGasLimitTracker(opts.FallbackGasLimit, logger),
 	}
 }
+
+// GasLimits returns the per-network gas limits seen on newHeads.
+func (i *Indexer) GasLimits() *GasLimitTracker { return i.gasLimits }
 
 // RegisterNetwork installs a NetworkHandle for the indexer to consult when
 // tagging lifecycle and routing per-source state-poller updates. Safe to
@@ -190,7 +203,15 @@ func (i *Indexer) EnsureFilter(ctx context.Context, networkId, subType string, p
 
 	ns.filterMu.Lock()
 	if _, ok := ns.filterDedup[paramsHash]; !ok {
-		ns.filterDedup[paramsHash] = NewDedupWindow(i.opts.DedupWindowSize)
+		if subType == SubTypeLogs {
+			// Two blocks at the protocol's maximum logs per block, so the
+			// same full block from two upstreams out of step still dedupes.
+			ns.filterDedup[paramsHash] = NewProtocolDedupWindow(i.opts.DedupWindowSize, func() int {
+				return 2 * MaxLogsPerBlock(i.gasLimits.GasLimit(networkId))
+			})
+		} else {
+			ns.filterDedup[paramsHash] = NewDedupWindow(i.opts.DedupWindowSize)
+		}
 	}
 	ns.filterRefcnt[paramsHash]++
 	first := ns.filterRefcnt[paramsHash] == 1
@@ -363,6 +384,10 @@ func (i *Indexer) Ingest(ev StreamEvent) {
 	if ev.Kind == KindNewHead && !ev.Block.Zero() && ev.SourceId != "" {
 		ns.handle.SuggestLatestBlock(ev.SourceId, ev.Block.Number)
 	}
+	// A duplicate head still carries a valid gas limit.
+	if ev.Kind == KindNewHead && len(ev.Payload) > 0 {
+		i.gasLimits.Observe(ev.NetworkId, ev.Payload)
+	}
 
 	// Dedup.
 	if !i.dedupe(ns, &ev) {
@@ -495,12 +520,16 @@ func (i *Indexer) dedupe(ns *networkState, ev *StreamEvent) bool {
 			// Allow through — upstream subs we didn't request are rare.
 			return true
 		}
-		key := DedupKeyForFilter(ev.Kind.String(), ev.Payload)
+		key, block := dedupKeyAndBlock(ev.Kind.String(), ev.Payload)
 		if key == "" {
 			// Couldn't extract a key; don't pretend we deduped.
 			return true
 		}
-		return win.Mark(key)
+		fresh, late := win.MarkAt(key, block)
+		if late && i.opts.OnDedupLate != nil {
+			i.opts.OnDedupLate(ev.NetworkId, ev.Kind)
+		}
+		return fresh
 	default:
 		return true
 	}

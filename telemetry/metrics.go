@@ -173,15 +173,69 @@ var (
 	// failed_open if it never recovers — which is what makes any non-zero rate
 	// alert-worthy.
 	// MetricWsNotificationsDroppedTotal counts eth_subscription notifications
-	// that never reached a client's socket. reason="buffer_full": the oldest
-	// queued one was evicted for a slow client. reason="slow_close": the
-	// close policy closed the connection instead (code 4013), so the client
-	// can see the gap. Any nonzero rate means a subscriber missed events.
+	// that never reached a client's socket. reason="closing": the connection
+	// was closed with 4013 (a subscription passed its protocol cap, or the
+	// process's byte budget was spent and this connection held the most), so
+	// the client sees the gap. No notification is ever dropped silently.
 	MetricWsNotificationsDroppedTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "ws_notifications_dropped_total",
-		Help:      "WebSocket subscription notifications that never reached the client, by network, event kind and reason (buffer_full = oldest evicted; slow_close = connection closed with 4013).",
+		Help:      "WebSocket subscription notifications that never reached the client, by network, event kind and reason (closing = the connection is being closed with 4013).",
 	}, []string{"network", "kind", "reason"})
+
+	// MetricIndexerDedupLateTotal counts filter events (logs, pending txs)
+	// the dedup window could not vouch for: a fresh key from a block the
+	// window has already evicted keys of. The window holds two blocks at the
+	// protocol's maximum logs per block, so a nonzero rate means one
+	// upstream ran more than that far behind another, and a duplicate may
+	// have reached clients.
+	MetricIndexerDedupLateTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "indexer_dedup_late_total",
+		Help:      "Subscription filter events that arrived for a block the dedup window had already partly forgotten (a duplicate may have been delivered), by network and kind.",
+	}, []string{"network", "kind"})
+
+	// MetricWsQueuedNotifications and MetricWsQueuedBytes are what client
+	// subscriptions hold and have not yet written, per network.
+	MetricWsQueuedNotifications = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "ws_queued_notifications",
+		Help:      "WebSocket subscription notifications queued and not yet written, by network.",
+	}, []string{"network"})
+	MetricWsQueuedBytes = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "ws_queued_bytes",
+		Help:      "Bytes of WebSocket subscription notifications queued and not yet written, by network.",
+	}, []string{"network"})
+
+	// MetricWsQueueCap is the live per-subscription cap: two blocks of
+	// ceil(gasLimit / 375) logs, or notifyBufferSize if that is larger.
+	MetricWsQueueCap = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "ws_queue_cap",
+		Help:      "Per-subscription WebSocket notification queue cap, by network (two blocks at the protocol's maximum logs per block).",
+	}, []string{"network"})
+
+	// MetricWsBudgetBytesUsed and MetricWsBudgetBytesLimit are the process's
+	// notification byte budget.
+	MetricWsBudgetBytesUsed = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "ws_budget_bytes_used",
+		Help:      "Bytes charged against the process's WebSocket notification budget.",
+	}, []string{})
+	MetricWsBudgetBytesLimit = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "ws_budget_bytes_limit",
+		Help:      "Size of the process's WebSocket notification budget in bytes.",
+	}, []string{})
+
+	// MetricWsBudgetClosesTotal counts connections closed with 4013, by
+	// reason: sub_cap or host_budget.
+	MetricWsBudgetClosesTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "ws_budget_closes_total",
+		Help:      "WebSocket connections closed with 4013 because a subscriber fell too far behind, by reason (sub_cap = one subscription passed its protocol cap; host_budget = the process byte budget was spent and this connection held the most).",
+	}, []string{"reason"})
 
 	MetricNetworkServedTipRegressionTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",

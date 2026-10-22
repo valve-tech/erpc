@@ -97,6 +97,12 @@ func NewHttpServer(
 		indexerOpts.CanonicalChainDepth = indexerCfg.CanonicalChainDepth
 		indexerOpts.DedupWindowSize = indexerCfg.DedupWindowSize
 	}
+	if cfg != nil && cfg.WebSocket != nil {
+		indexerOpts.FallbackGasLimit = cfg.WebSocket.FallbackGasLimit
+	}
+	indexerOpts.OnDedupLate = func(networkId string, kind indexer.EventKind) {
+		telemetry.MetricIndexerDedupLateTotal.WithLabelValues(networkId, kind.String()).Inc()
+	}
 	idx := indexer.New(&indexerLogger, indexerOpts)
 
 	srv := &HttpServer{

@@ -323,11 +323,18 @@ type WebSocketServerConfig struct {
 	MaxMessageSize                int64     `yaml:"maxMessageSize,omitempty" json:"maxMessageSize"`
 	PingInterval                  *Duration `yaml:"pingInterval,omitempty" json:"pingInterval" tstype:"Duration"`
 	MaxSubscriptionsPerConnection int       `yaml:"maxSubscriptionsPerConnection,omitempty" json:"maxSubscriptionsPerConnection"`
-	// NotifyBufferSize is the per-subscription notification buffer depth.
+	// NotifyBufferSize is a floor on each subscription's queue cap. The cap
+	// itself follows the protocol: two blocks of ceil(gasLimit / 375) logs.
+	// It never preallocates.
 	NotifyBufferSize int `yaml:"notifyBufferSize,omitempty" json:"notifyBufferSize"`
-	// CloseSlowSubscribers closes the client connection with code 4013
-	// when a subscription's buffer is full, instead of evicting the
-	// oldest notification. Default off.
+	// NotifyBudgetBytes bounds the notification bytes queued across the
+	// whole process. Over it, the connection holding the most is closed
+	// with 4013.
+	NotifyBudgetBytes int64 `yaml:"notifyBudgetBytes,omitempty" json:"notifyBudgetBytes"`
+	// FallbackGasLimit sizes queue caps on a network before its first head.
+	FallbackGasLimit uint64 `yaml:"fallbackGasLimit,omitempty" json:"fallbackGasLimit"`
+	// CloseSlowSubscribers is retired: a slow subscriber is always closed
+	// with 4013. Still parsed so old configs load; setting it logs a warn.
 	CloseSlowSubscribers bool `yaml:"closeSlowSubscribers,omitempty" json:"closeSlowSubscribers"`
 }
 

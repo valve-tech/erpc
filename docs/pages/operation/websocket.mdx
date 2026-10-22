@@ -264,13 +264,40 @@ server:
     pingInterval: 30s
     # Maximum active subscriptions per WebSocket connection (default: 100)
     maxSubscriptionsPerConnection: 100
-    # Notifications buffered per subscription before the slow-client policy applies (default: 256)
-    notifyBufferSize: 256
-    # On a full buffer, close the connection with code 4013 instead of evicting the oldest notification (default: false)
-    closeSlowSubscribers: false
+    # Floor on each subscription's queue cap; never preallocated (default: 0)
+    notifyBufferSize: 0
+    # Notification bytes queued across the whole process, 64 MiB to 16 GiB (default: 1 GiB)
+    notifyBudgetBytes: 1073741824
+    # Gas limit used to size queue caps before a network's first head, 30M to 1B (default: 60000000)
+    fallbackGasLimit: 60000000
 ```
 
-When a client reads slower than notifications arrive, its subscription buffer fills. By default eRPC then evicts the oldest queued notification. With `closeSlowSubscribers: true`, eRPC evicts nothing and closes the connection with code `4013`. The client must reconnect, resubscribe and back-fill the gap (for `logs`, with `eth_getLogs`). Either way, `erpc_ws_notifications_dropped_total{network, kind, reason}` counts every lost notification.
+eRPC never drops a subscription notification silently. Each subscription's queue grows on demand and costs nothing while idle. Its cap follows the protocol: two blocks of `ceil(gasLimit / 375)` logs, from the network's latest `newHeads` gas limit (375 is the gas of the cheapest log). So two legal back-to-back full blocks never reach it. `notifyBufferSize` raises the cap when it is larger.
+
+eRPC closes the connection with code `4013` and the reason `subscriber too slow; resubscribe and back-fill` in two cases:
+
+- A subscription reaches its cap.
+- The process's queued bytes pass `notifyBudgetBytes`. eRPC then closes the connection that holds the most queued bytes. A subscriber that keeps up holds no bytes and is never chosen.
+
+The budget counts a notification once, however many subscriptions hold it, because they share one copy in memory. So ten subscribers to the same full block cost one block, not ten.
+
+After a `4013`, the client must reconnect, resubscribe and back-fill the gap (for `logs`, with `eth_getLogs`).
+
+A client that has stopped reading may see `1006` (abnormal closure) instead of `4013`. eRPC queues the close frame behind the notifications it has already written, and a client that never reads them never reaches the frame. Treat `1006` like `4013`: reconnect, resubscribe and back-fill.
+
+Metrics:
+
+- `erpc_ws_notifications_dropped_total{network, kind, reason="closing"}`: notifications not written because their connection is being closed.
+- `erpc_ws_budget_closes_total{reason}`: `4013` closes, by `sub_cap` or `host_budget`.
+- `erpc_ws_queued_notifications{network}` and `erpc_ws_queued_bytes{network}`: what subscriptions hold and have not written, summed per subscription. A notification shared by ten subscriptions counts ten times here, once in the budget.
+- `erpc_ws_queue_cap{network}`: the live per-subscription cap.
+- `erpc_indexer_dedup_late_total{network, kind}`: filter events that arrived for a block the dedup window had partly forgotten, so a duplicate may have reached clients. When several upstreams deliver the same `logs`, eRPC sends one copy. It remembers two blocks' worth of the most logs a block can hold, from the network's gas limit, so a nonzero rate means one upstream ran further behind than that.
+- `erpc_ws_budget_bytes_used` and `erpc_ws_budget_bytes_limit`: the process budget, counting each shared notification once.
+
+Migrating from 0.3.0.3-valve:
+
+- `notifyBufferSize: 1024` still works and now means "a cap of at least 1,024".
+- Remove `closeSlowSubscribers`. It is retired, because eRPC always closes a slow subscriber with `4013`. Setting it logs a warning and changes nothing.
 
 ## Per-frame wire tracing
 

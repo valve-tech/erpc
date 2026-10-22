@@ -914,9 +914,7 @@ func (s *ServerConfig) SetDefaults() error {
 	if s.WebSocket.MaxSubscriptionsPerConnection == 0 {
 		s.WebSocket.MaxSubscriptionsPerConnection = 100
 	}
-	if s.WebSocket.NotifyBufferSize == 0 {
-		s.WebSocket.NotifyBufferSize = 256
-	}
+	s.WebSocket.setNotifyDefaults()
 	// Safe defaults for client IP resolution
 	if len(s.TrustedIPForwarders) == 0 {
 		// Only loopback by default; do not trust private subnets unless explicitly configured
@@ -3458,4 +3456,43 @@ func (c *CORSConfig) SetDefaults() error {
 // or rely on the translator (Phase 12) to synthesize one from legacy fields.
 func NewDefaultNetworkConfig(upstreams []*UpstreamConfig) *NetworkConfig {
 	return &NetworkConfig{}
+}
+
+// WebSocket notification queue limits. See WebSocketServerConfig.
+const (
+	DefaultNotifyBudgetBytes int64  = 1 << 30
+	MinNotifyBudgetBytes     int64  = 64 << 20
+	MaxNotifyBudgetBytes     int64  = 16 << 30
+	MaxNotifyBufferSize             = 1_000_000
+	DefaultFallbackGasLimit  uint64 = 60_000_000
+	MinFallbackGasLimit      uint64 = 30_000_000
+	MaxFallbackGasLimit      uint64 = 1_000_000_000
+)
+
+func (w *WebSocketServerConfig) setNotifyDefaults() {
+	if w.NotifyBufferSize < 0 || w.NotifyBufferSize > MaxNotifyBufferSize {
+		clamped := min(max(w.NotifyBufferSize, 0), MaxNotifyBufferSize)
+		log.Warn().Int("configured", w.NotifyBufferSize).Int("used", clamped).
+			Msg("server.webSocket.notifyBufferSize out of range; clamping")
+		w.NotifyBufferSize = clamped
+	}
+	if w.NotifyBudgetBytes == 0 {
+		w.NotifyBudgetBytes = DefaultNotifyBudgetBytes
+	} else if w.NotifyBudgetBytes < MinNotifyBudgetBytes || w.NotifyBudgetBytes > MaxNotifyBudgetBytes {
+		clamped := min(max(w.NotifyBudgetBytes, MinNotifyBudgetBytes), MaxNotifyBudgetBytes)
+		log.Warn().Int64("configured", w.NotifyBudgetBytes).Int64("used", clamped).
+			Msg("server.webSocket.notifyBudgetBytes out of range; clamping")
+		w.NotifyBudgetBytes = clamped
+	}
+	if w.FallbackGasLimit == 0 {
+		w.FallbackGasLimit = DefaultFallbackGasLimit
+	} else if w.FallbackGasLimit < MinFallbackGasLimit || w.FallbackGasLimit > MaxFallbackGasLimit {
+		clamped := min(max(w.FallbackGasLimit, MinFallbackGasLimit), MaxFallbackGasLimit)
+		log.Warn().Uint64("configured", w.FallbackGasLimit).Uint64("used", clamped).
+			Msg("server.webSocket.fallbackGasLimit out of range; clamping")
+		w.FallbackGasLimit = clamped
+	}
+	if w.CloseSlowSubscribers {
+		log.Warn().Msg("closeSlowSubscribers is retired: eRPC always closes a slow subscriber with 4013")
+	}
 }

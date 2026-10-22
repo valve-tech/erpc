@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/json"
+	"runtime"
 	"testing"
 )
 
@@ -81,4 +82,22 @@ func TestDedupKeyForFilter_UnknownSubTypeReturnsEmpty(t *testing.T) {
 	if got != "" {
 		t.Fatalf("unknown subType should return empty key, got %q", got)
 	}
+}
+
+// An idle window costs almost nothing: every distinct logs filter gets
+// one, and a window preallocated to its size cost about 560 KiB.
+func TestDedupWindowIdleCostsNothing(t *testing.T) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	windows := make([]*DedupWindow, 100)
+	for i := range windows {
+		windows[i] = NewDedupWindow(0)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if delta := int64(after.HeapAlloc) - int64(before.HeapAlloc); delta > 1<<20 {
+		t.Fatalf("100 idle dedup windows hold %d heap bytes, want < 1 MiB", delta)
+	}
+	runtime.KeepAlive(windows)
 }
