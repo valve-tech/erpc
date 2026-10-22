@@ -54,8 +54,8 @@ func TestQueueReset(t *testing.T) {
 	var q notifyQueue
 	q.push(json.RawMessage(`12`))
 	q.push(json.RawMessage(`345`))
-	if items, released := q.reset(); items != 2 || released != 5 {
-		t.Fatalf("reset = %d items / %d bytes, want 2 / 5", items, released)
+	if out := q.reset(); len(out) != 2 || string(out[0]) != "12" || string(out[1]) != "345" {
+		t.Fatalf("reset = %q, want [12 345]", out)
 	}
 	if q.depth() != 0 || q.bytes != 0 {
 		t.Fatalf("after reset depth=%d bytes=%d", q.depth(), q.bytes)

@@ -265,8 +265,7 @@ func (a *Adapter) maybeUnregister() {
 // stop closes a sub's queue, releases what it held, and stops its writer.
 // A batch the writer already popped is released by the writer itself.
 func (a *Adapter) stop(sub *clientSub) {
-	items, released := sub.q.reset()
-	a.release(sub, items, released)
+	a.release(sub, sub.q.reset()...)
 	if sub.closed.CompareAndSwap(false, true) {
 		close(sub.done)
 	}
@@ -326,11 +325,7 @@ func (a *Adapter) runWriter(sub *clientSub) {
 			}
 			if stopped {
 				// Stopped mid-batch: release what was popped and not written.
-				var rest int64
-				for _, p := range batch[i:] {
-					rest += int64(len(p))
-				}
-				a.release(sub, len(batch)-i, rest)
+				a.release(sub, batch[i:]...)
 				return
 			}
 			if err := a.writer.WriteSubscriptionNotification(sub.id, payload); err != nil {
@@ -339,7 +334,7 @@ func (a *Adapter) runWriter(sub *clientSub) {
 				// Errors are per-sub; the connection-close path will
 				// Drain us when the peer is truly gone.
 			}
-			a.release(sub, 1, int64(len(payload)))
+			a.release(sub, payload)
 		}
 	}
 }
@@ -362,10 +357,10 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 	}
 
 	n := int64(len(payload))
-	if b := a.opts.Budget; b != nil && !b.Reserve(n) {
+	if b := a.opts.Budget; b != nil && !b.Reserve(payload) {
 		victim, fits := b.EvictLargest()
 		if !fits && (victim == nil || victim == a) {
-			b.Release(n)
+			b.Release(payload)
 			a.logger.Warn().Str("clientSubId", sub.id).Int64("budgetBytes", b.Limit()).
 				Int64("queuedBytes", a.QueuedBytes()).
 				Msg("notification byte budget spent and this connection holds the most; closing it")
@@ -387,7 +382,7 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 	if _, _, ok := sub.q.push(payload); !ok {
 		// The sub was removed while we were here.
 		if a.opts.Budget != nil {
-			a.opts.Budget.Release(n)
+			a.opts.Budget.Release(payload)
 		}
 		return
 	}
@@ -428,27 +423,30 @@ func (a *Adapter) close(reason CloseReason) {
 	}
 	a.mu.RUnlock()
 	for _, sub := range subs {
-		items, released := sub.q.reset()
-		a.release(sub, items, released)
+		a.release(sub, sub.q.reset()...)
 	}
 	if a.opts.OnClose != nil {
 		a.opts.OnClose(reason)
 	}
 }
 
-// release undoes the accounting for items that left sub's queue, written
-// or not.
-func (a *Adapter) release(sub *clientSub, items int, bytes int64) {
-	if items == 0 {
+// release undoes the accounting for payloads that left sub's queue,
+// written or not.
+func (a *Adapter) release(sub *clientSub, payloads ...json.RawMessage) {
+	if len(payloads) == 0 {
 		return
 	}
-	sub.pending.Add(-int64(items))
-	a.queued.Add(-bytes)
-	if a.opts.Budget != nil {
-		a.opts.Budget.Release(bytes)
+	var bytes int64
+	for _, p := range payloads {
+		bytes += int64(len(p))
+		if a.opts.Budget != nil {
+			a.opts.Budget.Release(p)
+		}
 	}
+	sub.pending.Add(-int64(len(payloads)))
+	a.queued.Add(-bytes)
 	if a.opts.OnQueue != nil {
-		a.opts.OnQueue(sub.networkID, -items, -bytes)
+		a.opts.OnQueue(sub.networkID, -len(payloads), -bytes)
 	}
 	a.maybeUnregister()
 }

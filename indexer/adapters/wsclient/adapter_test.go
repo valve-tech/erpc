@@ -514,3 +514,65 @@ func TestCloseFiresOnce(t *testing.T) {
 		t.Fatalf("OnClose calls = %d, want 1", n.Load())
 	}
 }
+
+// N subscribers holding the same payloads cost one copy in the budget,
+// as they do in memory.
+func TestBudgetChargesSharedPayloadOnce(t *testing.T) {
+	budget := NewByteBudget(1 << 30)
+	adapters := make([]*Adapter, 15)
+	for i := range adapters {
+		adapters[i] = New("c"+strconv.Itoa(i), newBlockingWriter(), &nopLogger, Options{Budget: budget})
+		pin(t, adapters[i])
+	}
+	pins := budget.Used() // each pin is its own payload
+	block := make([]indexer.IndexedEvent, 1000)
+	for i := range block {
+		block[i] = logEvent(payloadOf(640))
+	}
+	for _, ev := range block {
+		for _, a := range adapters {
+			a.Deliver(ev)
+		}
+	}
+	if got, want := budget.Used()-pins, int64(1000*640); got != want {
+		t.Fatalf("15 subscribers of one block charge %d, want %d (one copy)", got, want)
+	}
+	// The bytes go when the last holder releases them.
+	for _, a := range adapters[:14] {
+		a.Drain()
+	}
+	if got := budget.Used() - pins; got != 1000*640 {
+		t.Fatalf("after 14 of 15 drain: %d charged, want %d", got, 1000*640)
+	}
+	adapters[14].Drain()
+	if got := budget.Used() - pins; got != 0 {
+		t.Fatalf("after all drain: %d charged, want 0", got)
+	}
+}
+
+func TestBudgetEmptyPayload(t *testing.T) {
+	b := NewByteBudget(10)
+	if !b.Reserve(nil) {
+		t.Fatal("empty payload under the limit should fit")
+	}
+	b.Release(nil)
+	if b.Used() != 0 {
+		t.Fatalf("used = %d", b.Used())
+	}
+}
+
+// Shared payloads can make the recovering estimate overstate what a close
+// frees; past twice the limit, nothing is queued on that estimate.
+func TestBudgetHardCeiling(t *testing.T) {
+	budget := NewByteBudget(100)
+	a := New("a", newBlockingWriter(), &nopLogger, Options{Budget: budget})
+	defer a.Drain()
+	a.closing.Store(true)
+	a.queued.Add(1 << 20) // claims a lot recovering
+	budget.used.Add(250)  // but the budget is past 2x
+	if victim, fits := budget.EvictLargest(); fits || victim != nil {
+		t.Fatalf("past 2x the limit: fits=%v victim=%v, want refuse", fits, victim)
+	}
+	budget.used.Add(-250)
+	a.queued.Add(-(1 << 20))
+}

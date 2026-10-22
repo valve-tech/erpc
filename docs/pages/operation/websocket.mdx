@@ -279,15 +279,19 @@ eRPC closes the connection with code `4013` and the reason `subscriber too slow;
 - A subscription reaches its cap.
 - The process's queued bytes pass `notifyBudgetBytes`. eRPC then closes the connection that holds the most queued bytes. A subscriber that keeps up holds no bytes and is never chosen.
 
+The budget counts a notification once, however many subscriptions hold it, because they share one copy in memory. So ten subscribers to the same full block cost one block, not ten.
+
 After a `4013`, the client must reconnect, resubscribe and back-fill the gap (for `logs`, with `eth_getLogs`).
+
+A client that has stopped reading may see `1006` (abnormal closure) instead of `4013`. eRPC queues the close frame behind the notifications it has already written, and a client that never reads them never reaches the frame. Treat `1006` like `4013`: reconnect, resubscribe and back-fill.
 
 Metrics:
 
 - `erpc_ws_notifications_dropped_total{network, kind, reason="closing"}`: notifications not written because their connection is being closed.
 - `erpc_ws_budget_closes_total{reason}`: `4013` closes, by `sub_cap` or `host_budget`.
-- `erpc_ws_queued_notifications{network}` and `erpc_ws_queued_bytes{network}`: what subscriptions hold and have not written.
+- `erpc_ws_queued_notifications{network}` and `erpc_ws_queued_bytes{network}`: what subscriptions hold and have not written, summed per subscription. A notification shared by ten subscriptions counts ten times here, once in the budget.
 - `erpc_ws_queue_cap{network}`: the live per-subscription cap.
-- `erpc_ws_budget_bytes_used` and `erpc_ws_budget_bytes_limit`: the process budget.
+- `erpc_ws_budget_bytes_used` and `erpc_ws_budget_bytes_limit`: the process budget, counting each shared notification once.
 
 Migrating from 0.3.0.3-valve:
 

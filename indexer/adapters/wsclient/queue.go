@@ -47,12 +47,11 @@ func (q *notifyQueue) popAll() ([]json.RawMessage, int64) {
 	return out, n
 }
 
-// reset closes the queue, discards every queued item, and returns what it
-// released.
-func (q *notifyQueue) reset() (items int, released int64) {
+// reset closes the queue and returns every item it discarded.
+func (q *notifyQueue) reset() []json.RawMessage {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	items, released = len(q.items), q.bytes
+	out := q.items
 	q.items, q.bytes, q.closed = nil, 0, true
-	return items, released
+	return out
 }
