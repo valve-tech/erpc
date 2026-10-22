@@ -134,3 +134,44 @@ func TestIngestReportsLateDedup(t *testing.T) {
 		t.Fatalf("delivered %d, want 4 (the late copy goes through, counted)", len(eg.received))
 	}
 }
+
+// Keys more than dedupAgeBlocks behind the newest block leave the window,
+// so a wide filter holds recent logs, not the protocol cap, in normal
+// traffic.
+func TestDedupAgesOutOldBlocks(t *testing.T) {
+	w := NewProtocolDedupWindow(1, func() int { return 1_000_000 })
+	for b := int64(1); b <= 100; b++ {
+		w.MarkAt(fmt.Sprintf("b%d", b), b)
+	}
+	w.mu.Lock()
+	n := len(w.order)
+	w.mu.Unlock()
+	if n != dedupAgeBlocks+1 {
+		t.Fatalf("window holds %d keys, want %d (blocks 36..100)", n, dedupAgeBlocks+1)
+	}
+	if fresh, late := w.MarkAt("b10", 10); !fresh || !late {
+		t.Fatalf("aged-out block: fresh=%v late=%v, want true/true", fresh, late)
+	}
+	if fresh, _ := w.MarkAt("b50", 50); fresh {
+		t.Fatal("block within the age must still dedupe")
+	}
+}
+
+// Only logs windows follow the protocol cap; pending-tx windows keep the
+// configured size.
+func TestPendingTxWindowKeepsConfiguredSize(t *testing.T) {
+	idx, _, _ := newLogsIndexer(t, Options{})
+	h, err := idx.EnsureFilter(context.Background(), "evm:1", SubTypeNewPendingTransactions,
+		[]interface{}{SubTypeNewPendingTransactions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nsRaw, _ := idx.networks.Load("evm:1")
+	ns := nsRaw.(*networkState)
+	ns.filterMu.RLock()
+	w := ns.filterDedup[h]
+	ns.filterMu.RUnlock()
+	if w.sizeFn != nil || w.capacity() != DefaultDedupWindowSize {
+		t.Fatalf("pending-tx window capacity = %d, sizeFn set = %v", w.capacity(), w.sizeFn != nil)
+	}
+}

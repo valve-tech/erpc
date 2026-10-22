@@ -203,11 +203,15 @@ func (i *Indexer) EnsureFilter(ctx context.Context, networkId, subType string, p
 
 	ns.filterMu.Lock()
 	if _, ok := ns.filterDedup[paramsHash]; !ok {
-		// Two blocks at the protocol's maximum logs per block, so the same
-		// full block from two upstreams out of step still dedupes.
-		ns.filterDedup[paramsHash] = NewProtocolDedupWindow(i.opts.DedupWindowSize, func() int {
-			return 2 * MaxLogsPerBlock(i.gasLimits.GasLimit(networkId))
-		})
+		if subType == SubTypeLogs {
+			// Two blocks at the protocol's maximum logs per block, so the
+			// same full block from two upstreams out of step still dedupes.
+			ns.filterDedup[paramsHash] = NewProtocolDedupWindow(i.opts.DedupWindowSize, func() int {
+				return 2 * MaxLogsPerBlock(i.gasLimits.GasLimit(networkId))
+			})
+		} else {
+			ns.filterDedup[paramsHash] = NewDedupWindow(i.opts.DedupWindowSize)
+		}
 	}
 	ns.filterRefcnt[paramsHash]++
 	first := ns.filterRefcnt[paramsHash] == 1

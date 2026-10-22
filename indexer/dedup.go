@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -55,22 +56,44 @@ func dedupKeyAndBlock(subType string, result json.RawMessage) (string, int64) {
 }
 
 
-// DedupWindow is a bounded FIFO seen-set: keys added past the window's
-// capacity evict the oldest entries. It is safe for concurrent use; callers
-// typically hold one per (network, subType, paramsHash) fan-out group.
+// dedupAgeBlocks is how far behind the newest block a window keeps keys.
+// It sets the upstream lag (in blocks) the window absorbs when blocks are
+// sparse; the size cap bounds it when they are full.
+const dedupAgeBlocks = 64
+
+type dedupKey [16]byte
+
+func hashDedupKey(key string) dedupKey {
+	sum := sha256.Sum256([]byte(key))
+	var k dedupKey
+	copy(k[:], sum[:16])
+	return k
+}
+
+type dedupEntry struct {
+	key   dedupKey
+	block int64
+}
+
+// DedupWindow is a bounded FIFO seen-set. It is safe for concurrent use;
+// callers typically hold one per (network, subType, paramsHash) fan-out
+// group. Keys are stored as 16-byte hashes.
 //
-// The capacity can follow the protocol: sizeFn, when set, is read on every
-// Mark, so a logs window holds at least two blocks' worth of the most logs
-// a block can carry. Two upstreams delivering the same full block out of
-// step then still collapse to one copy.
+// A key leaves the window when the window is over capacity, or when its
+// block is more than dedupAgeBlocks behind the newest block seen. The
+// capacity can follow the protocol: sizeFn, when set, is read on every
+// Mark, so a logs window can hold two blocks' worth of the most logs a block
+// can carry, and two upstreams delivering the same full block out of step
+// still collapse to one copy.
 type DedupWindow struct {
 	size   int
 	sizeFn func() int
 
-	mu   sync.Mutex
-	seen map[string]int64 // key -> block number (0 if unknown)
-	// order is the FIFO of keys.
-	order []string
+	mu    sync.Mutex
+	seen  map[dedupKey]struct{}
+	order []dedupEntry // FIFO
+	// newest is the highest block number seen.
+	newest int64
 	// floor is the highest block number among evicted keys. A new key at
 	// or below it may be a copy the window already forgot.
 	floor int64
@@ -86,7 +109,7 @@ func NewDedupWindow(size int) *DedupWindow {
 	// the default, for every distinct filter, even one that never matches.
 	return &DedupWindow{
 		size: size,
-		seen: make(map[string]int64),
+		seen: make(map[dedupKey]struct{}),
 	}
 }
 
@@ -118,22 +141,34 @@ func (w *DedupWindow) Mark(key string) bool {
 // fresh key at or below the highest block the window has evicted keys from:
 // it may be a second copy the window no longer remembers.
 func (w *DedupWindow) MarkAt(key string, block int64) (fresh, late bool) {
+	k := hashDedupKey(key)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if _, ok := w.seen[key]; ok {
+	if _, ok := w.seen[k]; ok {
 		return false, false
 	}
-	w.seen[key] = block
-	w.order = append(w.order, key)
+	w.seen[k] = struct{}{}
+	w.order = append(w.order, dedupEntry{key: k, block: block})
+	if block > w.newest {
+		w.newest = block
+	}
 
-	if size := w.capacity(); len(w.order) > size {
-		evict := len(w.order) - size
-		for _, old := range w.order[:evict] {
-			if b := w.seen[old]; b > w.floor {
-				w.floor = b
-			}
-			delete(w.seen, old)
+	size := w.capacity()
+	evict := 0
+	for evict < len(w.order) {
+		e := w.order[evict]
+		tooMany := len(w.order)-evict > size
+		tooOld := e.block > 0 && e.block < w.newest-dedupAgeBlocks
+		if !tooMany && !tooOld {
+			break
 		}
+		if e.block > w.floor {
+			w.floor = e.block
+		}
+		delete(w.seen, e.key)
+		evict++
+	}
+	if evict > 0 {
 		w.order = w.order[evict:]
 	}
 	return true, block > 0 && block <= w.floor
