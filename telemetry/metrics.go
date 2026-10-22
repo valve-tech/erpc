@@ -183,6 +183,18 @@ var (
 		Help:      "WebSocket subscription notifications that never reached the client, by network, event kind and reason (closing = the connection is being closed with 4013).",
 	}, []string{"network", "kind", "reason"})
 
+	// MetricIndexerDedupLateTotal counts filter events (logs, pending txs)
+	// the dedup window could not vouch for: a fresh key from a block the
+	// window has already evicted keys of. The window holds two blocks at the
+	// protocol's maximum logs per block, so a nonzero rate means one
+	// upstream ran more than that far behind another, and a duplicate may
+	// have reached clients.
+	MetricIndexerDedupLateTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "indexer_dedup_late_total",
+		Help:      "Subscription filter events that arrived for a block the dedup window had already partly forgotten (a duplicate may have been delivered), by network and kind.",
+	}, []string{"network", "kind"})
+
 	// MetricWsQueuedNotifications and MetricWsQueuedBytes are what client
 	// subscriptions hold and have not yet written, per network.
 	MetricWsQueuedNotifications = DefineGauge(prometheus.GaugeOpts{

@@ -291,6 +291,7 @@ Metrics:
 - `erpc_ws_budget_closes_total{reason}`: `4013` closes, by `sub_cap` or `host_budget`.
 - `erpc_ws_queued_notifications{network}` and `erpc_ws_queued_bytes{network}`: what subscriptions hold and have not written, summed per subscription. A notification shared by ten subscriptions counts ten times here, once in the budget.
 - `erpc_ws_queue_cap{network}`: the live per-subscription cap.
+- `erpc_indexer_dedup_late_total{network, kind}`: filter events that arrived for a block the dedup window had partly forgotten, so a duplicate may have reached clients. When several upstreams deliver the same `logs`, eRPC sends one copy. It remembers two blocks' worth of the most logs a block can hold, from the network's gas limit, so a nonzero rate means one upstream ran further behind than that.
 - `erpc_ws_budget_bytes_used` and `erpc_ws_budget_bytes_limit`: the process budget, counting each shared notification once.
 
 Migrating from 0.3.0.3-valve:

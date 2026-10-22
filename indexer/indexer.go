@@ -25,6 +25,10 @@ type Options struct {
 	// FallbackGasLimit sizes notification queues on a network before its
 	// first head. 0 = DefaultFallbackGasLimit.
 	FallbackGasLimit uint64
+	// OnDedupLate is called for a filter event the dedup window could not
+	// vouch for: a fresh key from a block the window has already evicted
+	// keys of. It may be a delivered duplicate. May be nil.
+	OnDedupLate func(networkId string, kind EventKind)
 }
 
 // Indexer is the transport-neutral core: ingresses push StreamEvents via
@@ -199,7 +203,11 @@ func (i *Indexer) EnsureFilter(ctx context.Context, networkId, subType string, p
 
 	ns.filterMu.Lock()
 	if _, ok := ns.filterDedup[paramsHash]; !ok {
-		ns.filterDedup[paramsHash] = NewDedupWindow(i.opts.DedupWindowSize)
+		// Two blocks at the protocol's maximum logs per block, so the same
+		// full block from two upstreams out of step still dedupes.
+		ns.filterDedup[paramsHash] = NewProtocolDedupWindow(i.opts.DedupWindowSize, func() int {
+			return 2 * MaxLogsPerBlock(i.gasLimits.GasLimit(networkId))
+		})
 	}
 	ns.filterRefcnt[paramsHash]++
 	first := ns.filterRefcnt[paramsHash] == 1
@@ -508,12 +516,16 @@ func (i *Indexer) dedupe(ns *networkState, ev *StreamEvent) bool {
 			// Allow through — upstream subs we didn't request are rare.
 			return true
 		}
-		key := DedupKeyForFilter(ev.Kind.String(), ev.Payload)
+		key, block := dedupKeyAndBlock(ev.Kind.String(), ev.Payload)
 		if key == "" {
 			// Couldn't extract a key; don't pretend we deduped.
 			return true
 		}
-		return win.Mark(key)
+		fresh, late := win.MarkAt(key, block)
+		if late && i.opts.OnDedupLate != nil {
+			i.opts.OnDedupLate(ev.NetworkId, ev.Kind)
+		}
+		return fresh
 	default:
 		return true
 	}
