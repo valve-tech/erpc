@@ -168,8 +168,10 @@ func TestDeliverOverSubCapCloses4013(t *testing.T) {
 	if drops[DropClosing] != 2 || len(drops) != 1 {
 		t.Fatalf("drops = %v, want closing:2", drops)
 	}
-	if a.subs["s1"].q.depth() != 9 {
-		t.Fatalf("depth = %d, want 9 (nothing evicted)", a.subs["s1"].q.depth())
+	// Nothing was evicted before the close; the close then released the
+	// whole queue at once, leaving only the writer's in-flight pin.
+	if a.subs["s1"].q.depth() != 0 || a.QueuedBytes() != int64(len(`"pin"`)) {
+		t.Fatalf("depth=%d queued=%d after close, want 0 / %d", a.subs["s1"].q.depth(), a.QueuedBytes(), len(`"pin"`))
 	}
 }
 
@@ -258,7 +260,6 @@ func TestBudgetEvictsSelfWhenLargest(t *testing.T) {
 
 	a.Deliver(logEvent(payloadOf(300 << 10)))
 	b.Deliver(logEvent(payloadOf(600 << 10)))
-	usedBefore := budget.Used()
 	b.Deliver(logEvent(payloadOf(200 << 10)))
 
 	bDrops, bCloses, _, _ := rb.snapshot()
@@ -271,29 +272,102 @@ func TestBudgetEvictsSelfWhenLargest(t *testing.T) {
 	if _, aCloses, _, _ := ra.snapshot(); len(aCloses) != 0 {
 		t.Fatalf("a closes = %v, want none", aCloses)
 	}
-	if budget.Used() != usedBefore {
-		t.Fatalf("budget used = %d, want %d (the refused payload released)", budget.Used(), usedBefore)
+	// The refused payload is released, and so is b's queue on close: the
+	// budget holds exactly what both adapters still hold.
+	if got, want := budget.Used(), a.QueuedBytes()+b.QueuedBytes(); got != want {
+		t.Fatalf("budget used = %d, want %d", got, want)
 	}
 }
 
 func TestBudgetTieGoesToNewest(t *testing.T) {
-	budget := NewByteBudget(10)
-	ra, rb := newRecorder(), newRecorder()
-	a := New("a", newBlockingWriter(), &nopLogger, ra.opts(Options{Budget: budget}))
-	b := New("b", newBlockingWriter(), &nopLogger, rb.opts(Options{Budget: budget}))
+	budget := NewByteBudget(1 << 30)
+	a := New("a", newBlockingWriter(), &nopLogger, Options{Budget: budget})
+	b := New("b", newBlockingWriter(), &nopLogger, Options{Budget: budget})
 	defer a.Drain()
 	defer b.Drain()
-	if got := budget.EvictLargest(); got != b {
-		t.Fatal("tie at 0 bytes should pick the newest adapter")
-	}
-	a.close(CloseSubCap)
-	b.close(CloseSubCap)
 	if got := budget.EvictLargest(); got != nil {
-		t.Fatal("no open adapter should give nil")
+		t.Fatal("no adapter holds bytes: nobody should be evicted")
 	}
-	if budget.Limit() != 10 {
+	c := New("c", newBlockingWriter(), &nopLogger, Options{Budget: budget})
+	c.close(CloseSubCap) // closing with 0 bytes: skipped, not "recovering"
+	defer c.Drain()
+	pin(t, a)
+	pin(t, b) // both hold the same 5-byte in-flight pin
+	if got := budget.EvictLargest(); got != b {
+		t.Fatal("tie should pick the newest adapter")
+	}
+	if budget.Limit() != 1<<30 {
 		t.Fatalf("limit = %d", budget.Limit())
 	}
+}
+
+// One slow client must not cascade into closing healthy connections while
+// its own bytes are still on their way out.
+func TestBudgetNoCascadeWhileVictimDrains(t *testing.T) {
+	budget := NewByteBudget(1 << 20)
+	wSlow := newBlockingWriter()
+	rs, rh := newRecorder(), newRecorder()
+	slow := New("slow", wSlow, &nopLogger, rs.opts(Options{Budget: budget}))
+	healthy := New("healthy", newBlockingWriter(), &nopLogger, rh.opts(Options{Budget: budget}))
+	defer slow.Drain()
+	defer healthy.Drain()
+
+	// The slow writer takes one big payload and blocks on it: in flight,
+	// so close() cannot release it.
+	slow.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	slow.Deliver(logEvent(payloadOf(900 << 10)))
+	waitFor(t, "slow writer to take its payload", func() bool { return slow.subs["s1"].q.depth() == 0 })
+	slow.Deliver(logEvent(payloadOf(50 << 10))) // queued behind it
+
+	healthy.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	healthy.Deliver(logEvent(payloadOf(200 << 10))) // over budget: slow is largest
+	if _, closes, _, _ := rs.snapshot(); len(closes) != 1 {
+		t.Fatalf("slow closes = %v, want one", closes)
+	}
+	// close() released slow's queued bytes at once; its in-flight batch
+	// still holds the budget until the blocked write returns.
+	if got := slow.QueuedBytes(); got != 900<<10 {
+		t.Fatalf("slow queued = %d, want only the in-flight %d", got, 900<<10)
+	}
+
+	// More over-budget deliveries: the budget is recovering, so healthy is
+	// never closed, however many arrive.
+	for i := 0; i < 20; i++ {
+		healthy.Deliver(logEvent(payloadOf(100 << 10)))
+	}
+	if _, closes, _, _ := rh.snapshot(); len(closes) != 0 {
+		t.Fatalf("healthy closes = %v, want none while slow's bytes drain", closes)
+	}
+
+	// The blocked write returns: slow's bytes go, and it holds nothing.
+	close(wSlow.release)
+	waitFor(t, "slow to release its bytes", func() bool { return slow.QueuedBytes() == 0 })
+}
+
+// A drained adapter stays in the budget until its in-flight bytes are
+// released, so those bytes cannot trigger an eviction of someone else.
+func TestDrainedAdapterLeavesBudgetAfterInFlight(t *testing.T) {
+	budget := NewByteBudget(1 << 30)
+	w := newBlockingWriter()
+	a := New("a", w, &nopLogger, Options{Budget: budget})
+	pin(t, a)
+	a.Drain()
+	budget.mu.Lock()
+	_, stillRegistered := budget.adapters[a]
+	budget.mu.Unlock()
+	if !stillRegistered {
+		t.Fatal("drained adapter left the budget with bytes still in flight")
+	}
+	if budget.EvictLargest() != nil {
+		t.Fatal("a draining adapter's bytes must not trigger an eviction")
+	}
+	close(w.release)
+	waitFor(t, "unregister", func() bool {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		_, ok := budget.adapters[a]
+		return !ok
+	})
 }
 
 func TestBudgetReleasedOnDrain(t *testing.T) {

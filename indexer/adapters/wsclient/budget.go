@@ -51,7 +51,15 @@ func (b *ByteBudget) Used() int64 { return b.used.Load() }
 func (b *ByteBudget) Limit() int64 { return b.limit }
 
 // EvictLargest returns the open adapter holding the most queued bytes; ties
-// go to the newest. It returns nil when no open adapter is registered.
+// go to the newest. It returns nil, so the caller closes nobody, in two
+// cases:
+//
+//   - A closing adapter still holds bytes. The budget is recovering: those
+//     bytes go when its blocked writer returns, within the write deadline.
+//     Evicting again now would close healthy connections for bytes that are
+//     already on their way out.
+//   - No open adapter holds any bytes. A connection that is keeping up is
+//     never closed.
 //
 // Largest, not oldest: the relay keeps one long-lived connection per client,
 // so the oldest connections are healthy bridges. A subscriber that keeps up
@@ -64,11 +72,14 @@ func (b *ByteBudget) EvictLargest() *Adapter {
 	var vBytes int64
 	var vSeq uint64
 	for a, seq := range b.adapters {
+		n := a.QueuedBytes()
 		if a.closing.Load() {
+			if n > 0 {
+				return nil
+			}
 			continue
 		}
-		n := a.QueuedBytes()
-		if victim == nil || n > vBytes || (n == vBytes && seq > vSeq) {
+		if n > 0 && (victim == nil || n > vBytes || (n == vBytes && seq > vSeq)) {
 			victim, vBytes, vSeq = a, n, seq
 		}
 	}

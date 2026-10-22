@@ -87,7 +87,9 @@ type Adapter struct {
 	// queued and popped but not yet written.
 	queued atomic.Int64
 
-	unregister func()
+	unregister     func()
+	drained        atomic.Bool
+	unregisterOnce sync.Once
 
 	mu sync.RWMutex
 	// subs keyed by clientSubId. A single map supports both newHeads
@@ -233,8 +235,14 @@ func (a *Adapter) RemoveSubscription(clientSubID string) (kind indexer.EventKind
 }
 
 // Drain stops every sub's writer, releases every queued byte, and leaves
-// the budget — call on connection close before detaching from the indexer.
+// the budget once a writer's in-flight batch is released too — call on
+// connection close before detaching from the indexer.
 func (a *Adapter) Drain() {
+	// Mark closing without asking for a close: the connection is already
+	// going. The budget then treats any bytes still in flight as recovering,
+	// not as a reason to evict another connection.
+	a.closing.Store(true)
+	a.drained.Store(true)
 	a.mu.Lock()
 	subs := a.subs
 	a.subs = make(map[string]*clientSub)
@@ -244,8 +252,13 @@ func (a *Adapter) Drain() {
 	for _, sub := range subs {
 		a.stop(sub)
 	}
-	if a.unregister != nil {
-		a.unregister()
+	a.maybeUnregister()
+}
+
+// maybeUnregister leaves the budget once a drained adapter holds no bytes.
+func (a *Adapter) maybeUnregister() {
+	if a.unregister != nil && a.drained.Load() && a.queued.Load() == 0 {
+		a.unregisterOnce.Do(a.unregister)
 	}
 }
 
@@ -303,8 +316,15 @@ func (a *Adapter) runWriter(sub *clientSub) {
 		}
 		batch, _ := sub.q.popAll()
 		for i, payload := range batch {
-			select {
-			case <-sub.done:
+			stopped := a.closing.Load()
+			if !stopped {
+				select {
+				case <-sub.done:
+					stopped = true
+				default:
+				}
+			}
+			if stopped {
 				// Stopped mid-batch: release what was popped and not written.
 				var rest int64
 				for _, p := range batch[i:] {
@@ -312,7 +332,6 @@ func (a *Adapter) runWriter(sub *clientSub) {
 				}
 				a.release(sub, len(batch)-i, rest)
 				return
-			default:
 			}
 			if err := a.writer.WriteSubscriptionNotification(sub.id, payload); err != nil {
 				a.logger.Debug().Err(err).Str("clientSubId", sub.id).
@@ -345,7 +364,7 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 	n := int64(len(payload))
 	if b := a.opts.Budget; b != nil && !b.Reserve(n) {
 		victim := b.EvictLargest()
-		if victim == nil || victim == a {
+		if victim == a {
 			b.Release(n)
 			a.logger.Warn().Str("clientSubId", sub.id).Int64("budgetBytes", b.Limit()).
 				Int64("queuedBytes", a.QueuedBytes()).
@@ -354,12 +373,15 @@ func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
 			a.dropped(sub)
 			return
 		}
-		// Another connection holds more: close it and queue this one. The
-		// budget overshoots by this payload until the victim's bytes go.
-		victim.logger.Warn().Int64("budgetBytes", b.Limit()).
-			Int64("queuedBytes", victim.QueuedBytes()).
-			Msg("notification byte budget spent and this connection holds the most; closing it")
-		victim.close(CloseHostBudget)
+		// Otherwise queue this one; the budget overshoots until the bytes
+		// held by a closing connection go. If another open connection holds
+		// the most, close it first.
+		if victim != nil {
+			victim.logger.Warn().Int64("budgetBytes", b.Limit()).
+				Int64("queuedBytes", victim.QueuedBytes()).
+				Msg("notification byte budget spent and this connection holds the most; closing it")
+			victim.close(CloseHostBudget)
+		}
 	}
 
 	if _, _, ok := sub.q.push(payload); !ok {
@@ -391,9 +413,25 @@ func (a *Adapter) capFor(networkID string) int {
 	return limit
 }
 
-// close asks the caller to close the connection, once.
+// close asks the caller to close the connection, once. Everything queued is
+// released at once: a closing connection writes nothing more, and its bytes
+// must not hold the budget while the connection is torn down. A batch a
+// writer already took goes when that writer next checks in.
 func (a *Adapter) close(reason CloseReason) {
-	if a.closing.CompareAndSwap(false, true) && a.opts.OnClose != nil {
+	if !a.closing.CompareAndSwap(false, true) {
+		return
+	}
+	a.mu.RLock()
+	subs := make([]*clientSub, 0, len(a.subs))
+	for _, sub := range a.subs {
+		subs = append(subs, sub)
+	}
+	a.mu.RUnlock()
+	for _, sub := range subs {
+		items, released := sub.q.reset()
+		a.release(sub, items, released)
+	}
+	if a.opts.OnClose != nil {
 		a.opts.OnClose(reason)
 	}
 }
@@ -412,6 +450,7 @@ func (a *Adapter) release(sub *clientSub, items int, bytes int64) {
 	if a.opts.OnQueue != nil {
 		a.opts.OnQueue(sub.networkID, -items, -bytes)
 	}
+	a.maybeUnregister()
 }
 
 func (a *Adapter) dropped(sub *clientSub) {
