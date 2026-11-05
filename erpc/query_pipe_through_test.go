@@ -190,12 +190,9 @@ func TestPipeThrough_StopsWhenTheConsumerRejectsAPage(t *testing.T) {
 	assert.Equal(t, 1, firstCalls)
 	assert.Zero(t, secondCalls, "a query whose first page was already handed over must not be re-run")
 
-	var streamErr *StreamError
-	require.ErrorAs(t, err, &streamErr)
-	assert.True(t, streamErr.PageEmitted)
-	require.NotNil(t, streamErr.LastCursor)
-	assert.Equal(t, uint64(1), streamErr.LastCursor.Number)
-	assert.ErrorIs(t, err, deliverErr, "the cause must survive the wrapper")
+	// The executor unwraps StreamError once PageEmitted has stopped the walk,
+	// so the caller gets the consumer's own error.
+	assert.ErrorIs(t, err, deliverErr, "the cause must survive")
 	assert.Equal(t, deliverErr.Error(), err.Error(),
 		"the wrapper reports the cause's message, so a log line names the real failure")
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -14,34 +15,75 @@ import (
 // --- fakes -----------------------------------------------------------
 
 type fakeNetwork struct {
-	id            string
-	finalityDepth int64
+	id string
 
-	mu            sync.Mutex
-	suggestedBy   map[string][]int64 // sourceId -> block nums seen
+	mu           sync.Mutex
+	suggestedBy  map[string][]int64  // sourceId -> block nums seen
+	held         map[string]struct{} // sourceIds whose heads are not delivered
+	dedupDropped int
+	dedupEntries int
+	headsIndexed int
+	undelivered  int
+	delivering   []int64 // heads reported before reaching a client
 }
 
-func newFakeNetwork(id string, depth int64) *fakeNetwork {
+func newFakeNetwork(id string) *fakeNetwork {
 	return &fakeNetwork{
-		id:            id,
-		finalityDepth: depth,
-		suggestedBy:   make(map[string][]int64),
+		id:          id,
+		suggestedBy: make(map[string][]int64),
 	}
 }
 
-func (n *fakeNetwork) Id() string            { return n.id }
-func (n *fakeNetwork) FinalityDepth() int64  { return n.finalityDepth }
-func (n *fakeNetwork) SuggestLatestBlock(sourceId string, block int64) {
+func (n *fakeNetwork) Id() string { return n.id }
+func (n *fakeNetwork) SuggestLatestBlock(sourceId string, block int64) bool {
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.suggestedBy[sourceId] = append(n.suggestedBy[sourceId], block)
-	n.mu.Unlock()
+	_, held := n.held[sourceId]
+	return !held
+}
+func (n *fakeNetwork) DedupDropped(EventKind) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.dedupDropped++
+}
+func (n *fakeNetwork) DedupEntriesAdded(delta int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.dedupEntries += delta
+}
+func (n *fakeNetwork) HeadIndexed() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.headsIndexed++
+}
+func (n *fakeNetwork) Undelivered(EventKind) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.undelivered++
+}
+func (n *fakeNetwork) DeliveringHead(block int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.delivering = append(n.delivering, block)
+}
+func (n *fakeNetwork) deliveryCounts() (headsIndexed, undelivered int, delivering []int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.headsIndexed, n.undelivered, append([]int64(nil), n.delivering...)
+}
+func (n *fakeNetwork) dedupCounts() (dropped, entries int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.dedupDropped, n.dedupEntries
 }
 
 type fakeEgress struct {
 	name           string
 	filters        map[string]struct{} // filterHash -> interested
 	acceptAllHeads bool
-	acceptReorgs   bool
+	// hook, when set, runs at the start of every Deliver.
+	hook func(IndexedEvent)
 
 	mu       sync.Mutex
 	received []IndexedEvent
@@ -49,16 +91,16 @@ type fakeEgress struct {
 
 func (e *fakeEgress) Name() string { return e.name }
 func (e *fakeEgress) InterestedIn(kind EventKind, networkId, filterHash string) bool {
-	switch kind {
-	case KindNewHead:
+	if kind == KindNewHead {
 		return e.acceptAllHeads
-	case KindReorg:
-		return e.acceptReorgs
 	}
 	_, ok := e.filters[filterHash]
 	return ok
 }
 func (e *fakeEgress) Deliver(ev IndexedEvent) {
+	if e.hook != nil {
+		e.hook(ev)
+	}
 	e.mu.Lock()
 	e.received = append(e.received, ev)
 	e.mu.Unlock()
@@ -77,6 +119,11 @@ type fakeIngress struct {
 	// ensureErr, when set, is returned from every EnsureFilter call.
 	errMu     sync.Mutex
 	ensureErr error
+	// active reports whether the ingress holds the filter. Like the WS
+	// adapter, a failed EnsureFilter still stores it.
+	active atomic.Bool
+	// hook, when set, runs at the start of every "ensure"/"remove" call.
+	hook func(op string)
 
 	startedFor NetworkHandle
 	sink       Sink
@@ -99,15 +146,25 @@ func (i *fakeIngress) getErr() error {
 	return i.ensureErr
 }
 func (i *fakeIngress) EnsureFilter(_ context.Context, _ string, paramsHash string, _ []interface{}) error {
+	if i.hook != nil {
+		i.hook("ensure")
+	}
 	i.ensureCalls.Add(1)
 	i.lastParamsHash.Store(paramsHash)
+	i.active.Store(true)
 	return i.getErr()
 }
+func (i *fakeIngress) FilterLive(_, _ string) bool {
+	return i.active.Load() && i.getErr() == nil
+}
 func (i *fakeIngress) RemoveFilter(_ context.Context, _, _ string) error {
+	if i.hook != nil {
+		i.hook("remove")
+	}
 	i.removeCalls.Add(1)
+	i.active.Store(false)
 	return nil
 }
-func (i *fakeIngress) Stop(_ context.Context) error { return nil }
 
 // fakeSelector is a static IngressSelector for tests.
 type fakeSelector struct {
@@ -129,7 +186,7 @@ func newIndexer(t *testing.T) *Indexer {
 
 func TestIndexer_NewHead_FanOutAndDedup(t *testing.T) {
 	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
+	nw := newFakeNetwork("evm:1")
 	idx.RegisterNetwork(nw)
 	eg := &fakeEgress{name: "eg1", filters: map[string]struct{}{}, acceptAllHeads: true}
 	idx.Attach(eg)
@@ -153,16 +210,11 @@ func TestIndexer_NewHead_FanOutAndDedup(t *testing.T) {
 	}
 }
 
-// TestIndexer_NewHead_ConcurrentIngestDedupe reproduces the TOCTOU race
-// that prod evm:1101 hit: four WS upstream sources delivered the same
-// newHead within ~1ms, and concurrent Ingest calls both read the stale
-// lastHeadNum + Store the same new value + fell through to fanOut, so
-// clients saw every head twice. The regression asserts that no matter
-// how many goroutines race with the same (number, hash), the egress
-// receives exactly one delivery.
+// Several sources delivering the same head at the same instant must reach
+// the egress exactly once.
 func TestIndexer_NewHead_ConcurrentIngestDedupe(t *testing.T) {
 	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
+	nw := newFakeNetwork("evm:1")
 	idx.RegisterNetwork(nw)
 	eg := &fakeEgress{name: "eg1", filters: map[string]struct{}{}, acceptAllHeads: true}
 	idx.Attach(eg)
@@ -194,9 +246,58 @@ func TestIndexer_NewHead_ConcurrentIngestDedupe(t *testing.T) {
 	}
 }
 
+// A newer head from one source must not overtake an older head another
+// source is still delivering.
+func TestIndexer_NewHead_ConcurrentSourcesDeliverInOrder(t *testing.T) {
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	delivering, release := make(chan struct{}), make(chan struct{})
+	eg := &fakeEgress{name: "eg1", acceptAllHeads: true, hook: func(ev IndexedEvent) {
+		if ev.Block.Number == 100 {
+			close(delivering)
+			<-release
+		}
+	}}
+	idx.Attach(eg)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up1", Block: BlockRef{Number: 100, Hash: "0xA"}})
+	}()
+	<-delivering
+	go func() {
+		defer wg.Done()
+		idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up2", Block: BlockRef{Number: 101, Hash: "0xB"}})
+	}()
+	time.Sleep(20 * time.Millisecond) // let the second head reach the indexer
+	close(release)
+	wg.Wait()
+
+	eg.mu.Lock()
+	defer eg.mu.Unlock()
+	if len(eg.received) != 2 || eg.received[0].Block.Number != 100 || eg.received[1].Block.Number != 101 {
+		t.Fatalf("heads must be delivered in order, got %+v", eg.received)
+	}
+}
+
+func TestIndexer_NewHead_DedupIgnoresHashCase(t *testing.T) {
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	eg := &fakeEgress{name: "eg1", acceptAllHeads: true}
+	idx.Attach(eg)
+
+	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up1", Block: BlockRef{Number: 100, Hash: "0xABC"}})
+	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up2", Block: BlockRef{Number: 100, Hash: "0xabc"}})
+	if got := eg.count(); got != 1 {
+		t.Fatalf("same head with differently-cased hash must dedupe, got %d", got)
+	}
+}
+
 func TestIndexer_NewHead_StalerDroppedKeepsStatePollerFed(t *testing.T) {
 	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
+	nw := newFakeNetwork("evm:1")
 	idx.RegisterNetwork(nw)
 	eg := &fakeEgress{name: "eg1", acceptAllHeads: true}
 	idx.Attach(eg)
@@ -216,9 +317,34 @@ func TestIndexer_NewHead_StalerDroppedKeepsStatePollerFed(t *testing.T) {
 	}
 }
 
+// A head the network does not deliver is still observed, and does not
+// advance the dedup marker past the heads the other sources deliver.
+func TestIndexer_NewHead_HeldSourceObservedNotDelivered(t *testing.T) {
+	idx := newIndexer(t)
+	nw := newFakeNetwork("evm:1")
+	nw.held = map[string]struct{}{"ws:fb": {}}
+	idx.RegisterNetwork(nw)
+	eg := &fakeEgress{name: "eg1", acceptAllHeads: true}
+	idx.Attach(eg)
+
+	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:fb", Block: BlockRef{Number: 101, Hash: "0xBBB"}})
+	if got := eg.count(); got != 0 {
+		t.Fatalf("held head delivered: got %d", got)
+	}
+	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up1", Block: BlockRef{Number: 101, Hash: "0xBBB"}})
+	if got := eg.count(); got != 1 {
+		t.Fatalf("the delivering source's head must go out: want 1, got %d", got)
+	}
+	nw.mu.Lock()
+	defer nw.mu.Unlock()
+	if len(nw.suggestedBy["ws:fb"]) != 1 {
+		t.Fatalf("held source must still be observed, got %v", nw.suggestedBy)
+	}
+}
+
 func TestIndexer_Log_RefcountFanOutAndTeardown(t *testing.T) {
 	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
+	nw := newFakeNetwork("evm:1")
 	idx.RegisterNetwork(nw)
 	ing := &fakeIngress{name: "ws:up1"}
 	if err := idx.AddIngress(context.Background(), "evm:1", ing); err != nil {
@@ -239,177 +365,314 @@ func TestIndexer_Log_RefcountFanOutAndTeardown(t *testing.T) {
 		t.Fatalf("EnsureFilter on ingress should be called exactly once, got %d", got)
 	}
 
+	// The same log from two upstreams: one window key, one dedup drop.
+	idx.Ingest(logEvent(h1, "ws:up1", logAddedJSON))
+	idx.Ingest(logEvent(h1, "ws:up2", logAddedJSON))
+	if dropped, entries := nw.dedupCounts(); dropped != 1 || entries != 1 {
+		t.Fatalf("want 1 dedup drop and 1 window key, got %d and %d", dropped, entries)
+	}
+
 	// First release decrements; still refcnt 1 → no tear-down.
 	idx.ReleaseFilter(context.Background(), "evm:1", "logs", h1)
 	if got := ing.removeCalls.Load(); got != 0 {
 		t.Fatalf("RemoveFilter must not fire while refcnt > 0, got %d calls", got)
 	}
-	// Second release drops to 0 → tear-down.
+	// Second release drops to 0 → tear-down, and its window is freed.
 	idx.ReleaseFilter(context.Background(), "evm:1", "logs", h1)
 	if got := ing.removeCalls.Load(); got != 1 {
 		t.Fatalf("RemoveFilter must fire exactly once at refcnt 0, got %d", got)
 	}
+	if _, entries := nw.dedupCounts(); entries != 0 {
+		t.Fatalf("released filter must leave no window keys, got %d", entries)
+	}
 }
 
-func TestIndexer_Log_DedupFanOut(t *testing.T) {
+// Only heads a client receives are reported as delivering, once each: a head
+// no client subscribed to must not floor the network's "latest".
+func TestIndexer_ReportsIndexedHeadsAndUndeliveredEvents(t *testing.T) {
 	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
+	nw := newFakeNetwork("evm:1")
+	nw.held = map[string]struct{}{"ws:fb": {}}
 	idx.RegisterNetwork(nw)
+	head := func(src string, num int64, hash string) StreamEvent {
+		return StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: src, Block: BlockRef{Number: num, Hash: hash}}
+	}
+	want := func(headsIndexed, undelivered int, delivering ...int64) {
+		t.Helper()
+		h, u, d := nw.deliveryCounts()
+		if h != headsIndexed || u != undelivered || fmt.Sprint(d) != fmt.Sprint(delivering) {
+			t.Fatalf("want %d indexed heads, %d undelivered, delivering %v; got %d, %d, %v",
+				headsIndexed, undelivered, delivering, h, u, d)
+		}
+	}
 
-	params := []interface{}{"logs", map[string]interface{}{}}
-	h, _ := idx.EnsureFilter(context.Background(), "evm:1", "logs", params)
+	// No client subscribes to heads yet.
+	idx.Ingest(head("ws:up1", 100, "0xA"))
+	want(1, 1)
 
+	idx.Attach(&fakeEgress{name: "eg1", acceptAllHeads: true})
+	idx.Attach(&fakeEgress{name: "eg2", acceptAllHeads: true})
+	idx.Ingest(head("ws:up1", 101, "0xB"))
+	want(2, 1, 101)
+	// A duplicate and a withheld head are neither indexed nor undelivered.
+	idx.Ingest(head("ws:up2", 101, "0xB"))
+	idx.Ingest(head("ws:fb", 102, "0xC"))
+	want(2, 1, 101)
+
+	// A log for a filter no client holds.
+	idx.Ingest(logEvent("orphan", "ws:up1", logAddedJSON))
+	want(2, 2, 101)
+}
+
+// newLogFilter registers "evm:1", ensures an empty logs filter and attaches
+// an egress interested in it. Helper for log dedup tests.
+func newLogFilter(t *testing.T) (*Indexer, string, *fakeEgress) {
+	t.Helper()
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	if err := idx.AddIngress(context.Background(), "evm:1", &fakeIngress{name: "ws:up1"}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs", map[string]interface{}{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	eg := &fakeEgress{name: "eg1", filters: map[string]struct{}{h: {}}}
 	idx.Attach(eg)
+	return idx, h, eg
+}
 
-	payload := json.RawMessage(`{"blockHash":"0xB","transactionHash":"0xT","logIndex":"0x0","removed":false}`)
-	ev := StreamEvent{
-		Kind:       KindLog,
-		NetworkId:  "evm:1",
-		SourceId:   "ws:up1",
-		FilterHash: h,
-		Payload:    payload,
+func logEvent(filterHash, source, payload string) StreamEvent {
+	return StreamEvent{
+		Kind: KindLog, NetworkId: "evm:1", SourceId: source, FilterHash: filterHash,
+		Payload: json.RawMessage(payload),
 	}
-	idx.Ingest(ev)
-	idx.Ingest(ev) // dup by (blockHash, txHash, logIndex, removed)
+}
 
+const (
+	logAddedJSON   = `{"blockHash":"0xB","transactionHash":"0xT","logIndex":"0x0","removed":false}`
+	logRemovedJSON = `{"blockHash":"0xB","transactionHash":"0xT","logIndex":"0x0","removed":true}`
+)
+
+func TestIndexer_Log_DuplicateAddsFromManyUpstreamsDeliverOnce(t *testing.T) {
+	idx, h, eg := newLogFilter(t)
+	for i := 0; i < 4; i++ {
+		idx.Ingest(logEvent(h, fmt.Sprintf("ws:up%d", i), logAddedJSON))
+	}
 	if got := eg.count(); got != 1 {
-		t.Fatalf("log dedup: want 1, got %d", got)
-	}
-
-	// Same log with removed=true must deliver (distinct dedup key).
-	idx.Ingest(StreamEvent{
-		Kind: KindLog, NetworkId: "evm:1", SourceId: "ws:up1", FilterHash: h,
-		Payload: json.RawMessage(`{"blockHash":"0xB","transactionHash":"0xT","logIndex":"0x0","removed":true}`),
-	})
-	if got := eg.count(); got != 2 {
-		t.Fatalf("log with removed=true must be delivered, got %d", got)
-	}
-	// Last delivered must carry Removed=true.
-	eg.mu.Lock()
-	last := eg.received[len(eg.received)-1]
-	eg.mu.Unlock()
-	if !last.Removed {
-		t.Fatalf("removed flag must propagate to IndexedEvent.Removed")
+		t.Fatalf("same log from N upstreams must deliver once, got %d", got)
 	}
 }
 
-func TestIndexer_Lifecycle_FinalityBoundary(t *testing.T) {
-	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 10)
-	idx.RegisterNetwork(nw)
-	eg := &fakeEgress{name: "eg1", acceptAllHeads: true}
-	idx.Attach(eg)
-
-	// Latest head: 100.
-	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:up1", Block: BlockRef{Number: 100, Hash: "0xH100"}})
-	// A log at block 90 → latest-90 = 10 = depth → finalized.
-	idx.Ingest(StreamEvent{
-		Kind: KindLog, NetworkId: "evm:1", SourceId: "ws:up1",
-		Block:   BlockRef{Number: 90, Hash: "0xH90"},
-		Payload: json.RawMessage(`{"blockHash":"0xH90","transactionHash":"0xT","logIndex":"0x0"}`),
-	})
-	// A log at 95 → latest-95 = 5 < depth → soft.
-	idx.Ingest(StreamEvent{
-		Kind: KindLog, NetworkId: "evm:1", SourceId: "ws:up1",
-		Block:   BlockRef{Number: 95, Hash: "0xH95"},
-		Payload: json.RawMessage(`{"blockHash":"0xH95","transactionHash":"0xT","logIndex":"0x1"}`),
-	})
-
+// Reorg A→B→A where the log's block comes back with the same hash: the
+// client must see add, remove, add — the final re-add must not be
+// swallowed as a duplicate of the first add.
+func TestIndexer_Log_AddRemoveReAddDeliversEach(t *testing.T) {
+	idx, h, eg := newLogFilter(t)
+	for _, p := range []string{logAddedJSON, logRemovedJSON, logAddedJSON} {
+		// Two upstreams each report every transition.
+		idx.Ingest(logEvent(h, "ws:up1", p))
+		idx.Ingest(logEvent(h, "ws:up2", p))
+	}
 	eg.mu.Lock()
 	defer eg.mu.Unlock()
-	// Only KindNewHead at 100 got through the egress (logs don't pass
-	// through the egress without a matching filter). So assert lifecycle
-	// on the head event.
-	if len(eg.received) != 1 {
-		t.Fatalf("egress should have 1 newHead event, got %d", len(eg.received))
+	if len(eg.received) != 3 {
+		t.Fatalf("add, remove, re-add must deliver 3 events, got %d", len(eg.received))
 	}
-	head := eg.received[0]
-	// latest-latest = 0 < depth → soft.
-	if head.Lifecycle != LifeSoft {
-		t.Fatalf("latest head must be soft, got %v", head.Lifecycle)
-	}
-}
-
-func TestIndexer_ReorgEmitsRemovedLogs(t *testing.T) {
-	idx := newIndexer(t)
-	nw := newFakeNetwork("evm:1", 0)
-	idx.RegisterNetwork(nw)
-
-	params := []interface{}{"logs", map[string]interface{}{}}
-	h, _ := idx.EnsureFilter(context.Background(), "evm:1", "logs", params)
-
-	eg := &fakeEgress{
-		name:           "eg1",
-		filters:        map[string]struct{}{h: {}},
-		acceptAllHeads: true,
-		acceptReorgs:   true,
-	}
-	idx.Attach(eg)
-
-	// newHead 100/0xA.
-	idx.Ingest(StreamEvent{
-		Kind: KindNewHead, NetworkId: "evm:1", SourceId: "src1",
-		Block: BlockRef{Number: 100, Hash: "0xA", ParentHash: "0xZ"},
-	})
-	// newHead 101/0xB, child of 0xA.
-	idx.Ingest(StreamEvent{
-		Kind: KindNewHead, NetworkId: "evm:1", SourceId: "src1",
-		Block: BlockRef{Number: 101, Hash: "0xB", ParentHash: "0xA"},
-	})
-	// Log in block 0xB.
-	logPayload := json.RawMessage(`{"blockHash":"0xB","blockNumber":"0x65","transactionHash":"0xT1","logIndex":"0x0"}`)
-	idx.Ingest(StreamEvent{
-		Kind: KindLog, NetworkId: "evm:1", SourceId: "src1", FilterHash: h,
-		Block:   BlockRef{Number: 101, Hash: "0xB"},
-		Payload: logPayload,
-	})
-
-	// Reorg: new head 101/0xC replaces 0xB.
-	idx.Ingest(StreamEvent{
-		Kind: KindNewHead, NetworkId: "evm:1", SourceId: "src1",
-		Block: BlockRef{Number: 101, Hash: "0xC", ParentHash: "0xA"},
-	})
-
-	// Expected sequence in eg.received:
-	//   newHead 100, newHead 101 (0xB), log 0xB, reorg summary, log 0xB (removed), newHead 101 (0xC)
-	// eg.interestedIn filters: newHeads + logs with filterHash h.
-	eg.mu.Lock()
-	defer eg.mu.Unlock()
-	if len(eg.received) < 6 {
-		t.Fatalf("want >= 6 events after reorg, got %d: %+v", len(eg.received), kinds(eg.received))
-	}
-	// Find the reorg event.
-	var reorgIdx = -1
+	want := []bool{false, true, false}
 	for i, ev := range eg.received {
-		if ev.Kind == KindReorg {
-			reorgIdx = i
-			break
+		if ev.Removed != want[i] {
+			t.Fatalf("event %d: Removed=%v, want %v", i, ev.Removed, want[i])
 		}
-	}
-	if reorgIdx < 0 {
-		t.Fatalf("KindReorg not emitted; got %+v", kinds(eg.received))
-	}
-	// Next event after reorg (amongst this egress's filtered set) should
-	// be a log with Removed=true.
-	foundRemoved := false
-	for _, ev := range eg.received[reorgIdx+1:] {
-		if ev.Kind == KindLog && ev.Removed {
-			foundRemoved = true
-			break
-		}
-	}
-	if !foundRemoved {
-		t.Fatalf("expected a log with Removed=true after reorg, got %+v", kinds(eg.received))
 	}
 }
 
-func kinds(evs []IndexedEvent) []string {
-	out := make([]string, 0, len(evs))
-	for _, ev := range evs {
-		out = append(out, ev.Kind.String())
+func TestIndexer_Log_DuplicateRemovesDeliverOnce(t *testing.T) {
+	idx, h, eg := newLogFilter(t)
+	idx.Ingest(logEvent(h, "ws:up1", logAddedJSON))
+	idx.Ingest(logEvent(h, "ws:up1", logRemovedJSON))
+	idx.Ingest(logEvent(h, "ws:up2", logRemovedJSON))
+	idx.Ingest(logEvent(h, "ws:up3", logRemovedJSON))
+	if got := eg.count(); got != 2 {
+		t.Fatalf("duplicate removes must collapse: want 2 deliveries, got %d", got)
 	}
-	return out
+}
+
+// Logs whose identity can't be established must pass through rather than
+// collapse onto one shared key.
+func TestIndexer_Log_MissingIdentityFieldsPassThrough(t *testing.T) {
+	idx, h, eg := newLogFilter(t)
+	idx.Ingest(logEvent(h, "ws:up1", `{"data":"0x01"}`))
+	idx.Ingest(logEvent(h, "ws:up1", `{"data":"0x02"}`))
+	idx.Ingest(logEvent(h, "ws:up1", `{"blockHash":"0xB","logIndex":"0x0"}`))
+	if got := eg.count(); got != 3 {
+		t.Fatalf("logs without full identity must all pass through, got %d", got)
+	}
+}
+
+// Hex on the wire is case-insensitive: the same log reported with
+// differently-cased hashes by two upstreams is one log. The delivered
+// payload is untouched.
+func TestIndexer_Log_DedupIgnoresHexCase(t *testing.T) {
+	idx, h, eg := newLogFilter(t)
+	upper := `{"blockHash":"0xABCD","transactionHash":"0xEF01","logIndex":"0xA"}`
+	idx.Ingest(logEvent(h, "ws:up1", upper))
+	idx.Ingest(logEvent(h, "ws:up2", `{"blockHash":"0xabcd","transactionHash":"0xef01","logIndex":"0xa"}`))
+	eg.mu.Lock()
+	defer eg.mu.Unlock()
+	if len(eg.received) != 1 {
+		t.Fatalf("case-only differences must dedupe, got %d deliveries", len(eg.received))
+	}
+	if string(eg.received[0].Payload) != upper {
+		t.Fatalf("payload must pass through verbatim, got %s", eg.received[0].Payload)
+	}
+}
+
+// A subscriber arriving while the last one's teardown is still talking to
+// the ingress must end up subscribed, not torn down by the late removal.
+func TestIndexer_Filter_EnsureDuringReleaseStaysSubscribed(t *testing.T) {
+	ctx := context.Background()
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	removing, unblock := make(chan struct{}), make(chan struct{})
+	ing := &fakeIngress{name: "a", hook: func(op string) {
+		if op == "remove" {
+			close(removing)
+			<-unblock
+		}
+	}}
+	if err := idx.AddIngress(ctx, "evm:1", ing); err != nil {
+		t.Fatal(err)
+	}
+	params := []interface{}{"logs"}
+	h, err := idx.EnsureFilter(ctx, "evm:1", "logs", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		idx.ReleaseFilter(ctx, "evm:1", "logs", h)
+		close(released)
+	}()
+	<-removing
+	ensured := make(chan error, 1)
+	go func() {
+		_, err := idx.EnsureFilter(ctx, "evm:1", "logs", params)
+		ensured <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // let the new subscriber reach the indexer
+	close(unblock)
+	<-released
+	if err := <-ensured; err != nil {
+		t.Fatal(err)
+	}
+	if !ing.active.Load() {
+		t.Fatal("subscriber that arrived during teardown must end up subscribed")
+	}
+}
+
+// A subscriber that joins while the first subscribe is still in flight must
+// not be handed a subscription when that subscribe fails, and the failure
+// must not leave a refcount behind that makes later subscribers skip the
+// ingress.
+func TestIndexer_Filter_FailedEnsureIsNotShared(t *testing.T) {
+	ctx := context.Background()
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	ensuring, unblock := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	ing := &fakeIngress{name: "a", hook: func(op string) {
+		if op == "ensure" && calls.Add(1) == 1 {
+			close(ensuring)
+			<-unblock
+		}
+	}}
+	ing.setErr(errTest("down"))
+	if err := idx.AddIngress(ctx, "evm:1", ing); err != nil {
+		t.Fatal(err)
+	}
+	params := []interface{}{"logs"}
+
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, err := idx.EnsureFilter(ctx, "evm:1", "logs", params)
+		first <- err
+	}()
+	<-ensuring
+	go func() {
+		_, err := idx.EnsureFilter(ctx, "evm:1", "logs", params)
+		second <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // let the second subscriber reach the indexer
+	close(unblock)
+	if <-first == nil {
+		t.Fatal("first subscribe must fail")
+	}
+	if <-second == nil {
+		t.Fatal("joining a failed subscribe must not return a silent subscription")
+	}
+
+	ing.setErr(nil)
+	before := ing.ensureCalls.Load()
+	if _, err := idx.EnsureFilter(ctx, "evm:1", "logs", params); err != nil {
+		t.Fatal(err)
+	}
+	if ing.ensureCalls.Load() != before+1 {
+		t.Fatal("after a failed subscribe the next subscriber must subscribe on the ingress")
+	}
+}
+
+func TestIndexer_Filter_ConcurrentEnsureReleaseConverges(t *testing.T) {
+	ctx := context.Background()
+	idx := newIndexer(t)
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
+	ing := &fakeIngress{name: "a"}
+	if err := idx.AddIngress(ctx, "evm:1", ing); err != nil {
+		t.Fatal(err)
+	}
+	params := []interface{}{"logs"}
+
+	var wg sync.WaitGroup
+	for n := 0; n < 50; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h, err := idx.EnsureFilter(ctx, "evm:1", "logs", params)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			idx.ReleaseFilter(ctx, "evm:1", "logs", h)
+		}()
+	}
+	wg.Wait()
+	if ing.active.Load() {
+		t.Fatal("every client released; the filter must be torn down")
+	}
+	if _, err := idx.EnsureFilter(ctx, "evm:1", "logs", params); err != nil {
+		t.Fatal(err)
+	}
+	if !ing.active.Load() {
+		t.Fatal("a new client must subscribe the filter again")
+	}
+}
+
+// An ingress may keep a filter whose subscribe failed (to retry on
+// reconnect). A failed EnsureFilter must remove it again.
+func TestIndexer_Filter_FailedEnsureRemovesFromIngress(t *testing.T) {
+	idx := newIndexer(t)
+	a, b, _ := registerThreeIngresses(t, idx)
+	a.setErr(errTest("a"))
+	b.setErr(errTest("b"))
+	idx.RegisterNetworkSelector("evm:1", &fakeSelector{defaults: []string{"a"}, fallbacks: []string{"b"}})
+
+	if _, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if a.active.Load() || b.active.Load() {
+		t.Fatalf("failed subscribe left filters behind: a=%v b=%v", a.active.Load(), b.active.Load())
+	}
 }
 
 func TestIndexer_UnregisteredNetwork(t *testing.T) {
@@ -426,7 +689,7 @@ func TestIndexer_UnregisteredNetwork(t *testing.T) {
 // "evm:1" and returns them. Helper for selector tests.
 func registerThreeIngresses(t *testing.T, idx *Indexer) (a, b, c *fakeIngress) {
 	t.Helper()
-	idx.RegisterNetwork(newFakeNetwork("evm:1", 0))
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
 	a = &fakeIngress{name: "a"}
 	b = &fakeIngress{name: "b"}
 	c = &fakeIngress{name: "c"}
@@ -489,24 +752,151 @@ func TestIndexer_Selector_AllDefaultsFailEscalatesToFallback(t *testing.T) {
 	}
 }
 
-func TestIndexer_Selector_UnknownIngressIsAlwaysIncluded(t *testing.T) {
+// The selector excludes an ingress (e.g. a down upstream) by not naming it.
+// An unnamed ingress must not be subscribed, and must not mask a failed
+// default tier.
+func TestIndexer_Selector_UnnamedIngressIsExcluded(t *testing.T) {
 	idx := newIndexer(t)
 	a, b, c := registerThreeIngresses(t, idx)
-	// Selector only knows about "a" and "b"; "c" stands in for a standalone
-	// ingress (e.g. Kafka) and must receive EnsureFilter unconditionally.
+	a.setErr(errTest("a"))
 	idx.RegisterNetworkSelector("evm:1", &fakeSelector{defaults: []string{"a"}, fallbacks: []string{"b"}})
 
 	if _, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("fallback should have carried the filter: %v", err)
 	}
+	if c.ensureCalls.Load() != 0 {
+		t.Fatalf("unnamed ingress must not be subscribed, got %d calls", c.ensureCalls.Load())
+	}
+	if b.ensureCalls.Load() != 1 {
+		t.Fatalf("fallback must be tried when every default failed, got %d calls", b.ensureCalls.Load())
+	}
+}
+
+// reconcileNow runs a reconcile of evm:1 synchronously.
+func reconcileNow(t *testing.T, idx *Indexer) {
+	t.Helper()
+	nsRaw, ok := idx.networks.Load("evm:1")
+	if !ok {
+		t.Fatal("evm:1 not registered")
+	}
+	idx.reconcile(context.Background(), nsRaw.(*networkState))
+}
+
+// The fallbacks carry a filter only while no default has it live: they take
+// over when the defaults lose it, and hand it back once one has it again.
+func TestIndexer_Reconcile_FallbackTakesOverAndHandsBack(t *testing.T) {
+	idx := newIndexer(t)
+	a, b, c := registerThreeIngresses(t, idx)
+	idx.RegisterNetworkSelector("evm:1", &fakeSelector{defaults: []string{"a", "b"}, fallbacks: []string{"c"}})
+	if _, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileNow(t, idx)
+	if c.ensureCalls.Load() != 0 {
+		t.Fatalf("fallback must stay idle while a default is live, got %d calls", c.ensureCalls.Load())
+	}
+
+	a.setErr(errTest("a lost it"))
+	b.setErr(errTest("b lost it"))
+	reconcileNow(t, idx)
+	if c.ensureCalls.Load() != 1 || !c.FilterLive("logs", "") {
+		t.Fatalf("fallback must take over once no default is live, got %d calls", c.ensureCalls.Load())
+	}
+	if a.removeCalls.Load() != 0 || b.removeCalls.Load() != 0 {
+		t.Fatal("defaults keep the filter, to retry it")
+	}
+
+	reconcileNow(t, idx)
 	if c.ensureCalls.Load() != 1 {
-		t.Fatalf("standalone ingress must be EnsureFiltered unconditionally, got %d calls", c.ensureCalls.Load())
+		t.Fatalf("an ingress already carrying the filter must not be asked again, got %d", c.ensureCalls.Load())
 	}
-	if a.ensureCalls.Load() != 1 {
-		t.Fatalf("default must be called, got %d", a.ensureCalls.Load())
+
+	b.setErr(nil)
+	reconcileNow(t, idx)
+	if c.removeCalls.Load() != 1 || c.active.Load() {
+		t.Fatalf("fallback must hand the filter back once a default is live, removes=%d", c.removeCalls.Load())
 	}
-	if b.ensureCalls.Load() != 0 {
-		t.Fatalf("fallback must not be called while a default or standalone succeeded, got %d", b.ensureCalls.Load())
+}
+
+// A default the selector no longer names (e.g. the policy excluded it) gives
+// the filter up; if that leaves no default, the fallbacks take it.
+func TestIndexer_Reconcile_FollowsSelector(t *testing.T) {
+	idx := newIndexer(t)
+	a, b, c := registerThreeIngresses(t, idx)
+	sel := &fakeSelector{defaults: []string{"a", "b"}, fallbacks: []string{"c"}}
+	idx.RegisterNetworkSelector("evm:1", sel)
+	if _, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"}); err != nil {
+		t.Fatal(err)
+	}
+
+	sel.defaults = []string{"b"}
+	reconcileNow(t, idx)
+	if a.removeCalls.Load() != 1 || c.ensureCalls.Load() != 0 {
+		t.Fatalf("a must give the filter up while b still carries it: a.removes=%d c.ensures=%d",
+			a.removeCalls.Load(), c.ensureCalls.Load())
+	}
+
+	sel.defaults = nil
+	reconcileNow(t, idx)
+	if b.removeCalls.Load() != 1 || c.ensureCalls.Load() != 1 {
+		t.Fatalf("with no default left the fallback must carry it: b.removes=%d c.ensures=%d",
+			b.removeCalls.Load(), c.ensureCalls.Load())
+	}
+
+	// Returning defaults take it back; the fallback keeps it until one of
+	// them has it live, so there is no gap.
+	sel.defaults = []string{"a", "b"}
+	reconcileNow(t, idx)
+	if a.ensureCalls.Load() != 2 || b.ensureCalls.Load() != 2 || c.removeCalls.Load() != 0 {
+		t.Fatalf("returning defaults must take it back alongside the fallback: a=%d b=%d c.removes=%d",
+			a.ensureCalls.Load(), b.ensureCalls.Load(), c.removeCalls.Load())
+	}
+	reconcileNow(t, idx)
+	if c.removeCalls.Load() != 1 {
+		t.Fatalf("the fallback must hand back once a default is live, removes=%d", c.removeCalls.Load())
+	}
+}
+
+// Every head triggers the recheck, and a released filter is left alone.
+func TestIndexer_Reconcile_RunsOnHeadsAndSkipsReleased(t *testing.T) {
+	idx := newIndexer(t)
+	a, _, c := registerThreeIngresses(t, idx)
+	idx.RegisterNetworkSelector("evm:1", &fakeSelector{defaults: []string{"a"}, fallbacks: []string{"c"}})
+	h, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.setErr(errTest("a lost it"))
+
+	idx.Ingest(StreamEvent{Kind: KindNewHead, NetworkId: "evm:1", SourceId: "ws:c", Block: BlockRef{Number: 1, Hash: "0x1"}})
+	deadline := time.Now().Add(2 * time.Second)
+	for c.ensureCalls.Load() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("a head must trigger the recheck")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	nsRaw, _ := idx.networks.Load("evm:1")
+	ns := nsRaw.(*networkState)
+	for ns.reconciling.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	idx.ReleaseFilter(context.Background(), "evm:1", "logs", h)
+	reconcileNow(t, idx)
+	if a.ensureCalls.Load() != 1 || c.ensureCalls.Load() != 1 {
+		t.Fatalf("a released filter must not be resubscribed: a=%d c=%d", a.ensureCalls.Load(), c.ensureCalls.Load())
+	}
+}
+
+func TestIndexer_Selector_NothingSelectedFails(t *testing.T) {
+	idx := newIndexer(t)
+	registerThreeIngresses(t, idx)
+	idx.RegisterNetworkSelector("evm:1", &fakeSelector{})
+
+	if _, err := idx.EnsureFilter(context.Background(), "evm:1", "logs", []interface{}{"logs"}); err == nil {
+		t.Fatal("a filter with no ingress behind it must fail, not return a silent subscription")
 	}
 }
 

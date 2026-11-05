@@ -22,7 +22,7 @@ import (
 
 // newReadyRedisConnector starts a miniredis server and returns a connector
 // that has reached the ready state. Both are torn down with the test.
-func newReadyRedisConnector(t *testing.T, id string) (context.Context, *RedisConnector, *miniredis.Miniredis) {
+func newReadyRedisConnectorWithID(t *testing.T, id string) (context.Context, *RedisConnector, *miniredis.Miniredis) {
 	t.Helper()
 
 	m, err := miniredis.Run()
@@ -53,7 +53,7 @@ func newReadyRedisConnector(t *testing.T, id string) (context.Context, *RedisCon
 // TestRedisConnector_Id pins that the connector reports the id it was built
 // with — it is the label operators see in connector logs and metrics.
 func TestRedisConnector_Id(t *testing.T) {
-	_, connector, _ := newReadyRedisConnector(t, "redis-id-under-test")
+	_, connector, _ := newReadyRedisConnectorWithID(t, "redis-id-under-test")
 	assert.Equal(t, "redis-id-under-test", connector.Id())
 }
 
@@ -61,7 +61,7 @@ func TestRedisConnector_Id(t *testing.T) {
 // afterwards, and deleting a key that is not there must not be an error
 // (callers treat delete as idempotent).
 func TestRedisConnector_Delete(t *testing.T) {
-	ctx, connector, m := newReadyRedisConnector(t, "redis-delete")
+	ctx, connector, m := newReadyRedisConnectorWithID(t, "redis-delete")
 
 	require.NoError(t, connector.Set(ctx, "pk1", "rk1", []byte("keep-me"), nil))
 	require.NoError(t, connector.Set(ctx, "pk2", "rk2", []byte("delete-me"), nil))
@@ -92,7 +92,7 @@ func TestRedisConnector_Delete(t *testing.T) {
 // A stale reverse-index entry would keep resolving a wildcard lookup to a
 // partition key whose value no longer exists.
 func TestRedisConnector_DeleteRemovesReverseIndex(t *testing.T) {
-	ctx, connector, m := newReadyRedisConnector(t, "redis-delete-rvi")
+	ctx, connector, m := newReadyRedisConnectorWithID(t, "redis-delete-rvi")
 
 	rvCtx := WithReverseIndex(ctx, "evm:123", "")
 	require.NoError(t, connector.Set(rvCtx, "evm:123:0x7b", "eth_getBlockByNumber", []byte("block-body"), nil))
@@ -119,7 +119,7 @@ func TestRedisConnector_DeleteRemovesReverseIndex(t *testing.T) {
 // the reverse-index cleanup: a partition key that is not architecture-prefixed
 // has no reverse-index companion, and the delete must not go looking for one.
 func TestRedisConnector_DeleteLeavesUnrelatedReverseIndexAlone(t *testing.T) {
-	ctx, connector, m := newReadyRedisConnector(t, "redis-delete-plain")
+	ctx, connector, m := newReadyRedisConnectorWithID(t, "redis-delete-plain")
 
 	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:123", ""), "evm:123:0x7b", "m", []byte("with-index"), nil))
 	require.NoError(t, connector.Set(ctx, "plainkey", "m", []byte("no-index"), nil))
@@ -135,8 +135,8 @@ func TestRedisConnector_DeleteLeavesUnrelatedReverseIndexAlone(t *testing.T) {
 
 // TestRedisConnector_List pins the main-index listing: every stored pair comes
 // back with its partition key, range key and value split correctly.
-func TestRedisConnector_List(t *testing.T) {
-	ctx, connector, _ := newReadyRedisConnector(t, "redis-list")
+func TestRedisConnector_ListCRUD(t *testing.T) {
+	ctx, connector, _ := newReadyRedisConnectorWithID(t, "redis-list")
 
 	want := map[string][]byte{
 		"alpha:one":   []byte("v-alpha"),
@@ -164,7 +164,7 @@ func TestRedisConnector_List(t *testing.T) {
 // returns the reverse entries — partition key and range key parsed out of the
 // "rvi#pk#rk" shape — and not the main records.
 func TestRedisConnector_ListReverseIndex(t *testing.T) {
-	ctx, connector, _ := newReadyRedisConnector(t, "redis-list-rvi")
+	ctx, connector, _ := newReadyRedisConnectorWithID(t, "redis-list-rvi")
 
 	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:1", ""), "evm:1:0x10", "eth_getBlockByNumber", []byte("b1"), nil))
 	require.NoError(t, connector.Set(WithReverseIndex(ctx, "evm:2", ""), "evm:2:0x20", "eth_getBlockByNumber", []byte("b2"), nil))
@@ -330,7 +330,7 @@ func TestRedisConnector_ApiKeyAddressRoundTripsOnRealRedis(t *testing.T) {
 // TestRedisConnector_ListRejectsBadPaginationToken pins the token validation.
 // A token from another driver must be refused, not silently treated as page 0.
 func TestRedisConnector_ListRejectsBadPaginationToken(t *testing.T) {
-	ctx, connector, _ := newReadyRedisConnector(t, "redis-list-badtoken")
+	ctx, connector, _ := newReadyRedisConnectorWithID(t, "redis-list-badtoken")
 
 	_, _, err := connector.List(ctx, ConnectorMainIndex, 10, "not-a-cursor")
 	require.Error(t, err)
@@ -341,7 +341,7 @@ func TestRedisConnector_ListRejectsBadPaginationToken(t *testing.T) {
 // published on one connector reaches a watcher, with its value, timestamp and
 // writer identity intact.
 func TestRedisConnector_CounterPubSub(t *testing.T) {
-	ctx, connector, _ := newReadyRedisConnector(t, "redis-counter")
+	ctx, connector, _ := newReadyRedisConnectorWithID(t, "redis-counter")
 
 	updates, cleanup, err := connector.WatchCounterInt64(ctx, "latestBlock:evm:123")
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestRedisConnector_WatchCounterInt64RequiresReady(t *testing.T) {
 // back into reconnecting. Getting this wrong either wedges a healthy pool on a
 // business-level miss, or leaves a dead pool in the ready state.
 func TestRedisConnector_MarkConnectionAsLost(t *testing.T) {
-	_, connector, _ := newReadyRedisConnector(t, "redis-mark-lost")
+	_, connector, _ := newReadyRedisConnectorWithID(t, "redis-mark-lost")
 
 	notLost := []struct {
 		name string
@@ -445,7 +445,7 @@ func TestRedisConnector_MarkConnectionAsLost(t *testing.T) {
 
 // TestRedisLock_IsNil pins the nil guard callers rely on before unlocking.
 func TestRedisLock_IsNil(t *testing.T) {
-	ctx, connector, _ := newReadyRedisConnector(t, "redis-lock-isnil")
+	ctx, connector, _ := newReadyRedisConnectorWithID(t, "redis-lock-isnil")
 
 	var absent *redisLock
 	assert.True(t, absent.IsNil(), "a nil lock pointer must report itself as nil")

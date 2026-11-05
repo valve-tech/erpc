@@ -48,6 +48,26 @@ func IsValidNetworkId(s string) bool {
 	return builtinNetworkIdShape(family, body)
 }
 
+// CanonicalNetworkId returns the one id of the network s names, and whether s
+// names a valid network. An EVM chain id is a plain integer, so "evm:01" and
+// "evm:0001" both name "evm:1": every consumer of the id (provider
+// ignoreNetworks/onlyNetworks, lazy network creation, upstream ids) must see
+// that one form. Every other family has one spelling per network, so its id
+// is canonical exactly when IsValidNetworkId accepts it.
+func CanonicalNetworkId(s string) (string, bool) {
+	if strings.HasPrefix(s, "evm:") {
+		chainId, err := strconv.ParseInt(s[4:], 10, 64)
+		if err != nil {
+			return "", false
+		}
+		return EvmNetworkId(chainId), true
+	}
+	if IsValidNetworkId(s) {
+		return s, true
+	}
+	return "", false
+}
+
 var counters = make(map[string]int)
 var countersMutex = sync.Mutex{}
 

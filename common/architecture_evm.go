@@ -159,6 +159,12 @@ type EvmStatePoller interface {
 	IsBlockFinalized(blockNumber int64) (bool, error)
 	SuggestFinalizedBlock(blockNumber int64)
 	SuggestLatestBlock(blockNumber int64)
+	// RefreshLatestBlock polls the latest block in the background when the
+	// stored head is older than the poll debounce; non-blocking, one in flight.
+	RefreshLatestBlock()
+	// ResetChainIdCordon clears the chain-identity cordon ownership flag so an
+	// admin uncordon fully releases this upstream.
+	ResetChainIdCordon()
 	SetNetworkConfig(cfg *NetworkConfig)
 	IsObjectNull() bool
 	EarliestBlock(probe EvmAvailabilityProbeType) int64

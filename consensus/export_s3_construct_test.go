@@ -93,7 +93,7 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 				Mode:            "secret",
 				AccessKeyID:     "key",
 				SecretAccessKey: "secret",
-			}), &lg)
+			}), &lg, "test-policy")
 
 		require.NoError(t, err)
 		require.NotNil(t, exp)
@@ -115,7 +115,7 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 		exp, err := newS3MisbehaviorExporter(
 			s3Cfg("s3://catches/integrity/", srv.URL, &common.AwsAuthConfig{
 				Mode: "secret", AccessKeyID: "key", SecretAccessKey: "secret",
-			}), &lg)
+			}), &lg, "test-policy")
 
 		require.Error(t, err)
 		assert.Nil(t, exp)
@@ -123,7 +123,7 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 	})
 
 	t.Run("a nil configuration is refused", func(t *testing.T) {
-		exp, err := newS3MisbehaviorExporter(nil, &lg)
+		exp, err := newS3MisbehaviorExporter(nil, &lg, "test-policy")
 		require.Error(t, err)
 		assert.Nil(t, exp)
 	})
@@ -131,14 +131,14 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 	t.Run("an empty path is refused as unconfigured", func(t *testing.T) {
 		// "not configured" and "malformed" are different operator mistakes
 		// and must not collapse into the same message.
-		exp, err := newS3MisbehaviorExporter(s3Cfg("", "", nil), &lg)
+		exp, err := newS3MisbehaviorExporter(s3Cfg("", "", nil), &lg, "test-policy")
 		require.Error(t, err)
 		assert.Nil(t, exp)
 		assert.Contains(t, err.Error(), "empty S3 path configuration")
 	})
 
 	t.Run("a path that is not an s3 URI is refused", func(t *testing.T) {
-		exp, err := newS3MisbehaviorExporter(s3Cfg("/var/log/catches", "", nil), &lg)
+		exp, err := newS3MisbehaviorExporter(s3Cfg("/var/log/catches", "", nil), &lg, "test-policy")
 		require.Error(t, err)
 		assert.Nil(t, exp)
 		assert.Contains(t, err.Error(), "s3://")
@@ -150,7 +150,7 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 		exp, err := newS3MisbehaviorExporter(
 			s3Cfg("s3://catches", srv.URL, &common.AwsAuthConfig{
 				Mode: "secret", AccessKeyID: "key", SecretAccessKey: "secret",
-			}), &lg)
+			}), &lg, "test-policy")
 
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = exp.Close() })
@@ -185,7 +185,7 @@ func TestNewS3MisbehaviorExporter(t *testing.T) {
 			{"no credentials block", nil, "ENVKEY"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				exp, err := newS3MisbehaviorExporter(s3Cfg("s3://catches/p/", srv.URL, tc.creds), &lg)
+				exp, err := newS3MisbehaviorExporter(s3Cfg("s3://catches/p/", srv.URL, tc.creds), &lg, "test-policy")
 				require.NoError(t, err)
 				require.NotNil(t, exp)
 				t.Cleanup(func() { _ = exp.Close() })
@@ -208,7 +208,7 @@ func TestCreateMisbehaviorExporter_S3(t *testing.T) {
 			Mode: "secret", AccessKeyID: "key", SecretAccessKey: "secret",
 		})
 
-		exp := createMisbehaviorExporter(cfg, &lg)
+		exp := createMisbehaviorExporter(cfg, &lg, "test-policy")
 		require.NotNil(t, exp)
 		s3exp, ok := exp.(*s3MisbehaviorExporter)
 		require.True(t, ok, "an s3 destination must not silently become a file exporter")
@@ -225,15 +225,15 @@ func TestCreateMisbehaviorExporter_S3(t *testing.T) {
 		// nil *s3MisbehaviorExporter through the interface produces a
 		// non-nil interface, and every `if exporter != nil` caller would
 		// then call methods on it.
-		exp := createMisbehaviorExporter(cfg, &lg)
+		exp := createMisbehaviorExporter(cfg, &lg, "test-policy")
 		assert.True(t, exp == nil,
 			"export is best-effort; a broken archive must not take the process down, "+
 				"and it must return a true nil interface: %#v", exp)
 	})
 
 	t.Run("an empty path disables export", func(t *testing.T) {
-		exp := createMisbehaviorExporter(&common.MisbehaviorsDestinationConfig{Type: "s3"}, &lg)
+		exp := createMisbehaviorExporter(&common.MisbehaviorsDestinationConfig{Type: "s3"}, &lg, "test-policy")
 		assert.True(t, exp == nil)
-		assert.True(t, createMisbehaviorExporter(nil, &lg) == nil)
+		assert.True(t, createMisbehaviorExporter(nil, &lg, "test-policy") == nil)
 	})
 }

@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -397,7 +398,15 @@ func writeEvmHeadCounter(t testing.TB, ctx context.Context, reg *upstream.Upstre
 // state registry directly and have no *testing.T to report through.
 func setEvmHeadCounter(ctx context.Context, ssr data.SharedStateRegistry, up common.EvmUpstream, kind string, value int64) int64 {
 	key := data.CounterValueSchemaVersion + "/" + kind + "/" + common.UniqueUpstreamKey(up)
-	ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback).TryUpdate(ctx, value)
+	c := ssr.GetCounterInt64(key, common.DefaultToleratedBlockHeadRollback)
+	if c.TryUpdate(ctx, value) != value && value > 1 {
+		// A drop past the rollback tolerance (e.g. below the head Bootstrap
+		// just polled from the mocks) is held until the lower side moves
+		// (upstream #1362, admitLargeRollback). Propose value-1, then value:
+		// the second proposal is higher than the held one, so it applies.
+		c.TryUpdate(ctx, value-1)
+		c.TryUpdate(ctx, value)
+	}
 
 	sp := up.EvmStatePoller()
 	switch kind {
@@ -1026,6 +1035,65 @@ func TestNetworkPolicy_SpreadAcrossTags_PreventsCohortCascade(t *testing.T) {
 		"cohort:cohort-2 (the only one) must be position[1] under spreadAcrossTags('cohort:')")
 }
 
+// TestNetworkPolicy_BlockMethods_SkipsUpstreamForOneMethodOnly walks
+// `blockMethods` end to end: a 9s trace p99 blocks the upstream for traces
+// only, eth_call keeps it, the blocked upstream is a probe
+// candidate for traces alone, and blocking every upstream keeps them all.
+func TestNetworkPolicy_BlockMethods_SkipsUpstreamForOneMethodOnly(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	setupGockObserver(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const trace = "debug_traceBlockByNumber"
+	upstreamConfigs := []*common.UpstreamConfig{
+		{Type: common.UpstreamTypeEvm, Id: "slowtrace", Endpoint: upstreamHostFromID("slowtrace"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+		{Type: common.UpstreamTypeEvm, Id: "fasttrace", Endpoint: upstreamHostFromID("fasttrace"), Evm: &common.EvmUpstreamConfig{ChainId: 123}},
+	}
+	network := setupSelectionPolicyNetworkWithEval(t, ctx, upstreamConfigs,
+		`(upstreams, ctx) => upstreams
+			.blockMethods({ match: ['debug_trace*', 'trace_*'], when: all(samplesAbove(20), latencyAbove(5000, 99)) })
+			.probeExcluded({ sampleRate: 1, minSamples: 0 })`)
+
+	slow, fast := upstreamByID(t, network, "slowtrace"), upstreamByID(t, network, "fasttrace")
+	for _, u := range []common.Upstream{slow, fast} {
+		seedDegraded(network.metricsTracker, u, seedSpec{method: "eth_call", successful: 100, successAvgMs: 10})
+	}
+	seedDegraded(network.metricsTracker, slow, seedSpec{method: trace, successful: 100, successAvgMs: 9000})
+	seedDegraded(network.metricsTracker, fast, seedSpec{method: trace, successful: 100, successAvgMs: 300})
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+
+	listed := func(method string) []string {
+		ids := idsFromUpstreams(network.policyEngine.GetOrdered(network.networkId, method, "*"))
+		sort.Strings(ids)
+		return ids
+	}
+	assert.Equal(t, []string{"fasttrace"}, listed(trace), "trace p99 9s must block slowtrace for traces")
+	assert.Equal(t, []string{"fasttrace", "slowtrace"}, listed("eth_call"), "the block must not touch eth_call")
+	assert.Equal(t, []string{"slowtrace"}, idsFromUpstreams(network.policyEngine.GetExcluded(network.networkId, trace, "*")),
+		"the blocked upstream is a trace probe candidate")
+	assert.Empty(t, network.policyEngine.GetExcluded(network.networkId, "eth_call", "*"),
+		"no eth_call probes: nothing is blocked for eth_call")
+
+	// Forward drops slowtrace from every trace request, whatever the order.
+	mockClean(t, upstreamHostFromID("slowtrace"), trace, "0x1")
+	mockClean(t, upstreamHostFromID("fasttrace"), trace, "0x2")
+	for i := 0; i < 5; i++ {
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"` + trace + `","params":["0x10",{"tracer":"callTracer"}]}`))
+		resp, err := network.Forward(ctx, req)
+		require.NoError(t, err)
+		require.Equal(t, "fasttrace", resp.Upstream().Id(), "a blocked upstream never serves the blocked method")
+	}
+
+	// Both upstreams slow for traces: a method never loses every upstream.
+	seedDegraded(network.metricsTracker, fast, seedSpec{method: trace, successful: 1000, successAvgMs: 9000})
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+	assert.Equal(t, []string{"fasttrace", "slowtrace"}, listed(trace), "all blocked: traces keep every upstream")
+}
+
 // firstTagWithPrefix returns the first tag in `tags` whose value
 // begins with `prefix`, or "" if none. Test-only helper used to
 // inspect tag-encoded labels in network-level assertions.
@@ -1171,10 +1239,10 @@ func TestNetworkPolicy_FallbackEscape_OffLeavesFallbackUnreachable(t *testing.T)
 
 // TestNetworkPolicy_FallbackEscape_ServesWithinOneRequest is the whole
 // point. Same shape as the test above, plus
-// `failover.onDefaultsExhausted: true`. The fallback tier now sits at
-// position two of the tick's list, the request loop sweeps into it when
-// the primary returns a retryable error, and the client gets an answer
-// on the SAME network.Forward call — no waiting for the next tick.
+// `failover.onDefaultsExhausted: true`. When the primary returns a
+// retryable error, the network's escape sweep tries the fallback tier and
+// the client gets an answer on the SAME network.Forward call — no waiting
+// for the next tick.
 func TestNetworkPolicy_FallbackEscape_ServesWithinOneRequest(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
@@ -1195,13 +1263,13 @@ func TestNetworkPolicy_FallbackEscape_ServesWithinOneRequest(t *testing.T) {
 	}
 	policy.TickForTest(network.policyEngine, network.networkId, "*")
 
+	// The policy ranks only the primaries. The fallback tier is reached by
+	// the network's onDefaultsExhausted escape sweep after every primary
+	// failed (upstream's mechanism), not by ranking it last in the policy:
+	// that let hedges and consensus pick a fallback on a healthy request.
 	order := network.policyEngine.GetOrdered(network.networkId, "*", "*")
-	require.Len(t, order, 3, "escape on: every upstream stays reachable")
+	require.Len(t, order, 1, "escape on: the policy ranks only the primaries")
 	require.Equal(t, "primary", order[0].Id(), "the healthy primary still leads")
-	for _, u := range order[1:] {
-		require.True(t, u.Config().HasTag("tier:fallback"),
-			"the fallback tier must be ranked last, not interleaved")
-	}
 
 	mockRetryableError(t, upstreamHostFromID("primary"), "eth_getBalance")
 	mockClean(t, upstreamHostFromID("backupA"), "eth_getBalance", "0xbackupA")

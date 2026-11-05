@@ -17,8 +17,8 @@ import (
 
 // selfHealMockUpstream is a WS upstream whose connections can be killed
 // WITHOUT a WebSocket close handshake, and which keeps accepting fresh
-// connections afterwards — the moral equivalent of a fullnode pod being
-// deleted and recreated behind a still-healthy gateway.
+// connections afterwards — the moral equivalent of a node behind a
+// still-healthy proxy being replaced.
 type selfHealMockUpstream struct {
 	mu        sync.Mutex
 	conns     []*selfHealConn
@@ -29,9 +29,7 @@ type selfHealMockUpstream struct {
 }
 
 type selfHealConn struct {
-	// conn carries mockWsConn's own write lock; writeMu below is still needed
-	// because writeJSON sets a deadline and writes as one unit.
-	conn    *mockWsConn
+	conn    *websocket.Conn
 	writeMu sync.Mutex
 }
 
@@ -57,7 +55,7 @@ func (sc *selfHealConn) sendHead(subID string, num int64) {
 	})
 }
 
-func (m *selfHealMockUpstream) handle(conn *mockWsConn) {
+func (m *selfHealMockUpstream) handle(conn *websocket.Conn) {
 	sc := &selfHealConn{conn: conn}
 	m.mu.Lock()
 	m.conns = append(m.conns, sc)
@@ -101,10 +99,9 @@ func (m *selfHealMockUpstream) handle(conn *mockWsConn) {
 	}
 }
 
-// TestWebSocket_UpstreamDiesUngracefully_SelfHeals is the end-to-end
-// regression test for the 2026-06-12 zkSync chain-324 incident: the single
-// WS upstream's connection dies with NO close handshake; eRPC must — with
-// no process restart —
+// TestWebSocket_UpstreamDiesUngracefully_SelfHeals: when the only WS
+// upstream's connection dies without a close handshake, eRPC must, with no
+// restart:
 //
 //  1. detect the dead connection and re-dial,
 //  2. re-subscribe newHeads upstream (retrying through transient failures),
@@ -196,12 +193,12 @@ func TestWebSocket_UpstreamDiesUngracefully_SelfHeals(t *testing.T) {
 	require.Equal(t, "eth_subscription", notif["method"])
 	require.Equal(t, clientSubID, notif["params"].(map[string]interface{})["subscription"])
 
-	// ── The incident ──────────────────────────────────────────────────
+	// ── Failure injection ─────────────────────────────────────────────
 	// Kill the upstream TCP connection with NO WebSocket close handshake.
 	_ = upConn1.conn.UnderlyingConn().Close()
 
-	// eRPC must re-dial (the gateway/httptest server is still up, exactly
-	// like the incident topology) ...
+	// eRPC must re-dial (the httptest server is still up, as with a proxy
+	// in front of a replaced node) ...
 	var upConn2 *selfHealConn
 	select {
 	case upConn2 = <-mock.connSeen:

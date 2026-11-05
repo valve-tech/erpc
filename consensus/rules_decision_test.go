@@ -668,7 +668,7 @@ func TestRule_PreferNonEmptyOverAgreedErrorAboveThreshold(t *testing.T) {
 	assert.Contains(t, resultText(t, winnerOf(cfg, a)), "0xaa")
 }
 
-const returnErrorEmptyDesc = "return error when empty would win but non-empty exists (above threshold)"
+const returnErrorEmptyDesc = "return error when empty/missing-data-waivable consensus-error would win but non-empty exists (above threshold)"
 
 // TestRule_ReturnErrorWhenEmptyWouldWin pins the difference the preference
 // makes under ReturnError: with it, the conflict surfaces; without it, the

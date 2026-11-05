@@ -527,7 +527,9 @@ func TestGrpcErrors_MapAnUpstreamFailureOntoTheRightStatusCode(t *testing.T) {
 		{"method not supported", 200, -32601, "the method eth_getBlockByHash does not exist", codes.Unimplemented},
 		{"unauthorized", 401, -32000, "unauthorized", codes.Unauthenticated},
 		{"rate limited", 429, -32000, "too many requests", codes.ResourceExhausted},
-		{"unclassified server error", 500, -32603, "internal error", codes.Internal},
+		// Upstream #1212 grpcStatusOf: an exhausted network whose failures are
+		// retryable (a 500 server error) is Unavailable, so a client retries.
+		{"unclassified server error", 500, -32603, "internal error", codes.Unavailable},
 	}
 
 	for _, tc := range cases {

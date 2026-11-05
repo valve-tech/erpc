@@ -79,11 +79,11 @@ func TestNetworkPreForward_TheTopicLimitCountsTopicZeroOnly(t *testing.T) {
 		// of one. This pins the boundary: the limit is a maximum, not an
 		// exclusive bound. (The count itself is only ever compared against a
 		// limit of one or more, so a count of one can never reject on its own.)
-		{"AScalarTopicZeroIsOneTopic", []interface{}{"0xaaa"}, 1, false},
+		{"AScalarTopicZeroIsOneTopic", []interface{}{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, 1, false},
 		// An OR list at topic0 counts its members.
-		{"AnOrListAtTopicZeroCountsItsMembers", []interface{}{[]interface{}{"0xaaa", "0xbbb"}}, 1, true},
+		{"AnOrListAtTopicZeroCountsItsMembers", []interface{}{[]interface{}{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}, 1, true},
 		// Later positions are AND-ed, not OR-ed, so they never add to the count.
-		{"LaterPositionsDoNotCount", []interface{}{"0xaaa", []interface{}{"0xbbb", "0xccc", "0xddd"}}, 1, false},
+		{"LaterPositionsDoNotCount", []interface{}{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []interface{}{"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}, 1, false},
 		// A wildcard at topic0 is no topic at all.
 		{"ANullTopicZeroIsNoTopic", []interface{}{nil}, 1, false},
 	} {

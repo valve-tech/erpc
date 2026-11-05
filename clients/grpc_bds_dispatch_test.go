@@ -2,7 +2,6 @@ package clients
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/blockchain-data-standards/manifesto/evm"
@@ -31,45 +30,12 @@ func (s *happyRPCServer) GetBlockByHash(ctx context.Context, _ *evm.GetBlockByHa
 	}, nil
 }
 
-func (s *happyRPCServer) GetLogs(ctx context.Context, _ *evm.GetLogsRequest) (*evm.GetLogsResponse, error) {
-	s.record("GetLogs")
-	s.recordMetadata(ctx)
-	return &evm.GetLogsResponse{
-		Logs: []*evm.Log{{
-			Address:     []byte{0x01, 0x02},
-			BlockNumber: s.blockNumber,
-			LogIndex:    7,
-		}},
-	}, nil
-}
-
-func (s *happyRPCServer) GetTransactionByHash(ctx context.Context, req *evm.GetTransactionByHashRequest) (*evm.GetTransactionByHashResponse, error) {
-	s.record("GetTransactionByHash")
-	s.recordMetadata(ctx)
-	s.mu.Lock()
-	s.lastChainIdParam = req.ChainId
-	s.mu.Unlock()
-	return &evm.GetTransactionByHashResponse{
-		// A fixed one-byte r/s lets upstream's signature-encoding test pin the
-		// JSON-RPC encoding the client selects for its chain.
-		Transaction: &evm.Transaction{Hash: []byte{0x11}, Nonce: 3, R: []byte{0x01}, S: []byte{0x02}},
-	}, nil
-}
-
 // chainIdParamSeen returns the chainId assertion carried by the last
 // GetTransactionByHash the server served (nil when the client sent none).
 func (s *happyRPCServer) chainIdParamSeen() *uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastChainIdParam
-}
-
-func (s *happyRPCServer) GetTransactionReceipt(ctx context.Context, _ *evm.GetTransactionReceiptRequest) (*evm.GetTransactionReceiptResponse, error) {
-	s.record("GetTransactionReceipt")
-	s.recordMetadata(ctx)
-	return &evm.GetTransactionReceiptResponse{
-		Receipt: &evm.Receipt{TransactionHash: []byte{0x11}, BlockNumber: s.blockNumber},
-	}, nil
 }
 
 func (s *happyRPCServer) GetBlockReceipts(ctx context.Context, _ *evm.GetBlockReceiptsRequest) (*evm.GetBlockReceiptsResponse, error) {
@@ -158,20 +124,15 @@ func TestSendRequest_DispatchRoutesEveryMethodToItsRPC(t *testing.T) {
 		wantGrpcCall  string
 	}{
 		{"eth_getBlockByNumber", `["0x64",false]`, "GetBlockByNumber"},
-		{"eth_getBlockByHash", `["0x` + hash32 + `",false]`, "GetBlockByHash"},
+		{"eth_getBlockByHash", `["0x` + dispatchHash32 + `",false]`, "GetBlockByHash"},
 		{"eth_getLogs", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "GetLogs"},
-		{"eth_getTransactionByHash", `["0x` + hash32 + `"]`, "GetTransactionByHash"},
-		{"eth_getTransactionReceipt", `["0x` + hash32 + `"]`, "GetTransactionReceipt"},
+		{"eth_getTransactionByHash", `["0x` + dispatchHash32 + `"]`, "GetTransactionByHash"},
+		{"eth_getTransactionReceipt", `["0x` + dispatchHash32 + `"]`, "GetTransactionReceipt"},
 		{"eth_getBlockReceipts", `["0x64"]`, "GetBlockReceipts"},
 		{"eth_chainId", `[]`, "ChainId"},
-		{"eth_queryBlocks", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "QueryBlocks"},
-		{"eth_queryTransactions", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "QueryTransactions"},
-		{"eth_queryLogs", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "QueryLogs"},
-		{"eth_queryTraces", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "QueryTraces"},
-		{"eth_queryTransfers", `[{"fromBlock":"0x1","toBlock":"0x2"}]`, "QueryTransfers"},
 		{"getBlock", `[42]`, "SvmGetBlock"},
 	}
-	require.Len(t, cases, 13, "one case per arm of the SendRequest switch")
+	require.Len(t, cases, 8, "one case per arm the happy server answers (eth_query* moved to erpc/query_pipe_through.go in upstream #1212)")
 
 	for _, tc := range cases {
 		t.Run(tc.jsonRpcMethod, func(t *testing.T) {
@@ -195,10 +156,10 @@ func TestSendRequest_DispatchRoutesEveryMethodToItsRPC(t *testing.T) {
 	}
 }
 
-// hash32 is a 32-byte hex body (no 0x), reused for block and transaction
+// dispatchHash32 is a 32-byte hex body (no 0x), reused for block and transaction
 // hashes. The client parses hashes strictly, so a short string would fail in
 // the handler before the dispatch arm proved anything.
-const hash32 = "1111111111111111111111111111111111111111111111111111111111111111"
+const dispatchHash32 = "1111111111111111111111111111111111111111111111111111111111111111"
 
 // TestSendRequest_GetBlockByNumberWithHashParam_UsesGetBlockByHash pins the one
 // arm that is NOT a straight method→RPC mapping: eth_getBlockByNumber given a
@@ -209,7 +170,7 @@ func TestSendRequest_GetBlockByNumberWithHashParam_UsesGetBlockByHash(t *testing
 	defer stop()
 
 	client := newTestClient(t, addr)
-	body := `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[{"blockHash":"0x` + hash32 + `"},false]}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[{"blockHash":"0x` + dispatchHash32 + `"},false]}`
 	resp, err := client.SendRequest(context.Background(), common.NewNormalizedRequest([]byte(body)))
 	require.NoError(t, err)
 	require.NotNil(t, resp)
@@ -227,7 +188,7 @@ func TestSendRequest_ChainIdAssertionReachesTheWire(t *testing.T) {
 	defer stop()
 
 	client := newTestClient(t, addr)
-	body := `{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":["0x` + hash32 + `"]}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":["0x` + dispatchHash32 + `"]}`
 
 	// Unarmed: the client knows no chain, so it must assert nothing rather
 	// than guess a value the server would then validate against.
@@ -243,30 +204,4 @@ func TestSendRequest_ChainIdAssertionReachesTheWire(t *testing.T) {
 	got := server.chainIdParamSeen()
 	require.NotNil(t, got, "an armed client must carry the chainId assertion")
 	require.Equal(t, uint64(137), *got)
-}
-
-// TestSendRequest_QueryEnvelopeReachesCaller checks the streaming arms produce
-// the query envelope rather than a bare result. The dispatch test above proves
-// routing; this proves the aggregated page survives the trip back.
-func TestSendRequest_QueryEnvelopeReachesCaller(t *testing.T) {
-	addr, _, stop := startHappyServer(t, 1, 0x64)
-	defer stop()
-
-	client := newTestClient(t, addr)
-	body := `{"jsonrpc":"2.0","id":1,"method":"eth_queryLogs","params":[{"fromBlock":"0x1","toBlock":"0x2"}]}`
-	resp, err := client.SendRequest(context.Background(), common.NewNormalizedRequest([]byte(body)))
-	require.NoError(t, err)
-
-	jrr, err := resp.JsonRpcResponse()
-	require.NoError(t, err)
-
-	var env struct {
-		Data struct {
-			Logs []map[string]interface{} `json:"logs"`
-		} `json:"data"`
-		CursorBlock map[string]interface{} `json:"cursorBlock"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(jrr.GetResultString()), &env))
-	require.Len(t, env.Data.Logs, 1, "the single streamed page must reach the caller")
-	require.NotNil(t, env.CursorBlock, "the cursor must reach the caller for pagination to work")
 }

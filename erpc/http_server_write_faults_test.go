@@ -64,7 +64,7 @@ func TestHandleErrorResponse_MapsAFailureToTheTransportStatusAClientActsOn(t *te
 		{"invalid url path", common.NewErrInvalidUrlPath("no network", "/x"), http.StatusBadRequest},
 		{"unparseable body", common.NewErrJsonRpcRequestUnmarshal(errors.New("eof"), []byte("{")), http.StatusBadRequest},
 		{"invalid request", common.NewErrInvalidRequest(errors.New("bad params")), http.StatusBadRequest},
-		{"auth unauthorized", common.NewErrAuthUnauthorized("secret", "bad token"), http.StatusUnauthorized},
+		{"auth unauthorized", common.NewErrAuthUnauthorized("secret", "invalid_token", "bad token"), http.StatusUnauthorized},
 		{"endpoint unauthorized", common.NewErrEndpointUnauthorized(errors.New("bad key")), http.StatusUnauthorized},
 		{"project not found", common.NewErrProjectNotFound("p"), http.StatusNotFound},
 		{"network not found", common.NewErrNetworkNotFound("evm:1"), http.StatusNotFound},
@@ -456,7 +456,7 @@ func TestGzipHandler_StepsAsideForAWebSocketUpgrade(t *testing.T) {
 	var got http.ResponseWriter
 	h := gzipHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = w
-	}))
+	}), true)
 
 	upgrade := httptest.NewRequest(http.MethodGet, "http://erpc.test/proj/evm/123", nil)
 	upgrade.Header.Set("Connection", "Upgrade")

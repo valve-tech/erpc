@@ -71,7 +71,12 @@ func (u *suggestGateUpstream) Logger() *zerolog.Logger        { return &u.logger
 func (u *suggestGateUpstream) Vendor() common.Vendor          { return nil }
 func (u *suggestGateUpstream) Tracker() common.HealthTracker  { return nil }
 func (u *suggestGateUpstream) IgnoreMethod(string)            {}
-func (u *suggestGateUpstream) Uncordon(_, _ string)           {}
+func (u *suggestGateUpstream) Uncordon(_, _ string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.cordoned = false
+	u.reason = ""
+}
 func (u *suggestGateUpstream) ShouldHandleMethod(string) (bool, error) {
 	return true, nil
 }
@@ -167,6 +172,85 @@ func TestSuggestLatestBlock_MajorJumpChainIdMismatchDroppedAndCordoned(t *testin
 	assert.Equal(t, int64(1000), p.LatestBlock(), "the bogus major jump must NOT enter the shared counter")
 }
 
+func TestSuggestLatestBlock_ChainIdRecoveryUncordonsAvailability(t *testing.T) {
+	up := newSuggestGateUpstream(123, "999", nil)
+	p := newGateTestPoller(t, up)
+
+	p.SuggestLatestBlock(1000)
+	require.Equal(t, int64(1000), p.LatestBlock())
+
+	p.SuggestLatestBlock(5_000_000)
+	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond)
+
+	// Endpoint fixed: recovery must also fire on a *small* keep-fresh advance
+	// (not only another major jump), otherwise a fixed endpoint that never
+	// moves past the major-move threshold stays availability-cordoned forever.
+	up.setChainId("123", nil)
+	p.SuggestLatestBlock(1000 + gateTolerance) // small (== tolerance, not major)
+	require.Eventually(t, func() bool {
+		return !up.isCordoned()
+	}, 2*time.Second, 10*time.Millisecond, "matching chainId after mismatch must uncordon even on a non-major advance")
+}
+
+func TestSuggestLatestBlock_ChainIdRecoveryOnNonMajorAdvance(t *testing.T) {
+	up := newSuggestGateUpstream(123, "999", nil)
+	p := newGateTestPoller(t, up)
+
+	p.SuggestLatestBlock(1000)
+	require.Equal(t, int64(1000), p.LatestBlock())
+	p.SuggestLatestBlock(5_000_000)
+	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond)
+
+	// Endpoint fixed, but next observation is only a small keep-fresh advance.
+	// Recovery must still run (forced probe while cordonedByChainId).
+	up.setChainId("123", nil)
+	p.SuggestLatestBlock(1000 + gateTolerance) // == tolerance, not major vs current 1000
+	require.Eventually(t, func() bool { return !up.isCordoned() }, 2*time.Second, 10*time.Millisecond,
+		"matching chainId on a non-major advance must uncordon while cordonedByChainId")
+}
+
+// While still cross-wired, a non-major keep-fresh suggestion must be dropped —
+// accepting it would poison the shared counter on every tick until a major jump.
+func TestSuggestLatestBlock_CordonedNonMajorAdvanceRejectedUntilRecovered(t *testing.T) {
+	up := newSuggestGateUpstream(123, "999", nil)
+	p := newGateTestPoller(t, up)
+
+	p.SuggestLatestBlock(1000)
+	require.Equal(t, int64(1000), p.LatestBlock())
+	p.SuggestLatestBlock(5_000_000)
+	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond)
+
+	// Still wrong chain: small advance must not write through.
+	p.SuggestLatestBlock(1000 + gateTolerance)
+	require.Never(t, func() bool {
+		return p.LatestBlock() != 1000
+	}, 300*time.Millisecond, 20*time.Millisecond, "cordoned non-major sample must be rejected while chainId still mismatches")
+	assert.True(t, up.isCordoned())
+}
+
+// After an operator UncordonAdmin clears the tracker bit, cordonedByChainId
+// may still be set. A mismatching recovery probe must re-assert the
+// availability cordon so the endpoint does not stay fail-open for routing.
+func TestSuggestLatestBlock_MismatchAfterAdminClearReCordons(t *testing.T) {
+	up := newSuggestGateUpstream(123, "999", nil)
+	p := newGateTestPoller(t, up)
+
+	p.SuggestLatestBlock(1000)
+	p.SuggestLatestBlock(5_000_000)
+	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond)
+
+	// Simulate UncordonAdmin: tracker cleared, ownership flag still true.
+	up.Uncordon("*", "ops cleared")
+	require.False(t, up.isCordoned())
+	require.True(t, p.cordonedByChainId.Load())
+
+	// Still wrong chain on a keep-fresh tick → must re-cordon.
+	p.SuggestLatestBlock(1000 + gateTolerance)
+	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond,
+		"mismatch after admin clear must re-assert availability cordon")
+	assert.Equal(t, int64(1000), p.LatestBlock())
+}
+
 func TestSuggestLatestBlock_MajorJumpChainIdErrorDroppedNotCordoned(t *testing.T) {
 	// A transient eth_chainId failure (not a proven mismatch) drops the sample
 	// for now and does NOT cordon — the next verified poll re-observes it.
@@ -222,8 +306,11 @@ func TestSuggestFinalizedBlock_MajorJumpMatchingApplies(t *testing.T) {
 	p.SuggestFinalizedBlock(1000)
 	require.Eventually(t, func() bool { return p.FinalizedBlock() == 1000 }, 2*time.Second, 10*time.Millisecond)
 
-	p.SuggestFinalizedBlock(1000 + gateTolerance + 1000) // MAJOR
+	// The first suggestion's goroutine publishes the value before it releases
+	// the in-progress lock, so a single follow-up suggestion can be skipped.
+	// Re-suggest until it is taken.
 	require.Eventually(t, func() bool {
+		p.SuggestFinalizedBlock(1000 + gateTolerance + 1000) // MAJOR
 		return p.FinalizedBlock() == 1000+gateTolerance+1000
 	}, 2*time.Second, 10*time.Millisecond, "verified major finalized jump must be applied")
 	require.False(t, up.isCordoned())
@@ -236,8 +323,11 @@ func TestSuggestFinalizedBlock_MajorJumpChainIdMismatchDroppedAndCordoned(t *tes
 	p.SuggestFinalizedBlock(1000)
 	require.Eventually(t, func() bool { return p.FinalizedBlock() == 1000 }, 2*time.Second, 10*time.Millisecond)
 
-	p.SuggestFinalizedBlock(5_000_000) // MAJOR wrong-chain height
-	require.Eventually(t, up.isCordoned, 2*time.Second, 10*time.Millisecond)
+	// Re-suggest until taken: see TestSuggestFinalizedBlock_MajorJumpMatchingApplies.
+	require.Eventually(t, func() bool {
+		p.SuggestFinalizedBlock(5_000_000) // MAJOR wrong-chain height
+		return up.isCordoned()
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, int64(1000), p.FinalizedBlock(), "bogus major finalized jump must not enter the shared counter")
 }
 

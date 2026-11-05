@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,6 +214,119 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 		}
 		_ = jrpcErr
 		_ = resp
+	})
+
+	// HyperEVM returns opaque "Unexpected error (code=10055)" (JSON-RPC -32100)
+	// for HyperCore↔HyperEVM boundary failures (nonce / duplicate / insufficient
+	// funds / underpriced). Classify as nonce-too-low so we verify on-chain
+	// instead of failing over to ErrUpstreamsExhausted or treating as already-known.
+	t.Run("HyperEVMCode10055WithMatchingTxReturnsSuccess", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				return strings.Contains(body, "eth_sendRawTransaction")
+			}).
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"error": map[string]interface{}{
+					"code":    -32100,
+					"message": "Unexpected error (code=10055)",
+				},
+			})
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				return strings.Contains(body, "eth_getTransactionByHash")
+			}).
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result": map[string]interface{}{
+					"hash":        expectedTxHash,
+					"nonce":       "0x9",
+					"blockHash":   "0x1234567890abcdef",
+					"blockNumber": "0x100",
+					"from":        "0x1234567890123456789012345678901234567890",
+					"to":          "0x3535353535353535353535353535353535353535",
+					"value":       "0xde0b6b3a7640000",
+				},
+			})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network := setupSendRawTxTestNetworkSingleUpstream(t, ctx)
+
+		req := common.NewNormalizedRequest(requestBytes)
+		resp, err := network.Forward(ctx, req)
+
+		require.NoError(t, err, "HyperEVM 10055 with matching tx should convert to success")
+		require.NotNil(t, resp)
+
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Contains(t, jrr.GetResultString(), "0x")
+	})
+
+	t.Run("HyperEVMCode10055WithNoMatchingTxReturnsError", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				return strings.Contains(body, "eth_sendRawTransaction")
+			}).
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"error": map[string]interface{}{
+					"code":    -32100,
+					"message": "Unexpected error (code=10055)",
+				},
+			})
+
+		gock.New("http://rpc1.localhost").
+			Post("").
+			Filter(func(r *http.Request) bool {
+				body := util.SafeReadBody(r)
+				return strings.Contains(body, "eth_getTransactionByHash")
+			}).
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result":  nil,
+			})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network := setupSendRawTxTestNetworkSingleUpstream(t, ctx)
+
+		req := common.NewNormalizedRequest(requestBytes)
+		_, err := network.Forward(ctx, req)
+
+		require.Error(t, err, "10055 without matching tx must remain an error (e.g. insufficient funds)")
+		assert.NotContains(t, err.Error(), "ErrUpstreamsExhausted")
+		assert.Contains(t, err.Error(), "code=10055")
 	})
 
 	t.Run("ExecutionRevertedIsRetryableAcrossUpstreams", func(t *testing.T) {
@@ -2350,6 +2464,199 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 
 		wg.Wait()
 	})
+
+	t.Run("AllUpstreamsRejectReturnsWithoutWaitingOnHedges", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+
+		var upstreamConfigs []*common.UpstreamConfig
+		for _, id := range []string{"rpc1", "rpc2", "rpc3", "rpc4"} {
+			endpoint := "http://" + id + ".localhost"
+			upstreamConfigs = append(upstreamConfigs, &common.UpstreamConfig{
+				Type:     common.UpstreamTypeEvm,
+				Id:       id,
+				Endpoint: endpoint,
+				Evm:      &common.EvmUpstreamConfig{ChainId: 123},
+			})
+			gock.New(endpoint).
+				Post("").
+				Persist().
+				Filter(func(r *http.Request) bool {
+					return strings.Contains(util.SafeReadBody(r), "eth_sendRawTransaction")
+				}).
+				Reply(200).
+				Delay(300 * time.Millisecond).
+				JSON(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"id":      1,
+					"error": map[string]interface{}{
+						"code":    -32003,
+						"message": "gas limit too high",
+					},
+				})
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Production broadcast shape: more consensus slots than upstreams,
+		// hedged and retried. Every upstream rejects, so the hedge timers
+		// left on the idle slots must not delay the answer.
+		network := setupSendRawTxNetwork(t, ctx, upstreamConfigs, &common.NetworkConfig{
+			Architecture: common.ArchitectureEvm,
+			Evm:          &common.EvmNetworkConfig{ChainId: 123},
+			Failsafe: []*common.FailsafeConfig{{
+				MatchMethod: "eth_sendRawTransaction",
+				Hedge: &common.HedgePolicyConfig{
+					MaxCount: 2,
+					Delay:    common.NewStaticDuration(500 * time.Millisecond),
+				},
+				Retry: &common.RetryPolicyConfig{MaxAttempts: 6},
+				Consensus: &common.ConsensusPolicyConfig{
+					MaxParticipants:    10,
+					AgreementThreshold: 1,
+					FireAndForget:      true,
+				},
+			}},
+		})
+
+		start := time.Now()
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
+		_, err := network.Forward(ctx, req)
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointExecutionException),
+			"client must get the node's rejection, got: %v", err)
+		// main waits out hedge and retry timers (~6s); 3s leaves room for -race.
+		assert.Less(t, elapsed, 3*time.Second,
+			"rejection must return once every upstream has answered, not after hedge and retry delays")
+	})
+
+	t.Run("ExceedsBlockGasLimitIsNotRetried", func(t *testing.T) {
+		// The block gas limit is consensus state: every upstream refuses the
+		// same transaction, so the broadcast ends after its first round.
+		calls, elapsed, err := forwardSendEveryUpstreamRefuses(t, -32000, "exceeds block gas limit")
+
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointExecutionException),
+			"client must get the node's refusal, got: %v", err)
+		assert.Contains(t, err.Error(), "exceeds block gas limit")
+		assert.LessOrEqual(t, totalCalls(calls), int64(sendBroadcastParticipants),
+			"a refusal every upstream shares must not be retried: %v", calls)
+		assert.Less(t, elapsed, 3*time.Second)
+	})
+
+	for _, message := range []string{"transaction underpriced", "replacement transaction underpriced"} {
+		message := message
+		t.Run("UnderpricedFromEveryUpstreamIsNotRetried/"+message, func(t *testing.T) {
+			// Minimum gas price and mempool contents are node-local, so each
+			// upstream gets one try; once all refuse, the broadcast ends.
+			calls, elapsed, err := forwardSendEveryUpstreamRefuses(t, -32000, message)
+
+			require.Error(t, err)
+			assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointExecutionException),
+				"client must get the node's refusal, got: %v", err)
+			assert.Contains(t, err.Error(), message)
+			for id, n := range calls {
+				assert.Positive(t, n, "upstream %s was never asked", id)
+			}
+			assert.LessOrEqual(t, totalCalls(calls), int64(sendBroadcastParticipants),
+				"an upstream that refused must not be asked again: %v", calls)
+			assert.Less(t, elapsed, 3*time.Second)
+		})
+	}
+}
+
+// sendBroadcastParticipants is the consensus fan-out of the production
+// eth_sendRawTransaction broadcast: one round asks at most this many times.
+const sendBroadcastParticipants = 10
+
+// forwardSendEveryUpstreamRefuses forwards one eth_sendRawTransaction through
+// the production broadcast shape (consensus fan-out, hedge, retry) to four
+// upstreams that all answer the JSON-RPC error code/message. It returns how
+// often each upstream was asked, how long the forward took and its error.
+func forwardSendEveryUpstreamRefuses(t *testing.T, code int, message string) (map[string]int64, time.Duration, error) {
+	t.Helper()
+	util.ResetGock()
+	t.Cleanup(util.ResetGock)
+	util.SetupMocksForEvmStatePoller()
+
+	ids := []string{"rpc1", "rpc2", "rpc3", "rpc4"}
+	counters := make(map[string]*atomic.Int64, len(ids))
+	var upstreamConfigs []*common.UpstreamConfig
+	for _, id := range ids {
+		endpoint := "http://" + id + ".localhost"
+		upstreamConfigs = append(upstreamConfigs, &common.UpstreamConfig{
+			Type:     common.UpstreamTypeEvm,
+			Id:       id,
+			Endpoint: endpoint,
+			Evm:      &common.EvmUpstreamConfig{ChainId: 123},
+		})
+		counter := &atomic.Int64{}
+		counters[id] = counter
+		gock.New(endpoint).
+			Post("").
+			Persist().
+			Filter(func(r *http.Request) bool {
+				if !strings.Contains(util.SafeReadBody(r), "eth_sendRawTransaction") {
+					return false
+				}
+				counter.Add(1)
+				return true
+			}).
+			Reply(200).
+			Delay(100 * time.Millisecond).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"error": map[string]interface{}{
+					"code":    code,
+					"message": message,
+				},
+			})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	network := setupSendRawTxNetwork(t, ctx, upstreamConfigs, &common.NetworkConfig{
+		Architecture: common.ArchitectureEvm,
+		Evm:          &common.EvmNetworkConfig{ChainId: 123},
+		Failsafe: []*common.FailsafeConfig{{
+			MatchMethod: "eth_sendRawTransaction",
+			Hedge: &common.HedgePolicyConfig{
+				MaxCount: 2,
+				Delay:    common.NewStaticDuration(500 * time.Millisecond),
+			},
+			Retry: &common.RetryPolicyConfig{MaxAttempts: 6},
+			Consensus: &common.ConsensusPolicyConfig{
+				MaxParticipants:    sendBroadcastParticipants,
+				AgreementThreshold: 1,
+				FireAndForget:      true,
+			},
+		}},
+	})
+
+	start := time.Now()
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
+	_, err := network.Forward(ctx, req)
+	elapsed := time.Since(start)
+
+	calls := make(map[string]int64, len(ids))
+	for id, counter := range counters {
+		calls[id] = counter.Load()
+	}
+	return calls, elapsed, err
+}
+
+func totalCalls(calls map[string]int64) int64 {
+	var total int64
+	for _, n := range calls {
+		total += n
+	}
+	return total
 }
 
 // Helper to set up a test network with fire-and-forget consensus for eth_sendRawTransaction

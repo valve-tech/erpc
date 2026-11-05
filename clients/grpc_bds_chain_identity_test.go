@@ -26,8 +26,8 @@ func newIdentityPool(t *testing.T, addr string, expectedChainId uint64) (*bdsPoo
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr,
-		insecure.NewCredentials(), identityServiceConfig, 1, expectedChainId)
+	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr, "",
+		insecure.NewCredentials(), identityServiceConfig, 1, expectedChainId, nil)
 	if p != nil {
 		t.Cleanup(p.Shutdown)
 	}
@@ -281,7 +281,7 @@ func TestPickTargetForBDS(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			target, useTLS := pickTargetForBDS(u)
+			target, _, useTLS := pickTargetForBDS(u)
 			if target != tc.wantTarget {
 				t.Fatalf("target = %q, want %q", target, tc.wantTarget)
 			}

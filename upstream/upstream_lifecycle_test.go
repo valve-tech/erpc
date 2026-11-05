@@ -59,28 +59,31 @@ func TestUpstream_IsDownAndCircuitBreakerStateAnswerDifferentQuestions(t *testin
 	u := bareUpstream(t, &common.UpstreamConfig{Id: "u1"})
 	scoped, catchAll := executorsWithBreakers(t, u)
 
-	require.False(t, u.IsDown())
+	require.False(t, u.IsDown("eth_call", common.DataFinalityStateUnknown))
 	require.Equal(t, failsafe.StateClosed, u.CircuitBreakerState())
 
-	// One method is out. IsDown answers "is anything about this upstream
-	// broken", so it must flip; the per-upstream pill reads the catch-all
-	// breaker, which still serves every other method and must stay closed.
+	// One method is out. IsDown is scoped to a method (upstream's
+	// IsDown(method, finality)): it flips for that method only. The
+	// per-upstream pill reads the catch-all breaker, which still serves every
+	// other method and must stay closed.
 	scoped.Record(failsafe.OutcomeFailure)
 	require.Equal(t, failsafe.StateOpen, scoped.State(), "sanity: the scoped breaker opened")
-	assert.True(t, u.IsDown(), "an open method-scoped breaker means part of this upstream is down")
+	assert.True(t, u.IsDown("eth_call", common.DataFinalityStateUnknown), "an open method-scoped breaker means that method is down")
+	assert.False(t, u.IsDown("eth_getBalance", common.DataFinalityStateUnknown), "other methods still route through the closed catch-all")
 	assert.Equal(t, failsafe.StateClosed, u.CircuitBreakerState(),
 		"CircuitBreakerState reports the catch-all breaker, not the first one it finds")
 
 	// Now the catch-all opens: the whole upstream is out.
 	catchAll.Record(failsafe.OutcomeFailure)
 	assert.Equal(t, failsafe.StateOpen, u.CircuitBreakerState())
+	assert.True(t, u.IsDown("eth_getBalance", common.DataFinalityStateUnknown))
 }
 
 func TestUpstream_NilUpstreamReadsAsDownAndClosed(t *testing.T) {
 	// Callers hold *Upstream from maps that may miss. Reporting a nil upstream
 	// as usable would route a request into a nil dereference.
 	var u *Upstream
-	assert.True(t, u.IsDown())
+	assert.True(t, u.IsDown("eth_call", common.DataFinalityStateUnknown))
 	assert.Equal(t, failsafe.StateClosed, u.CircuitBreakerState())
 	assert.Nil(t, u.MetricsTracker())
 	assert.Nil(t, u.Tracker())

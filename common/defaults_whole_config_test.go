@@ -102,7 +102,7 @@ func TestConfigSetDefaults_AnEmptyConfigBecomesARunnableSingleProjectServer(t *t
 	// No upstreams and no endpoints, so the public repository is the fallback
 	// source of endpoints. Losing it means a first run reaches nothing at all.
 	providerById(t, p, "public")
-	providerById(t, p, "envio")
+	// envio is not a zero-config provider any more: it needs a key (upstream #1311).
 }
 
 func TestConfigSetDefaults_AnExplicitProjectSuppressesTheDefaultOne(t *testing.T) {

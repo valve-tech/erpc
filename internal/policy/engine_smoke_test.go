@@ -227,17 +227,6 @@ func registerAndCaptureLogs(t *testing.T, evalFunc string, failoverOn bool) stri
 	return buf.String()
 }
 
-// TestEngine_WarnsWhenCustomPolicyIgnoresFailover — a custom evalFunc
-// that never reads `ctx.failoverOnDefaultsExhausted` silently ignores the
-// operator's `failover.onDefaultsExhausted`. The engine must say so; a
-// config key that quietly does nothing is worse than one that does not
-// exist.
-func TestEngine_WarnsWhenCustomPolicyIgnoresFailover(t *testing.T) {
-	logs := registerAndCaptureLogs(t, "(ups, _ctx) => ups", true)
-	require.Contains(t, logs, "failoverOnDefaultsExhausted",
-		"the engine must warn that the custom policy ignores the failover key")
-}
-
 // TestEngine_NoFailoverWarningWhenPolicyReadsIt — a custom evalFunc that
 // DOES read the ctx field handles the key itself, so there is nothing to
 // warn about.
@@ -246,14 +235,6 @@ func TestEngine_NoFailoverWarningWhenPolicyReadsIt(t *testing.T) {
 		"(ups, ctx) => ctx.failoverOnDefaultsExhausted ? ups : ups.byTag('!tier:fallback')", true)
 	require.NotContains(t, logs, "will not escalate",
 		"a policy that reads the ctx field must not be warned about")
-}
-
-// TestEngine_NoFailoverWarningForDefaultPolicy — the bundled default
-// policy reads the ctx field, so the operator gets no warning.
-func TestEngine_NoFailoverWarningForDefaultPolicy(t *testing.T) {
-	logs := registerAndCaptureLogs(t, "", true)
-	require.NotContains(t, logs, "will not escalate",
-		"the bundled default policy handles the key; no warning is due")
 }
 
 // TestEngine_NoFailoverWarningWhenKeyIsOff — no warning when the

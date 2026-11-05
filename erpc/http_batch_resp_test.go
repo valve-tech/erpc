@@ -18,13 +18,13 @@ import (
 // buffering the array first, which is fast and leaves no place to check the
 // result before it ships. These tests are that check.
 
-// countingWriter reports how many bytes actually reached it, so a test can
+// bufferWriter reports how many bytes actually reached it, so a test can
 // compare that against the count WriteTo returns to its caller.
-type countingWriter struct {
+type bufferWriter struct {
 	buf bytes.Buffer
 }
 
-func (c *countingWriter) Write(p []byte) (int, error) { return c.buf.Write(p) }
+func (c *bufferWriter) Write(p []byte) (int, error) { return c.buf.Write(p) }
 
 // failAfterWriter accepts limit bytes and then fails, standing in for a client
 // that hangs up mid-batch. It keeps what it accepted so a test can see how far
@@ -69,7 +69,7 @@ func jsonRpcResponse(t *testing.T, id interface{}, result interface{}) *common.N
 // Three calls in, three answers out, in order, as one parseable array — anything
 // else and the client silently reads another call's result.
 func TestBatchResponseWriter_WritesOneArrayEntryPerRequest(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	brw := NewBatchResponseWriter([]interface{}{
 		jsonRpcResponse(t, 1, "0x1"),
 		&HttpJsonRpcErrorResponse{
@@ -118,7 +118,7 @@ func TestBatchResponseWriter_WritesOneArrayEntryPerRequest(t *testing.T) {
 // case. Writing nothing at all would leave the client waiting on a body that
 // never parses.
 func TestBatchResponseWriter_WritesAnEmptyArrayForNoResponses(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	n, err := NewBatchResponseWriter(nil).WriteTo(w)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), n)
@@ -130,7 +130,7 @@ func TestBatchResponseWriter_WritesAnEmptyArrayForNoResponses(t *testing.T) {
 // occupy its slot in the array, with a null id, so the entries after it stay
 // aligned with the calls that produced them.
 func TestBatchResponseWriter_TurnsABareErrorIntoAJsonRpcEntry(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	brw := NewBatchResponseWriter([]interface{}{
 		errors.New("could not parse request"),
 		jsonRpcResponse(t, 9, "0x9"),
@@ -168,7 +168,7 @@ func TestBatchResponseWriter_TurnsABareErrorIntoAJsonRpcEntry(t *testing.T) {
 // the fallthrough. A type nobody anticipated must still produce one array entry;
 // skipping it would shorten the array and shift every later answer.
 func TestBatchResponseWriter_EncodesAnUnrecognisedEntryRatherThanDroppingIt(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	brw := NewBatchResponseWriter([]interface{}{
 		map[string]interface{}{"jsonrpc": "2.0", "id": 7, "result": "unusual"},
 		jsonRpcResponse(t, 8, "0x8"),
@@ -187,7 +187,7 @@ func TestBatchResponseWriter_EncodesAnUnrecognisedEntryRatherThanDroppingIt(t *t
 // path. eRPC must surface it instead of writing half an entry and calling the
 // batch complete.
 func TestBatchResponseWriter_ReportsAnUnserialisableEntry(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	// A channel has no JSON form, so the encoder must refuse it.
 	_, err := NewBatchResponseWriter([]interface{}{make(chan int)}).WriteTo(w)
 	require.Error(t, err)
@@ -197,7 +197,7 @@ func TestBatchResponseWriter_ReportsAnUnserialisableEntry(t *testing.T) {
 // own WriteTo fails — an already-released or never-populated response. Returning
 // nil here would hand the client a truncated array with no signal at all.
 func TestBatchResponseWriter_ReportsAResponseItCannotStream(t *testing.T) {
-	w := &countingWriter{}
+	w := &bufferWriter{}
 	brw := NewBatchResponseWriter([]interface{}{
 		jsonRpcResponse(t, 1, "0x1"),
 		common.NewNormalizedResponse(), // nothing to write
@@ -253,7 +253,7 @@ func TestBatchResponseWriter_StopsAndReportsWhenTheClientHangsUp(t *testing.T) {
 		})
 	}
 
-	full := &countingWriter{}
+	full := &bufferWriter{}
 	total, err := build().WriteTo(full)
 	require.NoError(t, err)
 

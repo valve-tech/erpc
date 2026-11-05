@@ -40,8 +40,8 @@ func TestWsHandleNotification_RoutesByIdNotByMethodName(t *testing.T) {
 				got <- notification{method: m, params: p}
 			})
 
-			c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"` + method +
-				`","params":{"subscription":"0xaaa","result":{"n":"0x1"}}}`))
+			c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"`+method+
+				`","params":{"subscription":"0xaaa","result":{"n":"0x1"}}}`), c.Epoch())
 
 			select {
 			case n := <-got:
@@ -68,9 +68,9 @@ func TestWsHandleNotification_StillDropsAnUnknownSubscription(t *testing.T) {
 	})
 
 	// Right shape, wrong id — another connection's subscription.
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"msgboard_subscription","params":{"subscription":"0xnotours","result":{}}}`))
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"msgboard_subscription","params":{"subscription":"0xnotours","result":{}}}`), c.Epoch())
 	// Right id, but not a notification at all: a reply carries an id.
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","id":7,"result":"0xaaa"}`))
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","id":7,"result":"0xaaa"}`), c.Epoch())
 
 	select {
 	case n := <-got:
@@ -88,20 +88,20 @@ func TestWsHandleNotification_StopsAfterUnregister(t *testing.T) {
 	c := newTestWsClient(t, srv.wsURL(t))
 
 	got := make(chan notification, 2)
-	c.RegisterSubscriptionHandler("0xaaa", func(m string, p []byte) {
+	epoch := c.RegisterSubscriptionHandler("0xaaa", func(m string, p []byte) {
 		got <- notification{method: m, params: p}
 	})
 
 	frame := []byte(`{"jsonrpc":"2.0","method":"msgboard_subscription","params":{"subscription":"0xaaa","result":{}}}`)
-	c.handleMessage(frame)
+	c.handleMessage(frame, c.Epoch())
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
 		t.Fatal("test setup: the first notification never arrived")
 	}
 
-	c.UnregisterSubscriptionHandler("0xaaa")
-	c.handleMessage(frame)
+	c.UnregisterSubscriptionHandler("0xaaa", epoch)
+	c.handleMessage(frame, c.Epoch())
 
 	select {
 	case <-got:

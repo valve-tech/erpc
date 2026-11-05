@@ -12,7 +12,6 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
-	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/singleflight"
@@ -122,14 +121,12 @@ func (s *DatabaseStrategy) Supports(ap *AuthPayload) bool {
 
 func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.NormalizedRequest, ap *AuthPayload) (*common.User, error) {
 	if ap.Secret == nil {
-		s.recordAuthFailureMetric(req, "missing_secret")
-		return nil, common.NewErrAuthUnauthorized("database", "no secret provided")
+		return nil, common.NewErrAuthUnauthorized("database", "missing_secret", "no secret provided")
 	}
 
 	apiKey := ap.Secret.Value
 	if apiKey == "" {
-		s.recordAuthFailureMetric(req, "empty_secret")
-		return nil, common.NewErrAuthUnauthorized("database", "empty API key")
+		return nil, common.NewErrAuthUnauthorized("database", "empty_secret", "empty API key")
 	}
 
 	// Check positive cache first if available
@@ -145,8 +142,7 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 	if s.negCache != nil {
 		if _, found := s.negCache.Get(apiKey); found {
 			s.logger.Debug().Str("apiKey", util.RedactSecret(apiKey)).Msg("API key found in negative cache")
-			s.recordAuthFailureMetric(req, "cached_unknown_api_key")
-			return nil, common.NewErrAuthUnauthorized("database", "invalid API key")
+			return nil, common.NewErrAuthUnauthorized("database", "cached_unknown_api_key", "invalid API key")
 		}
 	}
 
@@ -158,7 +154,6 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 	// One caller per connectorDownProbeInterval still goes through the real
 	// DB path so we eventually notice recovery; everyone else fast-paths.
 	if u := s.tryFastFailOpen(); u != nil {
-		s.recordAuthFailureMetric(req, "db_fail_open_fast_path")
 		return u, nil
 	}
 
@@ -185,8 +180,7 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 				// RecordNotFound is a business signal (key really doesn't
 				// exist). The DB is healthy — don't taint connectorDown.
 				s.markConnectorUp()
-				s.recordAuthFailureMetric(req, "invalid_api_key")
-				return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "invalid API key"), neg: true}, nil
+				return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "invalid_api_key", "invalid API key"), neg: true}, nil
 			}
 			// Real DB error: flip the connector-down latch so subsequent
 			// requests in this probe window fast-path to fail-open without
@@ -200,13 +194,13 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 				Str("driver", string(s.cfg.Connector.Driver)).
 				Str("connectorId", s.cfg.Connector.Id).
 				Msg("database query failed during authentication")
-			s.recordAuthFailureMetric(req, s.classifyDbError(err))
+			reason := s.classifyDbError(err)
 			// Fail-open if configured
 			if u := s.buildFailOpenUser(); u != nil {
 				s.logger.Error().Str("userId", u.Id).Msg("auth DB error; fail-open enabled, granting emergency user")
 				return &authFetchResult{user: u, err: nil, neg: false, skipCache: true}, nil
 			}
-			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", fmt.Sprintf("database query failed: %v", err)), neg: false}, nil
+			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", reason, fmt.Sprintf("database query failed: %v", err)), neg: false}, nil
 		}
 
 		// Successful query: the DB is healthy. Clear any stale connectorDown
@@ -227,16 +221,14 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 			// one bad record from many while still matching the stored bytes
 			// if an operator goes and reads the row.
 			s.logger.Error().Err(err).Str("apiKey", util.RedactSecret(apiKey)).Int("dataLen", len(valueBytes)).Str("dataDigest", util.RedactSecret(string(valueBytes))).Msg("failed to parse user data from database")
-			s.recordAuthFailureMetric(req, "db_record_parse_error")
-			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "invalid user data format"), neg: false}, nil
+			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "db_record_parse_error", "invalid user data format"), neg: false}, nil
 		}
 		if userData.UserId == "" {
 			// Same reasoning as the parse-error site above. Here the record is
 			// valid JSON, so the digest is the only handle an operator has on
 			// which row is the bad one.
 			s.logger.Error().Str("apiKey", util.RedactSecret(apiKey)).Int("dataLen", len(valueBytes)).Str("dataDigest", util.RedactSecret(string(valueBytes))).Msg("missing user ID in database record")
-			s.recordAuthFailureMetric(req, "db_record_missing_user_id")
-			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "missing user ID in data"), neg: false}, nil
+			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "db_record_missing_user_id", "missing user ID in data"), neg: false}, nil
 		}
 		enabled := true
 		if userData.Enabled != nil {
@@ -244,8 +236,7 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 		}
 		if !enabled {
 			s.logger.Warn().Str("apiKey", util.RedactSecret(apiKey)).Str("userId", userData.UserId).Msg("authentication attempt with disabled API key")
-			s.recordAuthFailureMetric(req, "disabled_key")
-			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "API key is disabled"), neg: true}, nil
+			return &authFetchResult{user: nil, err: common.NewErrAuthUnauthorized("database", "disabled_key", "API key is disabled"), neg: true}, nil
 		}
 		user := &common.User{Id: userData.UserId}
 		if userData.RateLimitBudget != "" {
@@ -254,7 +245,6 @@ func (s *DatabaseStrategy) Authenticate(ctx context.Context, req *common.Normali
 		return &authFetchResult{user: user, err: nil, neg: false}, nil
 	})
 	if sfErr != nil {
-		s.recordAuthFailureMetric(req, "internal_error")
 		if u := s.buildFailOpenUser(); u != nil {
 			s.logger.Warn().Str("userId", u.Id).Err(sfErr).Msg("singleflight error; fail-open enabled, granting emergency user")
 			return u, nil
@@ -472,30 +462,6 @@ func (s *DatabaseStrategy) Close() {
 		s.negCache.Close()
 		s.logger.Debug().Msg("closed API key negative cache")
 	}
-}
-
-// recordAuthFailureMetric increments the auth failure metric with safe labels
-func (s *DatabaseStrategy) recordAuthFailureMetric(req *common.NormalizedRequest, reason string) {
-	project := "n/a"
-	network := "n/a"
-	agent := "unknown"
-	if req != nil {
-		// Prefer resolved network/project when available
-		if n := req.Network(); n != nil {
-			project = n.ProjectId()
-			network = req.NetworkLabel()
-		} else {
-			network = req.NetworkId()
-		}
-		agent = req.AgentName()
-	}
-	telemetry.MetricAuthFailedTotal.WithLabelValues(
-		project,
-		network,
-		"database",
-		reason,
-		agent,
-	).Inc()
 }
 
 // classifyDbError converts database errors into a bounded set of reason labels.

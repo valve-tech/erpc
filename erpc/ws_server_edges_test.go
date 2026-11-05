@@ -456,3 +456,9 @@ func TestWebSocket_AnswersAnUnreadableEntryInsideABatchInPlace(t *testing.T) {
 		"the entry after the invalid ones must keep its own id")
 	require.Equal(t, "0xabc123", entries[3]["result"])
 }
+
+// durationPtr returns a config Duration pointer for d.
+func durationPtr(d time.Duration) *common.Duration {
+	v := common.Duration(d)
+	return &v
+}

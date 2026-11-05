@@ -393,7 +393,7 @@ func TestGzipHandler_StepsAsideForAnUpgradeBeforeTouchingAnyHeader(t *testing.T)
 		_, seen.wrapped = w.(*conditionalGzipWriter)
 		seen.vary = w.Header().Get("Vary")
 		w.WriteHeader(http.StatusOK)
-	}))
+	}), true)
 
 	upgrade := httptest.NewRequest(http.MethodGet, "/test_http/evm/123", nil)
 	upgrade.Header.Set("Connection", "Upgrade")

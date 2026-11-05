@@ -79,6 +79,8 @@ type passthroughSub struct {
 	upstreamID string
 	wsClient   *clients.WsJsonRpcClient
 	upstream   *upstream.Upstream
+	// epoch is the upstream connection the handler was registered on.
+	epoch uint64
 }
 
 // passthroughSubscriptions holds one client connection's passthrough
@@ -146,7 +148,7 @@ func (wsc *WsConnection) handlePassthroughSubscribe(
 	nq *common.NormalizedRequest,
 	method string,
 ) error {
-	nw, err := wsc.project.GetNetwork(wsc.appCtx, wsc.networkId)
+	nw, err := wsc.project.GetNetwork(wsc.ctx, wsc.networkId)
 	if err != nil {
 		return err
 	}
@@ -205,7 +207,7 @@ func (wsc *WsConnection) handlePassthroughSubscribe(
 			Str("subscriptionId", subID).
 			Msg("passthrough subscription established")
 
-		return wsc.writeJSON(map[string]interface{}{
+		return wsc.writeJSON(nil, map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      nq.ID(),
 			"result":  subID,
@@ -225,7 +227,7 @@ func (wsc *WsConnection) registerPassthrough(sub *passthroughSub) {
 	// upstream's notification METHOD NAME never has to be predicted here —
 	// which matters, because it varies: reth emitted `msgboard_subscribe` up
 	// to v2.5.1-pulse-3 and `msgboard_subscription` from pulse-4 on.
-	sub.wsClient.RegisterSubscriptionHandler(sub.subID, func(method string, params []byte) {
+	sub.epoch = sub.wsClient.RegisterSubscriptionHandler(sub.subID, func(method string, params []byte) {
 		wsc.forwardPassthroughNotification(sub.subID, method, params)
 	})
 
@@ -313,7 +315,7 @@ func (wsc *WsConnection) onPassthroughUpstreamLost(subID string) {
 	if !ok {
 		return
 	}
-	sub.wsClient.UnregisterSubscriptionHandler(sub.subID)
+	sub.wsClient.UnregisterSubscriptionHandler(sub.subID, sub.epoch)
 	sub.wsClient.RemoveOnDisconnect(wsc.passthroughHookID(sub.subID))
 
 	wsc.logger.Info().
@@ -322,7 +324,7 @@ func (wsc *WsConnection) onPassthroughUpstreamLost(subID string) {
 		Str("subscriptionId", subID).
 		Msg("passthrough subscription lost its upstream; closing the client connection so it resubscribes")
 
-	wsc.closeWithCode(PassthroughCloseCode, "upstream subscription connection lost; resubscribe")
+	wsc.stop(PassthroughCloseCode, "upstream subscription connection lost; resubscribe", 0)
 }
 
 // handlePassthroughUnsubscribe forwards a `<ns>_unsubscribe` to the upstream
@@ -345,7 +347,7 @@ func (wsc *WsConnection) handlePassthroughUnsubscribe(
 		return false, nil
 	}
 
-	sub.wsClient.UnregisterSubscriptionHandler(sub.subID)
+	sub.wsClient.UnregisterSubscriptionHandler(sub.subID, sub.epoch)
 	sub.wsClient.RemoveOnDisconnect(wsc.passthroughHookID(sub.subID))
 
 	// Send to the SAME upstream that holds it. Any other one would answer
@@ -365,7 +367,7 @@ func (wsc *WsConnection) handlePassthroughUnsubscribe(
 // socket that outlives many client connections.
 func (wsc *WsConnection) cleanupPassthroughSubscriptions() {
 	for _, sub := range wsc.passthroughSubs.drain() {
-		sub.wsClient.UnregisterSubscriptionHandler(sub.subID)
+		sub.wsClient.UnregisterSubscriptionHandler(sub.subID, sub.epoch)
 		sub.wsClient.RemoveOnDisconnect(wsc.passthroughHookID(sub.subID))
 	}
 }

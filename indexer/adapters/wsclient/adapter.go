@@ -1,8 +1,7 @@
-// Package wsclient adapts a single client WebSocket connection into an
-// indexer.EventEgress. One adapter per WsConnection. The adapter owns
-// per-subscription queues and writer goroutines — the slow-client policy
-// lives here rather than in the indexer core because future egresses
-// (Kafka, webhook) will want different policies.
+// Package wsclient adapts a client WebSocket connection into an
+// indexer.EventEgress with a queue and writer goroutine per subscription.
+// The slow-client policy lives here rather than in the indexer core because
+// future egresses (Kafka, webhook) will want different policies.
 //
 // The policy: never evict. A subscription's queue grows on demand up to
 // the protocol's ceiling (two blocks of the most logs a block can hold),
@@ -14,6 +13,7 @@ package wsclient
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -62,18 +62,21 @@ type Options struct {
 	OnQueue func(networkID string, deltaItems int, deltaBytes int64)
 }
 
-// NotificationWriter is what the adapter uses to push a delivered event
-// onto the wire. The indirection lets the adapter stay unaware of
-// gorilla/websocket specifically — any transport that can deliver a
-// (clientSubId, result) pair to a single consumer works.
+// ErrClosed is returned by AddSubscription once the adapter was drained.
+var ErrClosed = errors.New("connection closed")
+
+// ErrLimitExceeded is returned by AddSubscription when the connection
+// already holds the maximum number of subscriptions.
+var ErrLimitExceeded = errors.New("subscription limit exceeded")
+
+// NotificationWriter writes notifications to the client connection.
 type NotificationWriter interface {
-	WriteSubscriptionNotification(clientSubId string, result json.RawMessage) error
+	// WriteSubscriptionNotification writes result; queued is how many
+	// notifications of sub still wait behind it.
+	WriteSubscriptionNotification(sub Subscription, result json.RawMessage, queued int) error
 }
 
-// Adapter is the per-connection EventEgress. Subscribe/Unsubscribe calls
-// on the underlying connection translate into AddSubscription /
-// RemoveSubscription here; the indexer calls InterestedIn on every event
-// and Deliver for matches.
+// Adapter is the EventEgress of one client connection.
 type Adapter struct {
 	connID string
 	writer NotificationWriter
@@ -88,15 +91,14 @@ type Adapter struct {
 	queued atomic.Int64
 
 	unregister     func()
-	drained        atomic.Bool
 	unregisterOnce sync.Once
 
 	mu sync.RWMutex
-	// subs keyed by clientSubId. A single map supports both newHeads
-	// and filter subs.
-	subs map[string]*clientSub
-	// routes is an interest-index: (kind, networkId, filterHash) -> set
-	// of clientSubIds. Kept in sync with subs for O(1) InterestedIn.
+	// drained is set under mu, so AddSubscription never races Drain; it is
+	// atomic because maybeUnregister reads it without mu.
+	drained atomic.Bool
+	subs    map[string]*clientSub // clientSubId -> sub
+	// routes indexes subs by event key for InterestedIn and Deliver.
 	routes map[routeKey]map[string]struct{}
 }
 
@@ -107,11 +109,10 @@ type routeKey struct {
 }
 
 type clientSub struct {
-	id        string
-	kind      indexer.EventKind
-	networkID string
-	// filterHash is "" for newHeads.
-	filterHash string
+	id         string
+	kind       indexer.EventKind
+	networkID  string
+	filterHash string // "" for newHeads
 
 	q notifyQueue
 	// pending counts notifications queued or popped but not yet written;
@@ -122,9 +123,8 @@ type clientSub struct {
 	closed  atomic.Bool
 }
 
-// New creates an adapter for a single client connection. The writer is
-// invoked from the per-subscription goroutine; it must be safe for
-// concurrent use (typically an internal sync.Mutex on the WS connection).
+// New creates the adapter of a client connection. writer is called from
+// every subscription's goroutine, so it must be safe for concurrent use.
 func New(connID string, writer NotificationWriter, logger *zerolog.Logger, opts Options) *Adapter {
 	lg := logger.With().Str("connId", connID).Logger()
 	a := &Adapter{
@@ -141,13 +141,11 @@ func New(connID string, writer NotificationWriter, logger *zerolog.Logger, opts 
 	return a
 }
 
-// Name identifies the adapter in indexer registries and logs.
 func (a *Adapter) Name() string { return "ws:client:" + a.connID }
 
 // QueuedBytes returns the bytes this connection holds and has not written.
 func (a *Adapter) QueuedBytes() int64 { return a.queued.Load() }
 
-// InterestedIn: O(1) map lookup. Called by the indexer on every event.
 func (a *Adapter) InterestedIn(kind indexer.EventKind, networkID, filterHash string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -159,33 +157,22 @@ func (a *Adapter) InterestedIn(kind indexer.EventKind, networkID, filterHash str
 // blocks the indexer, and it never evicts a queued notification.
 func (a *Adapter) Deliver(ev indexer.IndexedEvent) {
 	a.mu.RLock()
-	routes, ok := a.routes[routeKey{kind: ev.Kind, networkID: ev.NetworkId, filterHash: ev.FilterHash}]
-	if !ok || len(routes) == 0 {
-		a.mu.RUnlock()
-		return
-	}
-	ids := make([]string, 0, len(routes))
+	routes := a.routes[routeKey{kind: ev.Kind, networkID: ev.NetworkId, filterHash: ev.FilterHash}]
+	subs := make([]*clientSub, 0, len(routes))
 	for id := range routes {
-		ids = append(ids, id)
+		subs = append(subs, a.subs[id])
 	}
 	a.mu.RUnlock()
 
-	for _, id := range ids {
-		a.mu.RLock()
-		sub, ok := a.subs[id]
-		a.mu.RUnlock()
-		if !ok {
-			continue
-		}
+	for _, sub := range subs {
 		a.enqueue(sub, ev.Payload)
 	}
 }
 
-// AddSubscription registers a client subscription on this connection and
-// starts its writer goroutine. clientSubId is the erpc-generated opaque
-// ID the caller already returned to the client. filterHash is "" for
-// newHeads.
-func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.EventKind, filterHash string) {
+// AddSubscription registers a subscription and starts its writer. It fails
+// with ErrLimitExceeded when the connection already holds maxSubs, and with
+// ErrClosed once the adapter was drained.
+func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.EventKind, filterHash string, maxSubs int) error {
 	sub := &clientSub{
 		id:         clientSubID,
 		kind:       kind,
@@ -196,6 +183,14 @@ func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.Ev
 	}
 
 	a.mu.Lock()
+	if a.drained.Load() {
+		a.mu.Unlock()
+		return ErrClosed
+	}
+	if len(a.subs) >= maxSubs {
+		a.mu.Unlock()
+		return ErrLimitExceeded
+	}
 	a.subs[clientSubID] = sub
 	key := routeKey{kind: kind, networkID: networkID, filterHash: filterHash}
 	set, ok := a.routes[key]
@@ -207,12 +202,11 @@ func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.Ev
 	a.mu.Unlock()
 
 	go a.runWriter(sub)
+	return nil
 }
 
-// RemoveSubscription deregisters a subscription and stops its writer. It
-// returns the (kind, filterHash) of the removed sub so the caller can
-// decide whether to call indexer.ReleaseFilter (for filter subs once the
-// refcount drops to zero on its side).
+// RemoveSubscription removes a subscription, stops its writer, and returns
+// what the caller needs to release its filter.
 func (a *Adapter) RemoveSubscription(clientSubID string) (kind indexer.EventKind, networkID, filterHash string, existed bool) {
 	a.mu.Lock()
 	sub, ok := a.subs[clientSubID]
@@ -234,25 +228,32 @@ func (a *Adapter) RemoveSubscription(clientSubID string) (kind indexer.EventKind
 	return sub.kind, sub.networkID, sub.filterHash, true
 }
 
-// Drain stops every sub's writer, releases every queued byte, and leaves
-// the budget once a writer's in-flight batch is released too — call on
-// connection close before detaching from the indexer.
-func (a *Adapter) Drain() {
+// Drain removes every subscription, releases every queued byte, and makes
+// later AddSubscription calls fail. It leaves the budget once a writer's
+// in-flight batch is released too. It returns the subscriptions it
+// removed, so the caller releases exactly those; a concurrent
+// RemoveSubscription owns any it removed first. Call it on connection
+// close before detaching from the indexer.
+func (a *Adapter) Drain() []Subscription {
 	// Mark closing without asking for a close: the connection is already
 	// going. The budget then treats any bytes still in flight as recovering,
 	// not as a reason to evict another connection.
 	a.closing.Store(true)
-	a.drained.Store(true)
+
 	a.mu.Lock()
 	subs := a.subs
+	a.drained.Store(true)
 	a.subs = make(map[string]*clientSub)
 	a.routes = make(map[routeKey]map[string]struct{})
 	a.mu.Unlock()
 
+	out := make([]Subscription, 0, len(subs))
 	for _, sub := range subs {
 		a.stop(sub)
+		out = append(out, sub.snapshot())
 	}
 	a.maybeUnregister()
+	return out
 }
 
 // maybeUnregister leaves the budget once a drained adapter holds no bytes.
@@ -271,24 +272,16 @@ func (a *Adapter) stop(sub *clientSub) {
 	}
 }
 
-// Subscriptions returns a snapshot of the active subscriptions. Used by
-// connection cleanup paths to iterate subs without racing with Deliver.
-func (a *Adapter) Subscriptions() []Subscription {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	out := make([]Subscription, 0, len(a.subs))
-	for _, sub := range a.subs {
-		out = append(out, Subscription{
-			ClientSubID: sub.id,
-			Kind:        sub.kind,
-			NetworkID:   sub.networkID,
-			FilterHash:  sub.filterHash,
-		})
+func (sub *clientSub) snapshot() Subscription {
+	return Subscription{
+		ClientSubID: sub.id,
+		Kind:        sub.kind,
+		NetworkID:   sub.networkID,
+		FilterHash:  sub.filterHash,
 	}
-	return out
 }
 
-// Subscription is a caller-visible snapshot of one active subscription.
+// Subscription describes one subscription.
 type Subscription struct {
 	ClientSubID string
 	Kind        indexer.EventKind
@@ -296,17 +289,15 @@ type Subscription struct {
 	FilterHash  string
 }
 
-// Count returns the number of active subscriptions — used by the
-// client-facing manager to enforce per-connection limits.
+// Count returns the number of active subscriptions.
 func (a *Adapter) Count() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return len(a.subs)
 }
 
-// --- writer goroutine -------------------------------------------------
-
 func (a *Adapter) runWriter(sub *clientSub) {
+	snap := sub.snapshot()
 	for {
 		select {
 		case <-sub.done:
@@ -328,11 +319,14 @@ func (a *Adapter) runWriter(sub *clientSub) {
 				a.release(sub, batch[i:]...)
 				return
 			}
-			if err := a.writer.WriteSubscriptionNotification(sub.id, payload); err != nil {
+			// pending still counts this payload; the rest wait behind it.
+			queued := int(sub.pending.Load()) - 1
+			if queued < 0 {
+				queued = 0
+			}
+			if err := a.writer.WriteSubscriptionNotification(snap, payload, queued); err != nil {
 				a.logger.Debug().Err(err).Str("clientSubId", sub.id).
 					Msg("failed to write subscription notification")
-				// Errors are per-sub; the connection-close path will
-				// Drain us when the peer is truly gone.
 			}
 			a.release(sub, payload)
 		}

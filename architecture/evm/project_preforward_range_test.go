@@ -55,6 +55,12 @@ func rangeNetwork(project string, head int64) *mockNetwork {
 	n.On("Id").Return("evm:123").Maybe()
 	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(head).Maybe()
 	n.On("EvmHighestFinalizedBlockNumber", mock.Anything).Return(head).Maybe()
+	// The project hook now also enforces the hard getLogs limits (upstream),
+	// which read the network config; no limits are set here.
+	n.On("Config").Return(&common.NetworkConfig{
+		Architecture: common.ArchitectureEvm,
+		Evm:          &common.EvmNetworkConfig{ChainId: 123},
+	}).Maybe()
 	return n
 }
 
@@ -100,15 +106,19 @@ func TestProjectPreForward_EthGetLogs_RecordsNothingItCannotRead(t *testing.T) {
 		name    string
 		project string
 		params  string
+		// wantErr: the project hook refuses the request outright (upstream
+		// enforces the hard getLogs checks there now), which still records
+		// no range.
+		wantErr bool
 	}{
-		{"NoParams", "range-getlogs-noparams", `[]`},
-		{"FilterIsNotAnObject", "range-getlogs-notobject", `["0x1"]`},
+		{"NoParams", "range-getlogs-noparams", `[]`, false},
+		{"FilterIsNotAnObject", "range-getlogs-notobject", `["0x1"]`, false},
 		// EIP-234 makes blockHash exclusive with the range bounds. A client
 		// that sends both anyway must not be counted as asking for a range.
-		{"BlockHashFilter", "range-getlogs-blockhash", `[{"blockHash":"0xabc","fromBlock":"0x1","toBlock":"0xa"}]`},
-		{"UnresolvableTag", "range-getlogs-pending", `[{"fromBlock":"pending","toBlock":"latest"}]`},
-		{"ToBlockBelowFromBlock", "range-getlogs-inverted", `[{"fromBlock":"0x14","toBlock":"0x10"}]`},
-		{"MissingBounds", "range-getlogs-nobounds", `[{"address":"0xdead"}]`},
+		{"BlockHashFilter", "range-getlogs-blockhash", `[{"blockHash":"0xabc","fromBlock":"0x1","toBlock":"0xa"}]`, false},
+		{"UnresolvableTag", "range-getlogs-pending", `[{"fromBlock":"pending","toBlock":"latest"}]`, false},
+		{"ToBlockBelowFromBlock", "range-getlogs-inverted", `[{"fromBlock":"0x14","toBlock":"0x10"}]`, true},
+		{"MissingBounds", "range-getlogs-nobounds", `[{"address":"0x000000000000000000000000000000000000dead"}]`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n := rangeNetwork(tc.project, 0)
@@ -116,9 +126,13 @@ func TestProjectPreForward_EthGetLogs_RecordsNothingItCannotRead(t *testing.T) {
 				`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":` + tc.params + `}`))
 
 			handled, resp, err := HandleProjectPreForward(ctx, n, nq)
-			require.NoError(t, err)
-			assert.False(t, handled)
-			assert.Nil(t, resp)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.False(t, handled)
+				assert.Nil(t, resp)
+			}
 
 			count, _ := histSamples(t, telemetry.MetricNetworkEvmGetLogsRangeRequested, tc.project)
 			assert.Equal(t, uint64(0), count,

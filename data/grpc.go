@@ -66,9 +66,19 @@ var supportedMethods = map[string]struct{}{
 	// eth_blockNumber has no native BDS gRPC method; Get derives it from the
 	// latest block (see the translation in Get).
 	"eth_blockNumber": {},
+	// Served by the prism trace reader only; on a block/log reader these are
+	// UNIMPLEMENTED, which the client maps to unsupported (a miss).
+	"debug_traceBlockByNumber": {},
+	"debug_traceBlockByHash":   {},
+	"debug_traceTransaction":   {},
+	"trace_block":              {},
+	"eth_getBalance":           {},
 	// SVM. Solana method names are unprefixed, so they cannot collide with the
 	// eth_* entries above and one allowlist serves both architectures.
-	"getBlock": {},
+	"getBlock":           {},
+	"getTransaction":     {},
+	"getBlockTime":       {},
+	"getBlocksWithLimit": {},
 }
 
 func NewGrpcConnector(
@@ -331,6 +341,11 @@ func (g *GrpcConnector) Get(ctx context.Context, index, partitionKey, rangeKey s
 		} else {
 			span.SetAttributes(attribute.String("grpc.send_result", "nil_response"))
 		}
+		// The reader refuses what it does not store (another tracer, a
+		// balance at a tag): that is a miss, not a connector error.
+		if common.HasErrorCode(err, common.ErrCodeEndpointUnsupported) {
+			return nil, common.NewErrRecordNotFound(partitionKey, rangeKey, GrpcDriverName)
+		}
 		return nil, err
 	}
 	jrr, err := resp.JsonRpcResponse(callCtx)
@@ -513,6 +528,10 @@ func fetchGrpcServers(ctx context.Context, logger *zerolog.Logger, endpoint stri
 	return out, nil
 }
 
+// ReadOnly implements ReadOnlyConnector: the gRPC connector only reads, so cache policies on it
+// never select it for writes.
+func (g *GrpcConnector) ReadOnly() bool { return true }
+
 func (g *GrpcConnector) Set(ctx context.Context, partitionKey, rangeKey string, value []byte, ttl *time.Duration) error {
 	// no-op for read-only connector
 	return fmt.Errorf("grpc connector is read-only")
@@ -550,4 +569,11 @@ func (g *GrpcConnector) checkReady() error {
 		return fmt.Errorf("no gRPC clients initialized")
 	}
 	return nil
+}
+
+// DeleteByPattern is unsupported on the read-only gRPC connector.
+func (g *GrpcConnector) DeleteByPattern(ctx context.Context, opts PatternDeleteOpts) (int64, int64, error) {
+	_ = ctx
+	_ = opts
+	return 0, 0, fmt.Errorf("grpc connector: %w", ErrPatternDeleteUnsupported)
 }

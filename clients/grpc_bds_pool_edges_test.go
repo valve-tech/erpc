@@ -70,8 +70,8 @@ func TestNewBdsPool_FailsLoudlyWhenADialIsRefused(t *testing.T) {
 	// An unparseable default service config is rejected by grpc.NewClient, so
 	// the very first dial errors.
 	p, err := newBdsPool(context.Background(), &lg, "prj1", "bds1",
-		"dns:///127.0.0.1:50051",
-		insecure.NewCredentials(), "{not json", 3, 0)
+		"dns:///127.0.0.1:50051", "",
+		insecure.NewCredentials(), "{not json", 3, 0, nil)
 	require.Error(t, err, "a pool was built despite every dial being refused")
 	require.Nil(t, p, "a failed constructor must not hand back a half-built pool")
 	require.Contains(t, err.Error(), "failed to dial gRPC server at dns:///127.0.0.1:50051",
@@ -87,8 +87,8 @@ func TestNewBdsPool_SubstitutesABackgroundContextForNil(t *testing.T) {
 
 	lg := zerolog.New(io.Discard)
 	//nolint:staticcheck // passing nil is the case under test
-	p, err := newBdsPool(nil, &lg, "prj1", "bds1", "dns:///"+addr,
-		insecure.NewCredentials(), identityServiceConfig, 1, 0)
+	p, err := newBdsPool(nil, &lg, "prj1", "bds1", "dns:///"+addr, "",
+		insecure.NewCredentials(), identityServiceConfig, 1, 0, nil)
 	require.NoError(t, err)
 	t.Cleanup(p.Shutdown)
 	require.NotNil(t, p.appCtx, "a nil app context was stored as-is; the maintainer panics on it")

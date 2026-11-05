@@ -227,8 +227,12 @@ func ObserverHandle(hv HistogramObservable, labels ...string) prometheus.Observe
 }
 
 // ResetHandleCache clears all handle caches. Call this after re-creating metric Vecs.
+//
+// Clear, not reassignment: a goroutine may still be reading a cache (an
+// upstream bootstrap started before the Vecs were re-created), and assigning a
+// new sync.Map races with that read. Clear is safe under concurrent use.
 func ResetHandleCache() {
-	counterHandleCache = sync.Map{}
-	gaugeHandleCache = sync.Map{}
-	observerHandleCache = sync.Map{}
+	counterHandleCache.Clear()
+	gaugeHandleCache.Clear()
+	observerHandleCache.Clear()
 }

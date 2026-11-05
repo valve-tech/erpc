@@ -187,8 +187,6 @@ func (c *GenericHttpJsonRpcClient) SendRequest(ctx context.Context, req *common.
 		return nil, err
 	case <-ctx.Done():
 		err := effectiveCause(ctx)
-		// TODO For both of these conditions failsafe library can introduce carrying
-		//      the "cause" so we know this cancellation is due to Hedge policy for example.
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, common.ErrDynamicTimeoutExceeded) {
 			err = common.NewErrEndpointRequestTimeout(time.Since(startedAt), err)
 		} else if errors.Is(err, context.Canceled) {
@@ -424,7 +422,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		batchReq = append(batchReq, common.JsonRpcRequest{
 			JSONRPC: jrReq.JSONRPC,
 			Method:  jrReq.Method,
-			Params:  jrReq.Params,
+			Params:  common.WireParams(req.ctx, req.request, jrReq.Params),
 			ID:      jrReq.ID,
 		})
 	}
@@ -472,8 +470,6 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		if batchCause := effectiveCause(batchCtx); batchCause != nil {
 			err = batchCause
 		}
-		// TODO For both of these conditions failsafe library can introduce carrying
-		//      the "cause" so we know this cancellation is due to Hedge policy for example.
 		// Each request's own ctx carries the policy-driven cause (e.g.
 		// ErrDynamicTimeoutExceeded), while the shared batch ctx only has the
 		// earliest-deadline plain DeadlineExceeded. Prefer the per-request cause
@@ -736,7 +732,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 	requestBody, err := common.SonicCfg.Marshal(common.JsonRpcRequest{
 		JSONRPC: jrReq.JSONRPC,
 		Method:  jrReq.Method,
-		Params:  jrReq.Params,
+		Params:  common.WireParams(ctx, req, jrReq.Params),
 		ID:      jrReq.ID,
 	})
 	jrReq.RUnlock()
@@ -777,8 +773,6 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 			err = cause
 		}
 		common.SetTraceSpanError(span, err)
-		// TODO For both of these conditions failsafe library can introduce carrying
-		//      the "cause" so we know this cancellation is due to Hedge policy for example.
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, common.ErrDynamicTimeoutExceeded) {
 			return nil, common.NewErrEndpointRequestTimeout(time.Since(reqStartTime), err)
 		} else if errors.Is(err, context.Canceled) {
@@ -796,9 +790,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 			_ = resp.Body.Close() // Must close on error path
 			return nil, common.NewErrEndpointTransportFailure(c.Url, fmt.Errorf("cannot create gzip reader: %w", err))
 		}
-		// Pass resp.Body so the wrapper closes it on Close — without this,
-		// gzip.Reader.Close leaves the underlying http stream open and the
-		// transport keeps the conn pinned. See pooledGzipReadCloser docs.
+		// The wrapper closes resp.Body too; gzip.Reader.Close does not.
 		bodyReader = c.gzipPool.WrapGzipReader(gzReader, resp.Body)
 	}
 
@@ -818,6 +810,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []byte) (*http.Request, error) {
 	var bodyReader io.Reader = bytes.NewReader(body)
 	var pooledRC io.ReadCloser
+	contentLength := int64(len(body))
 
 	// Check if gzip compression is enabled
 	if c.enableGzip {
@@ -847,6 +840,7 @@ func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []by
 		prc := util.NewPooledBufferReadCloser(buf)
 		pooledRC = prc
 		bodyReader = prc
+		contentLength = int64(buf.Len())
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.Url.String(), bodyReader)
@@ -856,6 +850,10 @@ func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []by
 		}
 		return nil, err
 	}
+	// NewRequest infers the length only for *bytes.Reader and friends; without
+	// it the pooled gzip body goes out chunked, which costs more on the wire
+	// than gzip saves on small requests.
+	httpReq.ContentLength = contentLength
 
 	httpReq.Header.Set("Accept-Encoding", "gzip")
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -925,6 +923,13 @@ func (c *GenericHttpJsonRpcClient) normalizeJsonRpcError(r *http.Response, nr *c
 		}
 	}
 
+	return classifyJsonRpcError(r, nr, jr, err, c.errorExtractor, c.upstream)
+}
+
+// classifyJsonRpcError turns a parsed upstream response into a normalized
+// error (nil on success). Shared by the HTTP and WebSocket clients; WS
+// callers pass a synthetic 200 response since the frame has no HTTP status.
+func classifyJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *common.JsonRpcResponse, err error, extractor common.JsonRpcErrorExtractor, ups common.Upstream) error {
 	if err != nil {
 		e := common.NewErrJsonRpcExceptionInternal(
 			0,
@@ -932,7 +937,7 @@ func (c *GenericHttpJsonRpcClient) normalizeJsonRpcError(r *http.Response, nr *c
 			"could not parse json rpc response from upstream",
 			err,
 			map[string]interface{}{
-				"upstreamId": c.upstream.Id(),
+				"upstreamId": ups.Id(),
 				"statusCode": r.StatusCode,
 				"headers":    r.Header,
 			},
@@ -959,8 +964,10 @@ func (c *GenericHttpJsonRpcClient) normalizeJsonRpcError(r *http.Response, nr *c
 		}
 	}
 
-	if e := c.errorExtractor.Extract(r, nr, jr, c.upstream); e != nil {
-		return e
+	if extractor != nil {
+		if e := extractor.Extract(r, nr, jr, ups); e != nil {
+			return e
+		}
 	}
 
 	if jr == nil || jr.Error == nil {
@@ -973,7 +980,7 @@ func (c *GenericHttpJsonRpcClient) normalizeJsonRpcError(r *http.Response, nr *c
 		"unknown json-rpc error",
 		jr.Error,
 		map[string]interface{}{
-			"upstreamId": c.upstream.Id(),
+			"upstreamId": ups.Id(),
 			"statusCode": r.StatusCode,
 			"headers":    r.Header,
 		},

@@ -46,6 +46,11 @@ type Slot struct {
 	// upstreams are shadow-probe candidates for incoming requests.
 	excludedCache atomic.Pointer[[]common.Upstream]
 
+	// methodBlocks holds the most recent tick's `blockMethods` result,
+	// indexed by method for the request path. Same atomic contract as
+	// `cache`; nil when the tick recorded no blocks.
+	methodBlocks atomic.Pointer[methodBlockIndex]
+
 	// lastAccessedAtMs is unix-millis of the last tick OR GetOrdered
 	// touching this slot. Drives the engine's idle-slot eviction —
 	// per-(method, finality) slots that haven't seen traffic in a
@@ -214,72 +219,28 @@ func (s *Slot) tickOnce() {
 	}
 	s.mu.Unlock()
 
-	// 3. Run the eval (with optional timeout). Scores are the per-upstream
+	// 3. Run the eval. Scores are the per-upstream
 	// `score` values the JS attached during `sortByScore(...)` — we cache
 	// them on the slot so diagnostic tooling (admin endpoint, simulator)
 	// can read the engine's authoritative ranking without re-implementing
 	// the PREFER_FASTEST formula in Go. The chronological step log is
 	// captured only when the engine's debug flag is on (simulator always,
 	// eRPC when the logger is at DEBUG) — see `Engine.SetStepLogEnabled`.
-	// The eval runs on its own goroutine so a slow policy cannot hold the tick
-	// past `timeout`. It publishes through a channel, NOT through variables shared
-	// with the parent. An earlier version assigned `evalRes`/`evalErr` from both
-	// goroutines, and that was two defects in one:
 	//
-	//   - the parent's timeout write raced the goroutine's result write, which the
-	//     race detector reports and which made the stdlib suite flake under load;
-	//   - the parent then waited on the goroutine, so the late assignment always
-	//     landed second and always overwrote `ErrEvalTimeout`. A slow-but-successful
-	//     eval was published as if it had arrived on time, and a slow-and-failing one
-	//     reported its own error. `ErrEvalTimeout` reached no Decision, so
-	//     `selection_eval_errors_total{kind="timeout"}` could never increment. An
-	//     operator whose policy outgrew its `evalTimeout` saw no error, no log and no
-	//     metric — only a verdict computed from a stale snapshot.
-	//
-	// Now the parent picks the winner, and when the timeout fires the timeout wins.
-	type evalOutcome struct {
-		res *EvalResult
-		err error
-	}
+	// sobek cannot interrupt a running eval, so evalTimeout cannot cut one
+	// short: an eval past it is reported, and its result still replaces the
+	// older cache.
 	stepLogEnabled := s.engine.stepLogEnabled.Load()
-	// Buffered, so the goroutine never blocks publishing a result nobody wants.
-	outcome := make(chan evalOutcome, 1)
-	go func() {
-		res, err := runEval(s.engine.pool, s.cfg, ups, metrics, metricsAcrossMethods, metricsByMethod, evalCtx, stepLogEnabled, s.engine.sticky)
-		outcome <- evalOutcome{res: res, err: err}
-	}()
-
-	var (
-		evalRes *EvalResult
-		evalErr error
-		// lateFirst: the eval timed out, but this slot has never published an
-		// ordering, and the late result is valid. See below.
-		lateFirst bool
-	)
-	if timeout > 0 {
-		select {
-		case o := <-outcome:
-			evalRes, evalErr = o.res, o.err
-		case <-time.After(timeout):
-			evalErr = fmt.Errorf("%w after %s", ErrEvalTimeout, timeout)
-			// Wait for the goroutine; sobek cannot be interrupted mid-call cleanly, so
-			// the eval has to run to completion. Once the slot holds an ordering, the
-			// late result is DISCARDED: the deadline is the answer the operator
-			// configured, and the previous cache stands.
-			//
-			// Before the first publish there is no previous cache. Discarding the late
-			// result then leaves the network on raw registration order, fallback tier
-			// included, until the next tick (15s by default). A first eval on a busy
-			// host can easily miss a 100ms deadline. A late answer from the policy beats
-			// no policy at all, so publish it, and still count the timeout.
-			o := <-outcome
-			if s.cache.Load() == nil && o.err == nil && o.res != nil {
-				evalRes, lateFirst = o.res, true
-			}
-		}
-	} else {
-		o := <-outcome
-		evalRes, evalErr = o.res, o.err
+	evalStart := time.Now()
+	evalRes, evalErr := runEval(s.engine.pool, s.cfg, ups, metrics, metricsAcrossMethods, metricsByMethod, evalCtx, stepLogEnabled, s.engine.sticky)
+	if took := time.Since(evalStart); timeout > 0 && took > timeout {
+		telemetry.MetricSelectionEvalErrorsTotal.WithLabelValues(s.engine.projectID, s.networkLabel, s.method, "timeout").Inc()
+		s.engine.logger.Warn().
+			Str("network", s.networkID).
+			Str("method", s.method).
+			Dur("took", took).
+			Dur("evalTimeout", timeout).
+			Msg("selection policy eval exceeded evalTimeout")
 	}
 
 	decision := &Decision{
@@ -293,19 +254,6 @@ func (s *Slot) tickOnce() {
 			Metrics:     metrics,
 		},
 		State: state,
-	}
-
-	if lateFirst {
-		// The decision still carries the timeout, so it reaches the decisions
-		// ring and emitMetrics counts it as kind="timeout".
-		decision.Error = evalErr.Error()
-		s.engine.logger.Warn().
-			Str("network", s.networkID).
-			Str("method", s.method).
-			Str("tick_id", decision.ID).
-			Err(evalErr).
-			Msg("selection policy eval failed; no ordering exists yet, so publishing its late result")
-		evalErr = nil
 	}
 
 	if evalErr != nil {
@@ -360,6 +308,7 @@ func (s *Slot) tickOnce() {
 		Scores:        scores,
 		StepLog:       evalRes.StepLog,
 		ShadowReasons: evalRes.ShadowReasons,
+		MethodBlocks:  evalRes.MethodBlocks,
 	}
 
 	// 5. Compute diff against previous tick.
@@ -373,6 +322,7 @@ func (s *Slot) tickOnce() {
 	s.cache.Store(&ordered2)
 	excludedUps := materializeExcluded(ups, excluded)
 	s.excludedCache.Store(&excludedUps)
+	s.methodBlocks.Store(newMethodBlockIndex(ups, evalRes.MethodBlocks))
 
 	// 6b. Reconcile this network's probe subsystem against the
 	// eval-emitted `__probeConfig`. Non-nil → create/update Prober;
@@ -523,13 +473,7 @@ func (s *Slot) emitMetrics(d *Decision, prevState DecisionState) {
 
 	if d.Error != "" {
 		kind := "throw"
-		// Match this package's own error text, not the bare words "timed out".
-		// A user eval that THROWS about its own timeout is a throw, not a
-		// policy timeout. Decision.Error is a string, so errors.Is is not
-		// available here — see bug 150.
-		if strings.Contains(d.Error, ErrEvalTimeout.Error()) {
-			kind = "timeout"
-		} else if strings.Contains(d.Error, ErrInvalidReturn.Error()) {
+		if strings.Contains(d.Error, ErrInvalidReturn.Error()) {
 			kind = "invalid_return"
 		}
 		telemetry.MetricSelectionEvalErrorsTotal.WithLabelValues(project, s.networkLabel, s.method, kind).Inc()
@@ -601,6 +545,20 @@ func (s *Slot) emitMetrics(d *Decision, prevState DecisionState) {
 	for id, slugs := range d.Output.ShadowReasons {
 		for _, slug := range slugs {
 			telemetry.MetricSelectionShadowExclusionTotal.WithLabelValues(project, s.networkLabel, s.method, id, slug).Inc()
+		}
+	}
+
+	// Per-method blocks: one increment per (upstream, blocked method, leaf
+	// slug) per tick. `method` is the blocked method, not the slot's.
+	for id, perMethod := range d.Output.MethodBlocks {
+		for method, b := range perMethod {
+			reasons := b.Reasons
+			if len(reasons) == 0 {
+				reasons = []string{"custom"}
+			}
+			for _, slug := range reasons {
+				telemetry.MetricSelectionMethodBlockTotal.WithLabelValues(project, s.networkLabel, method, id, slug).Inc()
+			}
 		}
 	}
 

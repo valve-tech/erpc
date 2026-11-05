@@ -60,7 +60,7 @@ func TestMaxLogsPerBlockRoundsUp(t *testing.T) {
 
 func TestIngestFeedsGasLimit(t *testing.T) {
 	idx := newIndexer(t)
-	idx.RegisterNetwork(newFakeNetwork("evm:1", 0))
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
 	ev := StreamEvent{
 		Kind:      KindNewHead,
 		NetworkId: "evm:1",

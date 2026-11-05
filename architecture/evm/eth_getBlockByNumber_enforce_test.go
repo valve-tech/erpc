@@ -253,7 +253,7 @@ func TestEnforceHighestBlock(t *testing.T) {
 		assert.Empty(t, n.allCalls(), "an answer already at the tip needs no correction")
 	})
 
-	t.Run("StaleLatestIsReForwardedAtTheKnownTipAwayFromTheStaleUpstream", func(t *testing.T) {
+	t.Run("StaleLatestIsReForwardedAtTheKnownTip", func(t *testing.T) {
 		up := newForwardingUpstream(1)
 		n := newForwardingNetwork(1)
 		n.highestLatest = 200
@@ -274,15 +274,16 @@ func TestEnforceHighestBlock(t *testing.T) {
 		assert.Contains(t, jrr.GetResultString(), "0xc8", "the caller must get the tip block")
 
 		// Discriminating: the correction only works if the re-forward asks for
-		// the KNOWN TIP, skips the cache, and steers away from the upstream
-		// that just answered stale. A re-forward that repeats "latest" at the
-		// same upstream would loop and still return block 100.
+		// the KNOWN TIP and skips the cache. A re-forward that repeats "latest"
+		// would loop and still return block 100. The stale upstream is NOT
+		// excluded (upstream #836): on fast chains it is often the one whose
+		// own feed just delivered the tip.
 		require.Len(t, n.methodCalls("eth_getBlockByNumber"), 1)
 		assert.Contains(t, n.methodCalls("eth_getBlockByNumber")[0], `"0xc8"`,
 			"the re-forward must pin the known tip, not repeat the tag")
 		require.NotNil(t, seen)
 		assert.Equal(t, "true", seen.SkipCacheRead, "a cached stale block would defeat the correction")
-		assert.Equal(t, "!fwd-ups", seen.UseUpstream, "the stale upstream must be excluded")
+		assert.Empty(t, seen.UseUpstream, "the stale upstream is not excluded")
 	})
 
 	t.Run("ReForwardCarriesTheIncludeTransactionsFlagAndTheRequestId", func(t *testing.T) {

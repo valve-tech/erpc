@@ -21,7 +21,7 @@ import (
 
 // latestBlockResponse builds a well-formed eth_getBlockByNumber result for the
 // given block number and timestamp.
-func latestBlockResponse(t *testing.T, blockNumber int64, timestamp int64) *common.NormalizedResponse {
+func latestBlockResponseAt(t *testing.T, blockNumber int64, timestamp int64) *common.NormalizedResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"number":"0x%x","hash":"0xaaa","timestamp":"0x%x"}`, blockNumber, timestamp)
 	return common.NewNormalizedResponse().WithJsonRpcResponse(
@@ -53,7 +53,7 @@ func TestNetworkPostForward_GetBlockByNumber_PublishesTheLatestBlockAge(t *testi
 	n := lagNetwork(project, 110)
 	nq := common.NewNormalizedRequest([]byte(
 		`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}`))
-	nr := latestBlockResponse(t, 100, blockTs)
+	nr := latestBlockResponseAt(t, 100, blockTs)
 
 	out, err := networkPostForward_eth_getBlockByNumber(ctx, n, nq, nr, nil)
 	require.NoError(t, err)
@@ -83,7 +83,7 @@ func TestNetworkPostForward_GetBlockByNumber_StaysSilentOffTheTip(t *testing.T) 
 			resp: func(t *testing.T) *common.NormalizedResponse {
 				// Clearly old, so a hook that measured it anyway would move the
 				// gauge well away from zero.
-				return latestBlockResponse(t, 100, time.Now().Add(-90*time.Second).Unix())
+				return latestBlockResponseAt(t, 100, time.Now().Add(-90*time.Second).Unix())
 			},
 		},
 		{
@@ -124,7 +124,7 @@ func TestNetworkPostForward_GetBlockByNumber_PassesTheUpstreamErrorThrough(t *te
 		`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}`))
 	upstreamErr := fmt.Errorf("upstream refused")
 
-	_, err := networkPostForward_eth_getBlockByNumber(ctx, n, nq, latestBlockResponse(t, 100, time.Now().Unix()), upstreamErr)
+	_, err := networkPostForward_eth_getBlockByNumber(ctx, n, nq, latestBlockResponseAt(t, 100, time.Now().Unix()), upstreamErr)
 	require.ErrorIs(t, err, upstreamErr)
 
 	got := promUtil.ToFloat64(telemetry.MetricNetworkLatestBlockTimestampDistance.
