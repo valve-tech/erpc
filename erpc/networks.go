@@ -4005,6 +4005,14 @@ func (n *Network) partitionUpstreamsByLatestBlock(ups []common.Upstream, bn int6
 	if bn <= 0 || len(ups) < 2 {
 		return ups
 	}
+	// The ordering uses poll-age-credited heads, and the credit needs the
+	// network's block time. Until that is known (the first minutes after a
+	// start) a polled upstream's head reads up to one poll interval stale, so
+	// it would sort behind a subscription-fed peer although it has the block.
+	// A head that cannot be credited is not evidence of lag: keep the order.
+	if n.metricsTracker != nil && n.EvmBlockTime() <= 0 {
+		return ups
+	}
 	return stablePartition(ups, func(u common.Upstream) bool {
 		lb := n.upstreamHead(u)
 		return lb > 0 && lb < bn

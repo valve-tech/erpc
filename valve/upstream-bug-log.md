@@ -7649,3 +7649,37 @@ ordering and the late eval succeeded. The decision still carries the timeout,
 so `selection_eval_errors_total{kind="timeout"}` still counts it, and the log
 says the late result was published. After the first publish, a timeout keeps
 the previous cache as before. A late eval that throws publishes nothing.
+
+## 195. Block reads skip the cache for the first minutes after a start, because uncredited heads reorder them
+
+**Status: FIXED in the fork.** `TestPartitionUpstreamsByLatestBlock_ColdBlockTimeKeepsPolicyOrder`
+(`erpc/networks_block_partition_test.go`) pins it. Found while syncing upstream
+`main` (`f6e4663c`) into the fork; `0.3.0.5-valve` does not have it.
+
+Upstream #1352 orders block reads by poll-age-credited heads
+(`partitionUpstreamsByLatestBlock`): an upstream whose head is below the
+requested block moves back. The credit (`health.Tracker.HeadCredit`) needs the
+network's block-time EMA and returns 0 until it has samples. In that window a
+polled upstream's head reads up to one poll interval (30 s by default) stale, so
+it sorts behind a peer whose head a `newHeads` subscription keeps fresh, although
+it has the block.
+
+On the fleet that peer is a replica's own `wss://` sibling. Its finalized height
+is refreshed only by its poll, while the `finalized`-tag suggestion
+(`enrichStatePoller`) went to the HTTP replica that served the tag. So
+`GetFinality` asked the sibling, read a finalized block as `unfinalized`, and the
+finalized-only cache policies skipped the write. Measured with real 1 s
+timestamps: 90 of 242 edge blocks cached in the first 2 minutes, then equal to
+`0.3.0.5`. A harness fake node whose timestamps ran ahead of wall clock kept the
+EMA wrong for the whole run (48 of 3,602), which is how it was found.
+
+The fork fix follows #1352's own rule ("unknown head: order unchanged"): while a
+tracker exists but the network block time is still 0, the partition keeps the
+policy order. With the fix, 722 of 722 edge blocks are cached at 1 s blocks (242
+by 2 minutes, against 240 on `0.3.0.5`). Not yet reported upstream.
+
+## 196. `TestAdminApi_ReadOnlyMethods` fails under the full `make test-fast` load
+
+**Status:** open. Failed once in `make test-fast` on the sync branch (31 s, in
+the admin shard) and passed 3 of 3 when run alone on the same binary. The
+Redis-backed admin setup is the likely cause; it is not root-caused yet.

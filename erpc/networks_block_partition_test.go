@@ -3,6 +3,8 @@ package erpc
 import (
 	"context"
 	"fmt"
+	"github.com/erpc/erpc/health"
+	"github.com/rs/zerolog/log"
 	"io"
 	"net/http"
 	"regexp"
@@ -382,4 +384,22 @@ func TestNetwork_TipGetBlockOrdersByPollAgeCreditedHead(t *testing.T) {
 		e.step(20)
 		assert.Equal(t, "slow", e.first(e.head), "still demoted once benched")
 	})
+}
+
+// Until the network has a block time, #1352's credit is zero, so a polled
+// upstream's head reads up to one poll interval stale. Partitioning on it put
+// subscription-fed peers ahead of polled upstreams that had the block, and
+// their own finalized height (refreshed only by poll) then made finalized
+// blocks read as unfinalized, so the finalized-only cache skipped them for the
+// first minutes after every start. A head that cannot be credited is not
+// evidence of lag: the policy's order stays.
+func TestPartitionUpstreamsByLatestBlock_ColdBlockTimeKeepsPolicyOrder(t *testing.T) {
+	in := []common.Upstream{
+		upWithLatest("polled", 90),
+		upWithLatest("streamed", 110),
+	}
+	n := &Network{networkId: "evm:123", metricsTracker: health.NewTracker(&log.Logger, "test", time.Minute)}
+	require.Zero(t, n.EvmBlockTime(), "a fresh tracker has no block time yet")
+	got := n.partitionUpstreamsByLatestBlock(in, 100)
+	assert.Equal(t, []string{"polled", "streamed"}, ids(got), "an uncreditable head below the block keeps its place")
 }
