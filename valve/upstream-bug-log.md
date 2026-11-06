@@ -7686,9 +7686,11 @@ Redis-backed admin setup is the likely cause; it is not root-caused yet.
 
 ## 197. A client-side error from every upstream waits out the network retry delays
 
-**Status: FIXED in the fork.** `TestNetwork_ClientErrorFromEveryUpstreamDoesNotResweep`
+**Status: FIXED in the fork.** `TestNetwork_EmptyBundleRejectionReturnsAtOnce`
 (`erpc/networks_client_error_retry_test.go`) pins it. Reported by reth on chain
-369 against `0.3.0.5-valve`.
+369 against `0.3.0.5-valve`. The first fix (`0.3.0.7-valve`) was too broad and
+caused entry 198; the text below describes it, and entry 198 describes what
+replaced it.
 
 reth answers `eth_callBundle` with no transactions with `-32602 bundle missing
 txs`. The normalizer maps a generic `-32602` to `ErrEndpointClientSideException`,
@@ -7710,3 +7712,32 @@ after.
 `-32601` (method not found, for example `tenderly_simulateTransaction`) was
 already fast in the sync build: 2 ms, against 1.1 s on `0.3.0.5`. Not yet
 reported upstream.
+
+## 198. `0.3.0.7-valve` fails `eth_feeHistory` at the tip, because it treats every `-32602` as final
+
+**Status: FIXED in the fork.** `TestNetwork_MinusThirtyTwoSixOhTwoThatClearsWithTimeIsRetried`
+(`erpc/networks_client_error_retry_test.go`) pins it. Found by valve's rollout
+gate on edge-a: 53 of 621 `eth_feeHistory` calls on chain 1 failed (8.5%),
+against 0 of 526 on `0.3.0.5-valve`. Valve rolled edge-a back after about 75
+minutes.
+
+Clients ask `eth_feeHistory` for the block one past the node's head. reth
+answers `-32602 "request beyond head block"`, and the block arrives about a
+second later. `0.3.0.5` retried (about 1.2 s) and succeeded. Entry 197's first
+fix made every `ErrEndpointClientSideException` final for its upstream
+(`IsRetryableTowardsUpstream` false), so once both upstreams had answered,
+`AllUpstreamsFailedPermanently` ended the retry after 0.08 s.
+
+A generic `-32602` does not say whether it is permanent, so the unknown case
+keeps the retry: it costs latency, where failing fast costs a wrong failure.
+The fix reverts the client-side-exception line and moves the fail-fast to the
+one shape production showed is permanent. The normalizer marks a `-32602`
+whose message holds `bundle missing txs` as `retryableTowardNetwork: false`,
+so that request returns from the first upstream. The `computeDelay` rule from
+entry 197 stays: it still skips the delay after an error that never clears with
+time, but a client-side exception is no longer one of those.
+
+`TestNetwork_ClientErrorFromEveryUpstreamDoesNotResweep` was replaced. Its call
+count came from gock's `ReplyFunc`, which runs once at mock setup, not once per
+request, so the count proved nothing. The new tests use one-shot mocks in
+order and count the ones used.

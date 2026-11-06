@@ -643,8 +643,8 @@ func (e *networkExecutor) computeDelay(req *common.NormalizedRequest, resp *comm
 	}
 	cfg := e.cfg.Retry
 	// The delay gives a passing condition time to clear. An error the
-	// upstream will give again (a client-side or execution verdict, an
-	// unsupported method) does not clear with time, and NextUpstream will not
+	// upstream will give again (an execution verdict, an unsupported method,
+	// a client error tagged final) does not clear with time, and NextUpstream will not
 	// re-select that upstream: the next attempt goes to another upstream, so
 	// it need not wait. Capacity limits and an open breaker do clear with
 	// time, so they keep the delay.

@@ -421,10 +421,10 @@ func TestShouldRetry_AnErrorNoNodeCanFixIsNotRetriedOnTheSameNode(t *testing.T) 
 	transient := common.NewErrEndpointRequestTimeout(time.Second, nil)
 	require.True(t, e.shouldRetry(req, nil, transient, 0), "sanity: a timeout still retries on the same node")
 
-	// An untagged client-side error is this node's verdict on the request
-	// bytes, so it is not retried on the same node either (bug log 197).
+	// An untagged client-side error can clear with time (reth's -32602
+	// "request beyond head block" near the tip), so it still retries (bug log 198).
 	generic := common.NewErrEndpointClientSideException(errors.New("invalid params"))
-	require.False(t, e.shouldRetry(req, nil, generic, 0))
+	require.True(t, e.shouldRetry(req, nil, generic, 0))
 
 	terminal := common.NewErrEndpointClientSideException(errors.New("invalid params")).WithRetryableTowardNetwork(false)
 	require.False(t, e.shouldRetry(req, nil, terminal, 0))
