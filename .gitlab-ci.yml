@@ -11,7 +11,7 @@ workflow:
     - when: never
 
 default:
-  image: golang:1.25.1
+  image: golang:1.26.0
 
 variables:
   GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
