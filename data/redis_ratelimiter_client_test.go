@@ -76,40 +76,36 @@ func TestIAMRateLimitClient_PipeAppendAndPipeDo(t *testing.T) {
 	assert.Greater(t, m.TTL("budget:pipe"), time.Duration(0), "the expiry must be applied")
 }
 
-// TestIAMRateLimitClient_PipeDoStopsAtFirstError pins the documented
-// early-return: the envoy library builds one pipeline per key, so aborting on
-// the first failure never abandons another key's commands.
-func TestIAMRateLimitClient_PipeDoStopsAtFirstError(t *testing.T) {
+// TestIAMRateLimitClient_PipeDoSurfacesAnError pins upstream #1290's
+// contract: PipeDo sends the whole pipeline as one explicit radix.Pipeline.
+// A Redis pipeline is not a transaction, so a failing command does not stop
+// the next one; the error still fails the check, and store.onFailure decides.
+func TestIAMRateLimitClient_PipeDoSurfacesAnError(t *testing.T) {
 	t.Parallel()
-	c, m := newIAMRateLimitClientOn(t)
+	c, _ := newIAMRateLimitClientOn(t)
 
-	// A string key cannot take a list push, so the second command fails.
+	// A string key cannot take a list push, so the first command fails.
 	require.NoError(t, c.DoCmd(nil, "SET", "wrongtype", "not-a-list"))
 
 	var pushed int64
-	var never int64
+	var after int64
 	var pipeline envoyratelimitredis.Pipeline
 	pipeline = c.PipeAppend(pipeline, &pushed, "LPUSH", "wrongtype", "x")
-	pipeline = c.PipeAppend(pipeline, &never, "INCRBY", "after-the-error", 1)
+	pipeline = c.PipeAppend(pipeline, &after, "INCRBY", "after-the-error", 1)
 
-	err := c.PipeDo(pipeline)
-	require.Error(t, err, "the WRONGTYPE failure must surface")
-
-	assert.Equal(t, int64(0), never, "the command after the failure must not have run")
-	assert.False(t, m.Exists("after-the-error"),
-		"no key may be written after the pipeline aborts")
+	require.Error(t, c.PipeDo(pipeline), "the WRONGTYPE failure must surface")
 }
 
 // TestIAMRateLimitClient_StaticContract pins the two constants the envoy
-// library reads. ImplicitPipeliningEnabled must stay true, because the pool is
-// built with PoolPipelineWindow and the library sizes its admission channel
-// from that assumption.
+// library reads. ImplicitPipeliningEnabled is false: the pool has no
+// PoolPipelineWindow, and each check is one explicit pipeline (upstream
+// #1290, matching NewClientImpl with window 0).
 func TestIAMRateLimitClient_StaticContract(t *testing.T) {
 	t.Parallel()
 	c, _ := newIAMRateLimitClientOn(t)
 
-	assert.True(t, c.ImplicitPipeliningEnabled(),
-		"the radix pool pipelines implicitly, so the library must be told so")
+	assert.False(t, c.ImplicitPipeliningEnabled(),
+		"the pool does not pipeline implicitly, so the library must be told so")
 	assert.Equal(t, 0, c.NumActiveConns(),
 		"radix/v3 exposes no active-connection counter; the client reports zero")
 }

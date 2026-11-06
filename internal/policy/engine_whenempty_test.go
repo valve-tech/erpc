@@ -2,9 +2,7 @@ package policy_test
 
 import (
 	"testing"
-	"time"
 
-	"github.com/erpc/erpc/internal/policy"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,68 +75,4 @@ func TestEngine_HealthyPrimaryStillHidesTheFallbackTier(t *testing.T) {
 
 	require.Equal(t, []string{"aaa"}, f.orderIDs("evm:1", "*"),
 		"a healthy primary removes the fallback tier from the tick")
-}
-
-// TestEngine_FailoverEscapeKeepsTheFallbackTierRankedLast — with
-// `failover.onDefaultsExhausted` on, `preferTag` keeps the loser tier in
-// the list so a request that exhausts the primaries escalates inside the
-// same request. `demoteTag` must still rank it behind every primary.
-func TestEngine_FailoverEscapeKeepsTheFallbackTierRankedLast(t *testing.T) {
-	f := newEngineFixture(t)
-	cfg := defaultPolicyConfig()
-	cfg.FailoverOnDefaultsExhausted = true
-	slowPrimary := f.upstream("aaa")
-	fastFallback := f.upstream("ccc", "tier:fallback")
-	f.register("evm:1", cfg, slowPrimary, fastFallback)
-
-	// The fallback is the faster of the two, so score alone would put it
-	// first. Tier order has to win.
-	f.seed(slowPrimary, seedSpec{requests: 30, latencyMs: 500})
-	f.seed(fastFallback, seedSpec{requests: 30, latencyMs: 10})
-	// Push the eval clock past the sticky cooldown. Without this the
-	// incumbent primary is held anyway, and the test would pass even if
-	// `demoteTag` did nothing at all.
-	policy.AdvanceEvalNowForTest(f.Engine, "evm:1", "*", 60*time.Second)
-	f.tick("evm:1", "*")
-
-	require.Equal(t, []string{"aaa", "ccc"}, f.orderIDs("evm:1", "*"),
-		"the escape keeps the fallback reachable, ranked behind the primary")
-}
-
-// TestEngine_TierOrderHasTheLastWordAfterStickyHoistsAFallback — the
-// chain calls `demoteTag('tier:fallback')` twice, and the second call is
-// the one that survives `stickyPrimary`.
-//
-// The engine boots while every primary is broken, so the only survivor is
-// the fallback and the shared primary register latches onto it. When the
-// primaries heal, `stickyPrimary` hoists that fallback back to the head
-// of the list — a fallback serving every request while healthy primaries
-// sit behind it. The trailing `demoteTag` puts the tiers back in order.
-func TestEngine_TierOrderHasTheLastWordAfterStickyHoistsAFallback(t *testing.T) {
-	f := newEngineFixture(t)
-	primaryA := f.upstreamOn("evm:1", "aaa")
-	primaryB := f.upstreamOn("evm:1", "bbb")
-	fallback := f.upstreamOn("evm:1", "ccc", "tier:fallback")
-
-	// Both primaries are already broken when the engine boots.
-	f.seed(primaryA, seedSpec{failed: 20})
-	f.seed(primaryB, seedSpec{failed: 20})
-	f.seed(fallback, seedSpec{requests: 20, latencyMs: 10})
-
-	cfg := defaultPolicyConfig()
-	cfg.FailoverOnDefaultsExhausted = true
-	f.register("evm:1", cfg, primaryA, primaryB, fallback)
-	require.Equal(t, []string{"ccc"}, f.orderIDs("evm:1", "*"),
-		"only the fallback survives the boot tick, so it becomes the primary")
-
-	// The primaries recover: plenty of fresh successes, though still
-	// slower than the fallback.
-	f.seed(primaryA, seedSpec{requests: 400, latencyMs: 200})
-	f.seed(primaryB, seedSpec{requests: 400, latencyMs: 200})
-	f.tick("evm:1", "*")
-
-	require.True(t, f.lastDecision("evm:1", "*").Diff.StickyHeld,
-		"sticky must be actively hoisting the fallback — that is the case being corrected")
-	require.Equal(t, []string{"aaa", "bbb", "ccc"}, f.orderIDs("evm:1", "*"),
-		"tier order has the last word: the fallback ranks behind both primaries")
 }

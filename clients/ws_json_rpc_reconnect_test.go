@@ -76,11 +76,25 @@ func newWsClientWithCtx(t *testing.T, ctx context.Context, u *url.URL) *WsJsonRp
 	return c
 }
 
+// waitConnected polls until c reports a live connection. The merged client
+// has no connReady channel: readLoop owns the lifecycle and IsConnected is the
+// observable signal.
+func waitConnected(t *testing.T, c *WsJsonRpcClient, within time.Duration, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if c.IsConnected() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
 // An upstream that is not up yet must not fail startup. The constructor hands
-// the dial to the background reconnect loop, and the loop must close connReady
-// once it finally connects — that channel is what readLoop parks on. If the
-// loop connects but never closes connReady, readLoop stays parked forever and
-// the client is connected yet delivers nothing.
+// the dial to the background loop, and the loop must eventually connect and
+// deliver. If it connected but never resumed reading, the client would be
+// connected yet deliver nothing.
 func TestWsReconnect_FirstSuccessAfterAFailedStartupReleasesReadLoop(t *testing.T) {
 	srv := newFlakyWsServer(t, 1) // the constructor's own dial is refused
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,12 +102,7 @@ func TestWsReconnect_FirstSuccessAfterAFailedStartupReleasesReadLoop(t *testing.
 
 	c := newWsClientWithCtx(t, ctx, srv.wsURL(t))
 
-	select {
-	case <-c.connReady:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the background reconnect connected but never released readLoop")
-	}
-	require.True(t, c.IsConnected())
+	waitConnected(t, c, 5*time.Second, "the background reconnect never connected")
 	require.GreaterOrEqual(t, srv.attempts.Load(), int64(2),
 		"the client never retried after the refused first dial")
 }
@@ -102,16 +111,12 @@ func TestWsReconnect_FirstSuccessAfterAFailedStartupReleasesReadLoop(t *testing.
 // them to re-subscribe; a reconnect that skips them leaves a client connected
 // to a socket carrying none of its subscriptions.
 func TestWsReconnect_FiresTheReconnectCallbacks(t *testing.T) {
-	srv := newFlakyWsServer(t, 1)
+	srv := newFlakyWsServer(t, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	c := newWsClientWithCtx(t, ctx, srv.wsURL(t))
-	select {
-	case <-c.connReady:
-	case <-time.After(5 * time.Second):
-		t.Fatal("initial reconnect never completed")
-	}
+	waitConnected(t, c, 5*time.Second, "initial connection never completed")
 
 	fired := make(chan struct{}, 1)
 	c.SetOnReconnect("sub-1", func() {
@@ -121,11 +126,11 @@ func TestWsReconnect_FiresTheReconnectCallbacks(t *testing.T) {
 		}
 	})
 
-	c.reconnect()
+	c.Reconnect(c.Epoch())
 
 	select {
 	case <-fired:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("reconnect did not fire the registered callback; subscriptions are never restored")
 	}
 }
@@ -133,152 +138,96 @@ func TestWsReconnect_FiresTheReconnectCallbacks(t *testing.T) {
 // A cancelled app context must stop the reconnect loop. The loop is otherwise
 // infinite: it retries until it connects. eRPC cancels this context on process
 // shutdown, so a loop that ignores it keeps re-dialling a dead upstream while
-// the process is trying to exit, and the exit blocks behind it.
-//
-// The loop checks the context in two places — at the top of each attempt and
-// inside the backoff wait. Either one alone stops it, so this test asserts the
-// joint property; only removing BOTH checks makes it hang.
+// the process is trying to exit.
 func TestWsReconnect_CancelledContextStopsTheLoop(t *testing.T) {
 	srv := newFlakyWsServer(t, 0)
 	ctx, cancel := context.WithCancel(context.Background())
 	c := newWsClientWithCtx(t, ctx, srv.wsURL(t))
 
-	select {
-	case <-c.connReady:
-	case <-time.After(5 * time.Second):
-		t.Fatal("initial connection never completed")
-	}
+	waitConnected(t, c, 5*time.Second, "initial connection never completed")
 	cancel()
 	// Let the shutdown goroutine finish before counting dials.
 	time.Sleep(50 * time.Millisecond)
 	before := srv.attempts.Load()
 
-	done := make(chan struct{})
-	go func() { c.reconnect(); close(done) }()
+	// Longer than the largest first backoff step (wsReconnectMin, jittered
+	// down to half), so a loop that ignored the cancel would have re-dialled.
+	time.Sleep(wsReconnectMin + 300*time.Millisecond)
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reconnect kept running after the app context was cancelled")
-	}
 	require.Equal(t, before, srv.attempts.Load(),
-		"reconnect dialled the upstream after the app context was cancelled")
+		"the client dialled the upstream after the app context was cancelled")
 	require.False(t, c.IsConnected(),
-		"reconnect re-armed the connection after the app context was cancelled")
+		"the client re-armed the connection after the app context was cancelled")
 }
 
-// A context cancelled WHILE the loop waits out its backoff must break the wait
-// immediately. Without the appCtx branch in that select, shutdown stalls for a
-// full backoff step — up to 30 seconds once the ladder has climbed.
+// A context cancelled WHILE the loop waits out its backoff must stop it: no
+// further dial may happen once the wait would have ended.
 func TestWsReconnect_CancelDuringBackoffReturnsWithoutWaitingItOut(t *testing.T) {
-	srv := newFlakyWsServer(t, 0)
-	u := srv.wsURL(t)
+	srv := newFlakyWsServer(t, 1<<40) // every dial is refused
 	ctx, cancel := context.WithCancel(context.Background())
-	c := newWsClientWithCtx(t, ctx, u)
+	_ = newWsClientWithCtx(t, ctx, srv.wsURL(t))
 
-	select {
-	case <-c.connReady:
-	case <-time.After(5 * time.Second):
-		t.Fatal("initial connection never completed")
-	}
-
-	// Take the server away so every dial from here on fails and the loop
-	// enters its backoff wait.
-	srv.close()
-
-	done := make(chan struct{})
-	go func() { c.reconnect(); close(done) }()
-
-	// Let the first dial fail and the loop settle into the backoff wait. The
-	// first step is one second, so cancelling now lands well inside it and
-	// leaves ~800ms of wait that must NOT be served.
-	time.Sleep(200 * time.Millisecond)
-	start := time.Now()
+	// The constructor's dial fails; the loop is now inside its first backoff
+	// wait (wsReconnectMin jittered to at least half of it).
+	time.Sleep(100 * time.Millisecond)
 	cancel()
+	before := srv.attempts.Load()
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reconnect waited out its backoff instead of honouring the cancelled context")
-	}
-	require.Less(t, time.Since(start), 300*time.Millisecond,
-		"reconnect returned only after the backoff elapsed, not on cancellation")
+	time.Sleep(2*wsReconnectMin + 300*time.Millisecond)
+	require.Equal(t, before, srv.attempts.Load(),
+		"the loop dialled again after its context was cancelled mid-backoff")
 }
 
-// A reconnect that lands while the wake pulse is still unread must not block.
-// connWake has capacity 1 and readLoop only drains it when parked, so a second
-// reconnect finding it full is normal — and a blocking send there would wedge
-// the client's only reconnect path forever.
-func TestWsReconnect_DoesNotBlockWhenTheWakePulseIsAlreadyPending(t *testing.T) {
-	srv := newFakeWsServer(t)
-	c := newTestWsClient(t, srv.wsURL(t))
-
-	// Fill the wake channel so reconnect's non-blocking send has nowhere to go.
-	select {
-	case c.connWake <- struct{}{}:
-	default:
-		t.Fatal("connWake was already full before the test filled it")
-	}
-
-	done := make(chan struct{})
-	go func() { c.reconnect(); close(done) }()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reconnect blocked on a full wake channel; the client can never reconnect again")
-	}
-	// Nothing else is asserted here on purpose. The client's own readLoop is
-	// concurrently tearing down the connection this reconnect displaced, so its
-	// connected flag is genuinely racy at this instant. Returning at all is the
-	// property under test.
-}
-
-// drainPending is how every in-flight caller learns the socket died. A caller
+// teardownConn is how every in-flight caller learns the socket died. A caller
 // left waiting gets no answer until its own timeout — and for a caller with no
-// deadline, never. The loop must reach EVERY pending caller, not just the
-// first, and must not block on one whose channel nobody is reading.
+// deadline, never. It must reach EVERY pending caller, and empty the map.
 func TestDrainPending_EveryWaitingCallerIsWokenWithTheError(t *testing.T) {
 	srv := newFakeWsServer(t)
 	c := newTestWsClient(t, srv.wsURL(t))
 
-	readable := make(chan *wsPendingResult, 1)
-	abandoned := make(chan *wsPendingResult) // unbuffered, nobody receiving
-	second := make(chan *wsPendingResult, 1)
-
+	// SendRequest always gives its pending entry a 1-slot buffer, so the
+	// teardown send never blocks on a caller that has gone away.
+	chans := map[string]chan *wsPendingResult{
+		"1": make(chan *wsPendingResult, 1),
+		"2": make(chan *wsPendingResult, 1),
+		"3": make(chan *wsPendingResult, 1),
+	}
 	c.pendingMu.Lock()
-	c.pending["1"] = readable
-	c.pending["2"] = abandoned
-	c.pending["3"] = second
+	for id, ch := range chans {
+		c.pending[id] = &wsPending{ch: ch}
+	}
 	c.pendingMu.Unlock()
 
 	cause := common.NewErrEndpointTransportFailure(c.Url, context.Canceled)
 
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
 	done := make(chan struct{})
-	go func() { c.drainPending(cause); close(done) }()
+	go func() { c.teardownConn(conn, cause); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("drainPending blocked on an abandoned caller; the whole client wedges")
+		t.Fatal("teardownConn blocked; the whole client wedges")
 	}
 
-	for name, ch := range map[string]chan *wsPendingResult{"first": readable, "third": second} {
+	for name, ch := range chans {
 		select {
 		case got := <-ch:
-			require.Error(t, got.err, "the %s caller was woken without an error", name)
+			require.Error(t, got.err, "caller %s was woken without an error", name)
 			require.True(t, common.HasErrorCode(got.err, common.ErrCodeEndpointTransportFailure),
-				"the %s caller got %v, not the transport failure that caused the drain", name, got.err)
+				"caller %s got %v, not the transport failure that caused the teardown", name, got.err)
 		default:
-			t.Fatalf("the %s waiting caller was never woken", name)
+			t.Fatalf("waiting caller %s was never woken", name)
 		}
 	}
 
-	// The map must be emptied, or the next drain wakes callers that already
-	// went home and a retry files its entry behind a stale one.
-	c.pendingMu.RLock()
+	// The map must be emptied, or the next teardown wakes callers that
+	// already went home and a retry files its entry behind a stale one.
+	c.pendingMu.Lock()
 	left := len(c.pending)
-	c.pendingMu.RUnlock()
-	require.Zero(t, left, "drainPending left %d stale entries behind", left)
+	c.pendingMu.Unlock()
+	require.Zero(t, left, "teardownConn left %d stale entries behind", left)
 }
 
 // Shutdown must drain too. A client whose app context is cancelled while a
@@ -291,7 +240,7 @@ func TestShutdown_WakesAWaitingCaller(t *testing.T) {
 
 	waiting := make(chan *wsPendingResult, 1)
 	c.pendingMu.Lock()
-	c.pending["42"] = waiting
+	c.pending["42"] = &wsPending{ch: waiting}
 	c.pendingMu.Unlock()
 
 	cancel()

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/erpc/erpc/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -367,6 +368,8 @@ func TestHttpServer_ParseUrlPath_PreselectionPermutations(t *testing.T) {
 // client sees a connection that opened and then closed with no explanation.
 func TestHttpServer_ParseUrlPath_TreatsAWebSocketUpgradeAsACall(t *testing.T) {
 	s := aliasingUrlServer()
+	enabled := true
+	s.serverCfg = &common.ServerConfig{WebSocket: &common.WebSocketServerConfig{Enabled: &enabled}}
 
 	upgrade := &http.Request{
 		Method: http.MethodGet,
@@ -390,4 +393,12 @@ func TestHttpServer_ParseUrlPath_TreatsAWebSocketUpgradeAsACall(t *testing.T) {
 	_, _, _, _, isHealth, err = s.parseUrlPath(plain, "", "", "")
 	require.NoError(t, err)
 	require.True(t, isHealth, "a GET that is not an upgrade is a healthcheck")
+
+	// With the WebSocket server off (the default), an upgrade is a plain GET:
+	// it gets the healthcheck, not a handler that would refuse it.
+	disabled := false
+	s.serverCfg.WebSocket.Enabled = &disabled
+	_, _, _, _, isHealth, err = s.parseUrlPath(upgrade, "", "", "")
+	require.NoError(t, err)
+	require.True(t, isHealth, "with webSocket.enabled false, an upgrade is a healthcheck GET")
 }

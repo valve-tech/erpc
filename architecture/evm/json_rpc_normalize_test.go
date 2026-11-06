@@ -28,9 +28,10 @@ type tagTestNetwork struct {
 	highestFinalize int64
 }
 
-func (n *tagTestNetwork) Id() string                             { return "evm:123" }
-func (n *tagTestNetwork) Label() string                          { return "evm:123" }
-func (n *tagTestNetwork) ProjectId() string                      { return "test-project" }
+func (n *tagTestNetwork) EvmRefreshLatestBlock(context.Context) {}
+func (n *tagTestNetwork) Id() string                            { return "evm:123" }
+func (n *tagTestNetwork) Label() string                         { return "evm:123" }
+func (n *tagTestNetwork) ProjectId() string                     { return "test-project" }
 func (n *tagTestNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }

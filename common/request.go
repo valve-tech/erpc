@@ -19,11 +19,7 @@ const (
 	CompositeTypeLogsSplitProactive        = "logs-split-proactive"
 	CompositeTypeTraceFilterSplitOnError   = "trace-filter-split-on-error"
 	CompositeTypeTraceFilterSplitProactive = "trace-filter-split-proactive"
-	CompositeTypeQueryBlocksShim           = "query-blocks-shim"
-	CompositeTypeQueryTransactionsShim     = "query-transactions-shim"
-	CompositeTypeQueryLogsShim             = "query-logs-shim"
-	CompositeTypeQueryTracesShim           = "query-traces-shim"
-	CompositeTypeQueryTransfersShim        = "query-transfers-shim"
+	CompositeTypeMulticall3                = "multicall3"
 )
 
 const RequestContextKey ContextKey = "rq"
@@ -69,6 +65,32 @@ func WithSweepIteration(ctx context.Context) context.Context {
 func IsSweepIteration(ctx context.Context) bool {
 	v, _ := ctx.Value(SweepIterationContextKey).(bool)
 	return v
+}
+
+// wireParamsContextKey carries the JSON-RPC params one upstream attempt sends
+// for one request in place of its own. The request keeps its params, so the
+// cache key, response binding and every other upstream see the original question.
+type wireParamsContextKey struct{}
+
+// wireParams binds the override to its request: any other request sent with a
+// derived ctx on the same attempt (a probe, a state poll) keeps its own params.
+type wireParams struct {
+	req    *NormalizedRequest
+	params []interface{}
+}
+
+// WithWireParams returns ctx whose upstream attempt sends params for req on the wire.
+func WithWireParams(ctx context.Context, req *NormalizedRequest, params []interface{}) context.Context {
+	return context.WithValue(ctx, wireParamsContextKey{}, wireParams{req: req, params: params})
+}
+
+// WireParams returns the params an upstream client sends for req under ctx:
+// the attempt's override for exactly req when set, else req's own params.
+func WireParams(ctx context.Context, req *NormalizedRequest, params []interface{}) []interface{} {
+	if w, ok := ctx.Value(wireParamsContextKey{}).(wireParams); ok && w.req == req {
+		return w.params
+	}
+	return params
 }
 
 type directiveKeyNames struct {
@@ -235,10 +257,20 @@ type NormalizedRequest struct {
 	upstreamMutex    sync.Mutex
 	UpstreamIdx      uint32
 	ErrorsByUpstream sync.Map
+	// Upstream -> its latest block when the ErrorsByUpstream entry was stored.
+	// Wrong-empty accounting needs the head at answer time: by the time the
+	// request ends, a lagging upstream may have caught up.
+	headsAtError sync.Map
 
 	// Fields for centralized upstream management
-	upstreamList      []Upstream // Available upstreams for this request
-	ConsumedUpstreams *sync.Map  // Tracks upstreams that provided valid responses
+	upstreamList        []Upstream // Available upstreams for this request (post-selection)
+	networkUpstreamList []Upstream // Unfiltered network registry — consensus-policy fail-closed helpers
+	networkUpstreamsSet bool       // true after SetNetworkUpstreams (even if the snapshot is empty)
+	ConsumedUpstreams   *sync.Map  // Tracks upstreams that provided valid responses
+
+	// escalatedToFallbacks makes the per-request fallback escape happen at
+	// most once across retries and hedges.
+	escalatedToFallbacks atomic.Bool
 
 	lastValidResponse         atomic.Pointer[NormalizedResponse]
 	integrityCaught           atomic.Bool  // an integrity check rejected a response during this request
@@ -1244,6 +1276,18 @@ func (r *NormalizedRequest) CopyHttpContextFrom(source *NormalizedRequest) {
 	if user := source.User(); user != nil {
 		r.SetUser(user)
 	}
+
+	// Carry the auth strategy stamp so a derived request (e.g. an
+	// eth_getLogs split sub-request) selects the same consensus policy as its
+	// parent instead of falling back to default (Copilot finding: derived
+	// requests got a fresh exec state and lost the strategy name).
+	if name, ok := source.ExecState().AuthStrategy(); ok {
+		if p := source.ExecState().authStrategyPtr(); p != nil {
+			r.ExecState().SetAuthStrategy(p)
+		} else {
+			r.ExecState().SetAuthStrategy(&name)
+		}
+	}
 }
 
 func (r *NormalizedRequest) SetUpstreams(upstreams []Upstream) {
@@ -1257,6 +1301,34 @@ func (r *NormalizedRequest) SetUpstreams(upstreams []Upstream) {
 	if r.ConsumedUpstreams == nil {
 		r.ConsumedUpstreams = &sync.Map{}
 	}
+}
+
+// SetNetworkUpstreams stores the network-registry upstream list for this
+// request (cordon-inclusive, method-eligible). The consensus-policy selector
+// uses it to observe punishment / operator cordons that selection already
+// dropped from Upstreams(). Consensus reorder must not overwrite this list.
+// An empty slice is a real snapshot (e.g. nothing method-eligible) and must
+// not be treated as "never set".
+func (r *NormalizedRequest) SetNetworkUpstreams(upstreams []Upstream) {
+	if r == nil {
+		return
+	}
+	r.upstreamMutex.Lock()
+	defer r.upstreamMutex.Unlock()
+	r.networkUpstreamList = upstreams
+	r.networkUpstreamsSet = true
+}
+
+// HasNetworkUpstreams reports whether SetNetworkUpstreams was called, even
+// when the stored snapshot is empty. The selector falls back to Upstreams()
+// only when this is false (unit tests / non-network paths).
+func (r *NormalizedRequest) HasNetworkUpstreams() bool {
+	if r == nil {
+		return false
+	}
+	r.upstreamMutex.Lock()
+	defer r.upstreamMutex.Unlock()
+	return r.networkUpstreamsSet
 }
 
 // UpstreamsCount returns the number of available upstreams for this request
@@ -1283,6 +1355,34 @@ func (r *NormalizedRequest) Upstreams() []Upstream {
 	}
 	out := make([]Upstream, len(r.upstreamList))
 	copy(out, r.upstreamList)
+	return out
+}
+
+// MarkEscalatedToFallbacks reports true only for the first caller, so a
+// request escalates to the fallback tier at most once.
+func (r *NormalizedRequest) MarkEscalatedToFallbacks() bool {
+	if r == nil {
+		return false
+	}
+	return r.escalatedToFallbacks.CompareAndSwap(false, true)
+}
+
+// NetworkUpstreams returns a snapshot of the network-registry list (cordon-
+// inclusive, method-eligible) set via SetNetworkUpstreams. Returns nil when
+// unset; returns an empty (non-nil) slice when set to empty so callers can
+// distinguish "no registry snapshot" from "registry had zero eligible
+// upstreams". Safe for concurrent use.
+func (r *NormalizedRequest) NetworkUpstreams() []Upstream {
+	if r == nil {
+		return nil
+	}
+	r.upstreamMutex.Lock()
+	defer r.upstreamMutex.Unlock()
+	if !r.networkUpstreamsSet {
+		return nil
+	}
+	out := make([]Upstream, len(r.networkUpstreamList))
+	copy(out, r.networkUpstreamList)
 	return out
 }
 
@@ -1496,6 +1596,40 @@ func (r *NormalizedRequest) NextUpstream() (Upstream, error) {
 	)
 }
 
+// AllUpstreamsFailedPermanently reports whether every upstream this request
+// may select has already answered with an error that NextUpstream will not
+// re-select (an execution exception, an unsupported method). A retry or hedge
+// can then draw no upstream at all, so it cannot change the outcome.
+func (r *NormalizedRequest) AllUpstreamsFailedPermanently() bool {
+	if r == nil {
+		return false
+	}
+	r.upstreamMutex.Lock()
+	defer r.upstreamMutex.Unlock()
+
+	var useUpstreamPattern string
+	if r.directives != nil {
+		useUpstreamPattern = r.directives.UseUpstream
+	}
+	selectable := 0
+	for _, upstream := range r.upstreamList {
+		if useUpstreamPattern != "" {
+			if match, err := UpstreamMatchesSelector(useUpstreamPattern, upstream); err != nil || !match {
+				continue
+			}
+		}
+		selectable++
+		prevErr, exists := r.ErrorsByUpstream.Load(upstream)
+		if !exists {
+			return false
+		}
+		if pe, ok := prevErr.(error); !ok || IsRetryableTowardsUpstream(pe) {
+			return false
+		}
+	}
+	return selectable > 0
+}
+
 func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream Upstream, resp *NormalizedResponse, err error) {
 	r.upstreamMutex.Lock()
 	defer r.upstreamMutex.Unlock()
@@ -1528,6 +1662,7 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 	// permanent errors (method ignored, execution exception).
 	if err != nil {
 		r.ErrorsByUpstream.Store(upstream, err)
+		r.headsAtError.Store(upstream, latestBlockOf(upstream))
 	} else if !acceptsEmpty && resp != nil && resp.IsResultEmptyish(ctx) {
 		jr, jrErr := resp.JsonRpcResponse(ctx)
 		if jr == nil {
@@ -1535,6 +1670,7 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 		} else {
 			r.ErrorsByUpstream.Store(upstream, NewErrEndpointMissingData(fmt.Errorf("upstream responded emptyish: %v", jr.GetResultString()), upstream))
 		}
+		r.headsAtError.Store(upstream, latestBlockOf(upstream))
 	}
 
 	// Free from ConsumedUpstreams if the upstream can be retried on a
@@ -1550,4 +1686,25 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 	if canReUse {
 		r.ConsumedUpstreams.Delete(upstream)
 	}
+}
+
+// HeadAtError returns the upstream's latest block as eRPC knew it when the
+// upstream's ErrorsByUpstream entry was stored; 0 when unknown.
+func (r *NormalizedRequest) HeadAtError(upstream Upstream) int64 {
+	if v, ok := r.headsAtError.Load(upstream); ok {
+		return v.(int64)
+	}
+	return 0
+}
+
+func latestBlockOf(upstream Upstream) int64 {
+	eu, ok := upstream.(EvmUpstream)
+	if !ok {
+		return 0
+	}
+	sp := eu.EvmStatePoller()
+	if sp == nil || sp.IsObjectNull() {
+		return 0
+	}
+	return sp.LatestBlock()
 }

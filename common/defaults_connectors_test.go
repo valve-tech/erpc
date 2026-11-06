@@ -325,7 +325,8 @@ func TestMisbehaviorsDestinationConfig_SetDefaults_FillsTheFlushBudgetForS3(t *t
 	// uploads at all; neither is what an operator who wrote `type: s3` expects.
 	s3 := &MisbehaviorsDestinationConfig{Type: MisbehaviorsDestinationTypeS3}
 	require.NoError(t, s3.SetDefaults())
-	require.Equal(t, "{timestampMs}-{method}-{networkId}", s3.FilePattern)
+	require.Equal(t, "{timestampMs}-{instanceId}-{method}-{networkId}", s3.FilePattern,
+		"{instanceId} keeps concurrent replicas from overwriting each other (upstream)")
 	require.NotNil(t, s3.S3)
 	require.Equal(t, 100, s3.S3.MaxRecords)
 	require.Equal(t, int64(1024*1024), s3.S3.MaxSize)

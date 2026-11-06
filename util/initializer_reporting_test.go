@@ -57,13 +57,11 @@ func TestBootstrapTask_WaitOnANeverStartedTask(t *testing.T) {
 // TestInitializer_CancelledTaskIsReportedWithoutItsReason pins the behaviour a
 // task gets when its function returns context.Canceled.
 //
-// The initializer stores wrappedError{nil} before each attempt, so the
-// cancellation branch's CompareAndSwap(nil, ...) can never succeed and the real
-// reason is dropped. Wait then notices the empty error and substitutes "task
-// failed without specific error". The task IS correctly reported as failed, and
-// the aggregate error still counts it — only the reason is lost. This test
-// pins today's behaviour so a fix is a visible change, not a silent one.
-func TestInitializer_CancelledTaskIsReportedWithoutItsReason(t *testing.T) {
+// A task that fails with context.Canceled keeps its reason. The fork's old
+// initializer dropped it and reported "task failed without specific error";
+// upstream's rewrite fixed that, and returns a single failed task's own
+// error so typed checks (errors.Is) still work.
+func TestInitializer_CancelledTaskIsReportedWithItsReason(t *testing.T) {
 	appCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	init := setupInitializer(t, appCtx, &InitializerConfig{
@@ -86,12 +84,11 @@ func TestInitializer_CancelledTaskIsReportedWithoutItsReason(t *testing.T) {
 	defer func() { _ = init.Stop(nil) }()
 
 	require.Error(t, err, "a cancelled task must still count as a failed task")
-	assert.Contains(t, err.Error(), "1/1 tasks failed")
+	assert.ErrorIs(t, err, context.Canceled, "a single failed task returns its own error")
 	assert.Equal(t, TaskFailed, TaskState(task.state.Load()))
 
 	require.NotNil(t, task.Error())
-	assert.Equal(t, "task failed without specific error", task.Error().Err.Error(),
-		"today the cancellation reason is dropped; see initializer.go:376")
+	assert.ErrorIs(t, task.Error().Err, context.Canceled, "the cancellation reason is kept")
 }
 
 // TestInitializer_RetryBackoff covers the schedule that paces re-attempts.

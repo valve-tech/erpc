@@ -50,8 +50,10 @@ func TestWsSendRequest_RestoresTheCallersOwnJsonRpcId(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// eth_subscribe must carry its subscription owner (WithWsSubscription);
+	// a bare one is refused before the wire.
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`))
-	resp, err := c.SendRequest(ctx, req)
+	resp, err := c.SendRequest(WithWsSubscription(ctx, &WsSubscription{Handler: func([]byte) {}}), req)
 	if err != nil {
 		t.Fatalf("SendRequest: %v", err)
 	}
@@ -108,9 +110,9 @@ func idRecordingWsServer(t *testing.T) (*url.URL, <-chan float64) {
 }
 
 // The id ON THE WIRE must NOT be the caller's. Without the rewrite, two
-// concurrent callers that both use id 1 collide on the pending map and one of
-// them gets the other's answer.
-func TestWsSendRequest_RewritesTheOnWireIdOutOfTheClientRange(t *testing.T) {
+// concurrent callers that both use the same id collide on the pending map and
+// one of them gets the other's answer.
+func TestWsSendRequest_RewritesTheOnWireId(t *testing.T) {
 	u, seen := idRecordingWsServer(t)
 	c := newTestWsClient(t, u)
 
@@ -120,20 +122,14 @@ func TestWsSendRequest_RewritesTheOnWireIdOutOfTheClientRange(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`))
+		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":777777,"method":"eth_blockNumber","params":[]}`))
 		_, _ = c.SendRequest(ctx, req)
 	}()
 
 	select {
 	case wireID := <-seen:
-		if wireID == 1 {
-			t.Fatal("the caller's own id 1 went out on the wire; two callers sharing an id would collide")
-		}
-		// The counter is seeded above the client-traffic range so an operator
-		// reading upstream logs can tell eRPC's internal ids from a client's
-		// small integers.
-		if wireID <= float64(wireIDOffset) {
-			t.Fatalf("wire id = %v, want it above the %d internal-traffic offset", wireID, wireIDOffset)
+		if wireID == 777777 {
+			t.Fatal("the caller's own id went out on the wire; two callers sharing an id would collide")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the server never saw the request")
@@ -156,10 +152,10 @@ func TestWsSubscriptionHandlers_UnregisterStopsDelivery(t *testing.T) {
 		t.Fatal("the client never connected")
 	}
 
-	subID := subscribeNewHeads(t, c)
+	subID := subscribeNewHeads(t, c, func([]byte) {})
 
 	fired := make(chan struct{}, 4)
-	c.RegisterSubscriptionHandler(subID, func(string, []byte) { fired <- struct{}{} })
+	epoch := c.RegisterSubscriptionHandler(subID, func(string, []byte) { fired <- struct{}{} })
 
 	conn.sendNewHead(subID, "0x1")
 	select {
@@ -168,7 +164,7 @@ func TestWsSubscriptionHandlers_UnregisterStopsDelivery(t *testing.T) {
 		t.Fatal("a registered handler never received its notification")
 	}
 
-	c.UnregisterSubscriptionHandler(subID)
+	c.UnregisterSubscriptionHandler(subID, epoch)
 	conn.sendNewHead(subID, "0x2")
 	select {
 	case <-fired:
@@ -177,38 +173,27 @@ func TestWsSubscriptionHandlers_UnregisterStopsDelivery(t *testing.T) {
 	}
 }
 
-// Disconnect and reconnect callbacks are keyed so a subscription can drop its
-// own on teardown. If Remove did nothing, every torn-down subscription would
-// keep firing its callback on every future reconnect.
+// Disconnect callbacks are keyed so a subscription can drop its own on
+// teardown. If Remove did nothing, every torn-down subscription would keep
+// firing its callback on every future disconnect.
 func TestWsCallbacks_RemoveDeregistersByKey(t *testing.T) {
 	srv := newFakeWsServer(t)
 	c := newTestWsClient(t, srv.wsURL(t))
 
 	c.SetOnDisconnect("sub-a", func() {})
 	c.SetOnDisconnect("sub-b", func() {})
-	c.SetOnReconnect("sub-a", func() {})
-	c.SetOnReconnect("sub-b", func() {})
 
 	c.RemoveOnDisconnect("sub-a")
-	c.RemoveOnReconnect("sub-a")
 
 	c.onDisconnectMu.RLock()
 	_, aDisc := c.onDisconnectCbs["sub-a"]
 	_, bDisc := c.onDisconnectCbs["sub-b"]
 	c.onDisconnectMu.RUnlock()
 
-	c.onReconnectMu.RLock()
-	_, aRec := c.onReconnectCbs["sub-a"]
-	_, bRec := c.onReconnectCbs["sub-b"]
-	c.onReconnectMu.RUnlock()
-
 	if aDisc {
 		t.Error("RemoveOnDisconnect left the callback registered")
 	}
-	if aRec {
-		t.Error("RemoveOnReconnect left the callback registered")
-	}
-	if !bDisc || !bRec {
+	if !bDisc {
 		t.Error("removing one key also removed another subscription's callbacks")
 	}
 }
@@ -249,7 +234,7 @@ func TestWsHandleNotification_UnknownSubscriptionReachesNoHandler(t *testing.T) 
 		t.Fatal("the client never connected")
 	}
 
-	subID := subscribeNewHeads(t, c)
+	subID := subscribeNewHeads(t, c, func([]byte) {})
 	fired := make(chan struct{}, 4)
 	c.RegisterSubscriptionHandler(subID, func(string, []byte) { fired <- struct{}{} })
 

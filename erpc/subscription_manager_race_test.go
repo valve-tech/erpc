@@ -15,9 +15,13 @@ import (
 
 type raceTestNetwork struct{}
 
-func (raceTestNetwork) Id() string                       { return "evm:1" }
-func (raceTestNetwork) FinalityDepth() int64             { return 64 }
-func (raceTestNetwork) SuggestLatestBlock(string, int64) {}
+func (raceTestNetwork) Id() string                            { return "evm:1" }
+func (raceTestNetwork) SuggestLatestBlock(string, int64) bool { return true }
+func (raceTestNetwork) DeliveringHead(int64)                  {}
+func (raceTestNetwork) DedupDropped(indexer.EventKind)        {}
+func (raceTestNetwork) DedupEntriesAdded(int)                 {}
+func (raceTestNetwork) HeadIndexed()                          {}
+func (raceTestNetwork) Undelivered(indexer.EventKind)         {}
 
 // Two eth_subscribe frames back to back (newHeads, then logs) race in
 // getOrCreateConn. Every adapter for one connection has the same indexer
@@ -33,6 +37,8 @@ func TestSubscriptionManager_ConcurrentFirstSubscribesKeepEgress(t *testing.T) {
 
 		wsc, sock := newFaultWsConnection(t)
 		wsc.server = &HttpServer{serverCfg: &common.ServerConfig{WebSocket: &common.WebSocketServerConfig{}}}
+		wsc.project = &PreparedProject{Config: &common.ProjectConfig{Id: "test"}}
+		wsc.networkLabel = "evm:1"
 
 		start := make(chan struct{})
 		entries := make([]*connEntry, 2)
@@ -42,7 +48,7 @@ func TestSubscriptionManager_ConcurrentFirstSubscribesKeepEgress(t *testing.T) {
 			go func(g int) {
 				defer wg.Done()
 				<-start
-				entries[g] = sm.getOrCreateConn(wsc)
+				entries[g] = sm.getOrCreateConn(wsc, "evm:1")
 			}(g)
 		}
 		close(start)
@@ -51,7 +57,9 @@ func TestSubscriptionManager_ConcurrentFirstSubscribesKeepEgress(t *testing.T) {
 		if entries[0] != entries[1] {
 			t.Fatalf("iter %d: racing subscribes got different conn entries", iter)
 		}
-		entries[0].adapter.AddSubscription("0xsub", "evm:1", indexer.KindNewHead, "")
+		if err := entries[0].adapter.AddSubscription("0xsub", "evm:1", indexer.KindNewHead, "", 10); err != nil {
+			t.Fatalf("iter %d: AddSubscription: %v", iter, err)
+		}
 
 		idx.Ingest(indexer.StreamEvent{
 			Kind:      indexer.KindNewHead,
@@ -68,6 +76,6 @@ func TestSubscriptionManager_ConcurrentFirstSubscribesKeepEgress(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		sm.CleanupConnection(wsc, nil)
+		sm.CleanupConnection(wsc)
 	}
 }

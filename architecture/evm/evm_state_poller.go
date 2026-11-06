@@ -37,7 +37,7 @@ const (
 	// represent before it is treated as major and re-verified against a live
 	// eth_chainId (see majorHeadMoveThreshold). One minute is comfortably more
 	// chain than a healthy poller can miss between samples — the default state
-	// poller interval is 5s — while staying far below the height difference any
+	// poller interval is 30s — while staying far below the height difference any
 	// two unrelated chains exhibit.
 	chainIdVerifyChainProgress = 60 * time.Second
 
@@ -119,6 +119,19 @@ type EvmStatePoller struct {
 	// advances never touch these — they apply inline, so nothing can drop them.
 	latestMajorVerifyInProgress    sync.Mutex
 	finalizedMajorVerifyInProgress sync.Mutex
+
+	// Single in-flight flag for RefreshLatestBlock's background poll.
+	latestRefreshInFlight atomic.Bool
+
+	// cordonedByChainId is edge-triggered ownership of an availability cordon
+	// set by cordonForChainIdMismatch. When a later major-move verify passes,
+	// the poller lifts only its own availability bit (never an operator or
+	// punishment cordon) — same pattern as SvmStatePoller.cordonedByHealth.
+	// chainIdCordonMu serializes flag + tracker bit so a concurrent recovery
+	// cannot CAS the flag false before Cordon lands (leaving a permanent
+	// availability cordon with no owner).
+	cordonedByChainId atomic.Bool
+	chainIdCordonMu   sync.Mutex
 
 	// Earliest per probe tracking
 	earliestByProbe              map[common.EvmAvailabilityProbeType]data.CounterInt64SharedVariable
@@ -445,6 +458,30 @@ func (e *EvmStatePoller) resolveDebounce(cfg *common.EvmNetworkConfig) time.Dura
 	return 1 * time.Second
 }
 
+// resolveFinalizedDebounce widens the debounce for finalized polls to a fraction of the
+// chain's finality depth in time. Finalized moves once per finality window, so a poll at
+// the latest-block cadence mostly returns the number it already has; this bounds how far
+// the finalized block can trail to that fraction of the window instead.
+//
+// An upstream behind the network's corroborated finalized block keeps the regular
+// debounce: peers already saw the next finalized block, and a vendor whose load balancer
+// mixes stale and fresh backends needs every sample to catch up. Response finality uses
+// the serving upstream's own finalized block, and cache hits the lowest across upstreams.
+func (e *EvmStatePoller) resolveFinalizedDebounce(cfg *common.EvmNetworkConfig, debounce time.Duration) time.Duration {
+	if cfg == nil || cfg.FinalizedDebounceDepthMultiplier == nil {
+		return debounce
+	}
+	mult := *cfg.FinalizedDebounceDepthMultiplier
+	networkId := e.upstream.NetworkId()
+	finalized := e.finalizedBlockShared.GetValue()
+	depth := e.latestBlockShared.GetValue() - finalized
+	blockTime := e.tracker.GetNetworkBlockTime(networkId)
+	if mult <= 0 || finalized <= 0 || depth <= 0 || blockTime <= 0 || finalized < e.tracker.GetNetworkFinalizedBlock(networkId) {
+		return debounce
+	}
+	return max(debounce, time.Duration(float64(depth)*float64(blockTime)*mult))
+}
+
 // PollLatestBlockNumber fetches the latest block number in a blocking manner.
 // Respects the debounce interval if configured (if the last poll happened too recently, it reuses the cached value).
 func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, error) {
@@ -467,7 +504,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 	)
 	defer span.End()
 
-	return e.latestBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (int64, error) {
+	return e.latestBlockShared.TryUpdateIfLocallyStale(ctx, dbi, func(ctx context.Context) (int64, error) {
 		if e.logger.GetLevel() <= zerolog.TraceLevel {
 			e.logger.Trace().Str("ptr", fmt.Sprintf("%p", e)).Str("stack", string(debug.Stack())).Msg("fetching latest block number for evm state poller")
 		}
@@ -501,6 +538,13 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 				e.stateMu.Unlock()
 				return 0, nil
 			} else {
+				// An open circuit breaker short-circuits before tryForward
+				// records the failure, which would freeze the upstream's error
+				// rate; record it here. Other failures are already recorded.
+				if e.tracker != nil && common.HasErrorCode(err, common.ErrCodeFailsafeCircuitBreakerOpen) {
+					e.tracker.RecordUpstreamRequest(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateRealtime)
+					e.tracker.RecordUpstreamFailure(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateRealtime, err)
+				}
 				e.logger.Warn().Err(err).Msg("failed to get latest block number in evm state poller")
 				return 0, err
 			}
@@ -530,6 +574,33 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 	})
 }
 
+// RefreshLatestBlock starts a background latest-block poll when the stored
+// head is older than the poll debounce and no refresh is already in flight,
+// so a head read on the request path does not wait for the next ticker poll.
+// It never blocks and spawns at most one goroutine per poller at a time.
+func (e *EvmStatePoller) RefreshLatestBlock() {
+	if e.IsObjectNull() || e.latestBlockShared == nil {
+		return
+	}
+	e.stateMu.RLock()
+	cfg, skip := e.cfg, e.skipLatestBlockCheck
+	e.stateMu.RUnlock()
+	if skip || !e.latestBlockShared.IsStale(e.resolveDebounce(cfg)) {
+		return
+	}
+	if !e.latestRefreshInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer e.latestRefreshInFlight.Store(false)
+		ctx, cancel := context.WithTimeout(e.appCtx, 10*time.Second)
+		defer cancel()
+		if _, err := e.PollLatestBlockNumber(ctx); err != nil {
+			e.logger.Debug().Err(err).Msg("on-demand latest block refresh failed in evm state poller")
+		}
+	}()
+}
+
 func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 	// Best-effort, non-blocking update.
 	//
@@ -554,8 +625,10 @@ func (e *EvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 	// counter and skew every lag-based routing decision. That check makes a live
 	// eth_chainId call, so it runs OFF the hot path and this function stays
 	// non-blocking. Small advances (the common keep-fresh case) still apply
-	// inline with zero added latency, exactly as before.
-	if currentValue > 0 && blockNumber-currentValue > e.majorHeadMoveThreshold() {
+	// inline with zero added latency — except while we own a chain-identity
+	// availability cordon, when every advance re-verifies so recovery cannot
+	// stall on a never-again-major head.
+	if currentValue > 0 && (blockNumber-currentValue > e.majorHeadMoveThreshold() || e.cordonedByChainId.Load()) {
 		e.verifyThenSuggestLatestBlock(blockNumber)
 		return
 	}
@@ -594,7 +667,7 @@ func (e *EvmStatePoller) verifyThenSuggestLatestBlock(blockNumber int64) {
 		if blockNumber <= currentValue {
 			return
 		}
-		if blockNumber-currentValue > e.majorHeadMoveThreshold() &&
+		if (blockNumber-currentValue > e.majorHeadMoveThreshold() || e.cordonedByChainId.Load()) &&
 			!e.verifyChainIdOnMajorHeadMove(ctx, "latest", currentValue, blockNumber) {
 			e.logger.Warn().
 				Int64("blockNumber", blockNumber).
@@ -686,7 +759,16 @@ func (e *EvmStatePoller) majorHeadMoveThreshold() int64 {
 }
 
 func (e *EvmStatePoller) verifyChainIdOnMajorHeadMove(ctx context.Context, tag string, current, polled int64) bool {
-	if current <= 0 || absInt64(polled-current) <= e.majorHeadMoveThreshold() {
+	major := current > 0 && absInt64(polled-current) > e.majorHeadMoveThreshold()
+	if current <= 0 || !major {
+		// While cordoned, still probe eth_chainId on small advances so recovery
+		// does not require another major jump. Reject the sample until identity
+		// is actually revalidated — otherwise a still-cross-wired endpoint can
+		// poison the shared latest/finalized counter on every keep-fresh tick.
+		if e.cordonedByChainId.Load() {
+			e.tryUncordonViaChainIdProbe(ctx, tag)
+			return !e.cordonedByChainId.Load()
+		}
 		return true
 	}
 	cfgChainId := int64(0)
@@ -722,19 +804,90 @@ func (e *EvmStatePoller) verifyChainIdOnMajorHeadMove(ctx context.Context, tag s
 		e.cordonForChainIdMismatch(tag, current, polled, fmt.Errorf("eth_chainId returned %s but upstream is configured for chainId %d", detected, cfgChainId))
 		return false
 	}
+	e.maybeUncordonAfterChainIdRecovery()
 	return true
 }
 
+// tryUncordonViaChainIdProbe is the recovery-only path used while
+// cordonedByChainId is set. Success lifts the availability cordon; failures
+// leave it in place. Callers that invoke this on a non-major sample must
+// reject that sample until the ownership flag clears (see
+// verifyChainIdOnMajorHeadMove).
+func (e *EvmStatePoller) tryUncordonViaChainIdProbe(ctx context.Context, tag string) {
+	cfgChainId := int64(0)
+	if cfg := e.upstream.Config(); cfg != nil && cfg.Evm != nil {
+		cfgChainId = cfg.Evm.ChainId
+	}
+	if cfgChainId <= 0 {
+		return
+	}
+	eu, ok := e.upstream.(common.EvmUpstream)
+	if !ok {
+		return
+	}
+	detected, err := eu.EvmGetChainId(ctx)
+	if err != nil {
+		// A typed mismatch is proof the endpoint is still cross-wired —
+		// reassert the availability cordon. UncordonAdmin may have cleared
+		// the tracker bit while cordonedByChainId stayed set; without a
+		// re-cordon the upstream would stay fail-open for routing.
+		if common.HasErrorCode(err, common.ErrCodeEndpointChainIdMismatch) {
+			e.cordonForChainIdMismatch(tag, 0, 0, err)
+			return
+		}
+		e.logger.Debug().Err(err).Str("tag", tag).
+			Msg("chain-identity recovery probe failed; leaving availability cordon in place")
+		return
+	}
+	if detected != strconv.FormatInt(cfgChainId, 10) {
+		e.cordonForChainIdMismatch(tag, 0, 0, fmt.Errorf("eth_chainId returned %s but upstream is configured for chainId %d", detected, cfgChainId))
+		return
+	}
+	e.maybeUncordonAfterChainIdRecovery()
+}
+
 // cordonForChainIdMismatch fails loud on a proven cross-wired endpoint: the
-// sample is rejected and the upstream is cordoned (admins uncordon via the
-// existing erpc_uncordonUpstream admin method once the endpoint is fixed).
+// sample is rejected and the upstream is availability-cordoned. Recovery is
+// automatic when a later major-move verify sees a matching eth_chainId again
+// (see maybeUncordonAfterChainIdRecovery); operators can also clear via
+// erpc_uncordonUpstream → UncordonAdmin.
 func (e *EvmStatePoller) cordonForChainIdMismatch(tag string, current, polled int64, cause error) {
 	e.logger.Error().Err(cause).
 		Str("tag", tag).
 		Int64("currentValue", current).
 		Int64("polledValue", polled).
 		Msg("major head move REJECTED: upstream answers for a different chain — cordoning upstream")
-	e.upstream.Cordon("*", fmt.Sprintf("chain identity mismatch on major %s head move: %s", tag, cause.Error()))
+	e.chainIdCordonMu.Lock()
+	defer e.chainIdCordonMu.Unlock()
+	// Tracker bit first, then ownership flag — a concurrent recovery that
+	// observes the flag must also observe the cordon (or take the mutex and
+	// wait until both are set).
+	common.CordonClassed(e.upstream, "*", fmt.Sprintf("chain identity mismatch on major %s head move: %s", tag, cause.Error()), common.CordonClassAvailability)
+	e.cordonedByChainId.Store(true)
+}
+
+// maybeUncordonAfterChainIdRecovery lifts an availability cordon this poller
+// previously set, once eth_chainId matches the configured chain again. Edge-
+// triggered so we never clear an operator/punishment cordon we do not own.
+func (e *EvmStatePoller) maybeUncordonAfterChainIdRecovery() {
+	e.chainIdCordonMu.Lock()
+	defer e.chainIdCordonMu.Unlock()
+	if !e.cordonedByChainId.Load() {
+		return
+	}
+	e.cordonedByChainId.Store(false)
+	e.logger.Info().Msg("chain identity re-validated after mismatch; uncordoning availability")
+	common.UncordonClassed(e.upstream, "*", "evm state poller: chain identity re-validated after mismatch", common.CordonClassAvailability)
+}
+
+// ResetChainIdCordon clears the chain-identity cordon ownership flag so an
+// admin uncordon fully releases this upstream (review finding): without it,
+// the poller keeps holding heads behind a verify even after the operator
+// cleared every cordon class. No-op when the flag is unset.
+func (e *EvmStatePoller) ResetChainIdCordon() {
+	e.chainIdCordonMu.Lock()
+	defer e.chainIdCordonMu.Unlock()
+	e.cordonedByChainId.Store(false)
 }
 
 func absInt64(v int64) int64 {
@@ -761,7 +914,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 	networkLabel := e.networkLabel
 	e.stateMu.RUnlock()
 
-	dbi := e.resolveDebounce(cfg)
+	dbi := e.resolveFinalizedDebounce(cfg, e.resolveDebounce(cfg))
 
 	return e.finalizedBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (int64, error) {
 		e.logger.Trace().Msg("fetching finalized block number for evm state poller")
@@ -796,6 +949,11 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 				e.stateMu.Unlock()
 				return 0, nil
 			} else {
+				// See PollLatestBlockNumber.
+				if e.tracker != nil && common.HasErrorCode(err, common.ErrCodeFailsafeCircuitBreakerOpen) {
+					e.tracker.RecordUpstreamRequest(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateFinalized)
+					e.tracker.RecordUpstreamFailure(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateFinalized, err)
+				}
 				e.logger.Warn().Err(err).Msg("failed to get finalized block number in evm state poller")
 				return 0, err
 			}
@@ -845,8 +1003,10 @@ func (e *EvmStatePoller) SuggestFinalizedBlock(blockNumber int64) {
 	// protection the verified poll path and SuggestLatestBlock apply: a
 	// cross-wired endpoint reporting another chain's height must not enter the
 	// shared finalized counter. That check makes a live eth_chainId call, so it
-	// runs OFF the hot path and this function stays non-blocking.
-	if currentValue > 0 && blockNumber-currentValue > e.majorHeadMoveThreshold() {
+	// runs OFF the hot path and this function stays non-blocking. While this
+	// poller owns a chain-identity cordon, every advance re-verifies, the same
+	// as SuggestLatestBlock.
+	if currentValue > 0 && (blockNumber-currentValue > e.majorHeadMoveThreshold() || e.cordonedByChainId.Load()) {
 		e.verifyThenSuggestFinalizedBlock(blockNumber)
 		return
 	}
@@ -887,7 +1047,9 @@ func (e *EvmStatePoller) verifyThenSuggestFinalizedBlock(blockNumber int64) {
 		if blockNumber <= currentValue {
 			return
 		}
-		if blockNumber-currentValue > e.majorHeadMoveThreshold() &&
+		// A cordoned endpoint is re-verified on every forward move, not only a
+		// major one, the same as the latest-block path.
+		if (blockNumber-currentValue > e.majorHeadMoveThreshold() || e.cordonedByChainId.Load()) &&
 			!e.verifyChainIdOnMajorHeadMove(ctx, "finalized", currentValue, blockNumber) {
 			e.logger.Warn().
 				Int64("blockNumber", blockNumber).

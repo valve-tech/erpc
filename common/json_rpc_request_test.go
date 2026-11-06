@@ -1,6 +1,7 @@
 package common
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -61,12 +62,15 @@ func TestJsonRpcRequest_UnmarshalJSON_IdShapes(t *testing.T) {
 		require.Equal(t, `"abc"`, string(r.IDRawBytes()))
 	})
 
-	t.Run("a null id gets a generated one and no raw bytes", func(t *testing.T) {
+	t.Run("a null id gets a generated one; only Solana echoes the null", func(t *testing.T) {
 		var r JsonRpcRequest
 		require.NoError(t, r.UnmarshalJSON([]byte(`{"id":null,"method":"m"}`)))
-		require.NotNil(t, r.ID)
-		require.Nil(t, r.IDRawBytes(),
-			"echoing back a literal null id would break the client's matching")
+		require.NotNil(t, r.ID, "upstreams need a non-null id")
+		// Upstream keeps the verbatim `null` and lets ResponseID decide:
+		// EVM clients get the generated id, Solana gets null, as Agave does.
+		require.Equal(t, "null", string(r.IDRawBytes()))
+		require.Equal(t, r.ID, r.ResponseID(false))
+		require.Equal(t, json.RawMessage("null"), r.ResponseID(true))
 	})
 
 	t.Run("a missing id gets a generated one", func(t *testing.T) {
@@ -125,7 +129,7 @@ func TestJsonRpcRequest_Clone_CarriesTheRawIdForward(t *testing.T) {
 
 	const bigID = "1755123456789012345"
 	var r JsonRpcRequest
-	require.NoError(t, r.UnmarshalJSON([]byte(`{"id":` + bigID + `,"method":"m","params":[1]}`)))
+	require.NoError(t, r.UnmarshalJSON([]byte(`{"id":`+bigID+`,"method":"m","params":[1]}`)))
 
 	c := r.Clone()
 	require.Equal(t, bigID, string(c.IDRawBytes()))
@@ -408,7 +412,7 @@ func TestTranslateToJsonRpcException_MapsEachInternalErrorToItsClientCode(t *tes
 		},
 		{
 			name: "unauthorized",
-			in:   NewErrAuthUnauthorized("secret", "bad token"),
+			in:   NewErrAuthUnauthorized("secret", "invalid_secret", "bad token"),
 			want: JsonRpcErrorUnauthorized,
 		},
 		{

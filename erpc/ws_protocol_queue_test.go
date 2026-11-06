@@ -27,12 +27,12 @@ func TestSlowSubscriberGets4013OnBudget(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 
-	mockUpstream := mockWsUpstream(t, func(conn *mockWsConn) {
+	mockUpstream := mockWsUpstream(t, func(conn *websocket.Conn) {
 		standardMockWsHandler(conn, func(method string, id interface{}, req map[string]interface{}) {
 			switch method {
 			case "eth_subscribe":
 				subID := "0xflood"
-				_ = conn.WriteJSON(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": subID})
+				_ = mockWriteJSON(conn, map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": subID})
 				go func() {
 					// Distinct heads, so the indexer's dedup passes every one.
 					for n := 1; ; n++ {
@@ -41,7 +41,7 @@ func TestSlowSubscriberGets4013OnBudget(t *testing.T) {
 							return
 						default:
 						}
-						if conn.WriteJSON(map[string]interface{}{
+						if mockWriteJSON(conn, map[string]interface{}{
 							"jsonrpc": "2.0",
 							"method":  "eth_subscription",
 							"params": map[string]interface{}{
@@ -58,7 +58,7 @@ func TestSlowSubscriberGets4013OnBudget(t *testing.T) {
 					}
 				}()
 			default:
-				_ = conn.WriteJSON(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": "0x1"})
+				_ = mockWriteJSON(conn, map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": "0x1"})
 			}
 		})
 	})

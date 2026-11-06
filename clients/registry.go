@@ -27,13 +27,8 @@ type Client struct {
 	Upstream common.Upstream
 }
 
-// clientCreation memoises the once-per-upstream client construction. Sharing
-// the sync.Once across CreateClient calls is the correctness-critical part:
-// previously `var once sync.Once` was declared locally so every call ran the
-// body, and two concurrent callers that both missed the cache could each
-// spawn a client and its goroutines, with only the last winning Store — the
-// losing client (and its <-appCtx.Done() shutdown waiter, ping/read loops,
-// etc.) leaked for the lifetime of the process.
+// clientCreation lets concurrent callers that miss the cache share one client
+// instead of each spawning one. Failed creations are not memoised.
 type clientCreation struct {
 	once   sync.Once
 	client ClientInterface
@@ -134,6 +129,12 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					cerr = fmt.Errorf("failed to create HTTP client for upstream: %v: %w", cfg.Id, cerr)
 				}
 			case "ws", "wss":
+				// The WebSocket dialer does not go through a proxy pool;
+				// refuse rather than silently dial direct.
+				if proxyPool != nil {
+					cerr = fmt.Errorf("jsonRpc.proxyPool is not supported for WebSocket upstream %v", cfg.Id)
+					break
+				}
 				c, cerr = NewWsJsonRpcClient(
 					appCtx,
 					&lg,
@@ -146,7 +147,7 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 				if cerr != nil {
 					cerr = fmt.Errorf("failed to create WebSocket client for upstream %v: %w", cfg.Id, cerr)
 				}
-			case "grpc", "grpc+bds":
+			case "grpc", "grpc+bds", "grpcs":
 				grpcPoolSize, grpcHealthCheckService := 0, ""
 				if cfg.Grpc != nil {
 					grpcPoolSize = cfg.Grpc.PoolSize
@@ -176,6 +177,9 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 		creation.err = cerr
 		if cerr == nil {
 			manager.clients.Store(upstreamKey, c)
+		} else {
+			// Failed creations are not memoised: the next call retries.
+			manager.clientCreations.CompareAndDelete(upstreamKey, creation)
 		}
 	})
 

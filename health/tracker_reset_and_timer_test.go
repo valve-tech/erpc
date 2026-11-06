@@ -62,14 +62,14 @@ func TestTrackedMetrics_ResetClearsTheCordonButRotateDoesNot(t *testing.T) {
 	m.RemoteRateLimitedTotal.Add(2)
 	m.MisbehaviorsTotal.Add(1)
 	m.ResponseQuantiles.Add(0.5)
-	m.Cordoned.Store(true)
+	m.CordonMask.Store(1)
 	m.LastCordonedReason.Store("probe says it is behind")
 
 	// Rotate is the request path. Cordoning is the strongest "do not use"
 	// signal there is; clearing it on a timer would silently put a bad node
 	// back into rotation.
 	m.Rotate()
-	assert.True(t, m.Cordoned.Load(), "a rotation must never lift a cordon")
+	assert.NotZero(t, m.CordonMask.Load(), "a rotation must never lift a cordon")
 	assert.Equal(t, "probe says it is behind", m.LastCordonedReason.Load())
 
 	// Reset is the admin path and clears everything.
@@ -78,7 +78,7 @@ func TestTrackedMetrics_ResetClearsTheCordonButRotateDoesNot(t *testing.T) {
 	assert.EqualValues(t, 0, m.ErrorsTotal.Load())
 	assert.EqualValues(t, 0, m.RemoteRateLimitedTotal.Load())
 	assert.EqualValues(t, 0, m.MisbehaviorsTotal.Load())
-	assert.False(t, m.Cordoned.Load())
+	assert.Zero(t, m.CordonMask.Load())
 	assert.Equal(t, "", m.LastCordonedReason.Load())
 	assert.EqualValues(t, 0, m.ErrorRate(), "no requests means no error rate, not a divide by zero")
 	assert.EqualValues(t, 0, m.ThrottledRate())

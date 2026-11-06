@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"slices"
@@ -219,6 +220,13 @@ func (f *FailsafeConnector) CacheLatestBlockTimestamp(networkId string) (int64, 
 	return 0, false
 }
 
+// ReadOnly forwards to the wrapped connector so cache policies skip writes to a read-only connector
+// through the failsafe wrapper too.
+func (f *FailsafeConnector) ReadOnly() bool {
+	r, ok := f.wrapped.(ReadOnlyConnector)
+	return ok && r.ReadOnly()
+}
+
 func (f *FailsafeConnector) Get(ctx context.Context, index, partitionKey, rangeKey string, metadata interface{}) ([]byte, error) {
 	fe := pickCacheExecutor(f.getExecutors, ctx)
 	if fe == nil {
@@ -323,4 +331,12 @@ func (f *FailsafeConnector) WatchCounterInt64(ctx context.Context, key string) (
 
 func (f *FailsafeConnector) PublishCounterInt64(ctx context.Context, key string, value CounterInt64State) error {
 	return f.wrapped.PublishCounterInt64(ctx, key, value)
+}
+
+// DeleteByPattern forwards admin cache purge to the wrapped connector when supported.
+func (f *FailsafeConnector) DeleteByPattern(ctx context.Context, opts PatternDeleteOpts) (int64, int64, error) {
+	if d, ok := f.wrapped.(PatternDeleter); ok {
+		return d.DeleteByPattern(ctx, opts)
+	}
+	return 0, 0, fmt.Errorf("connector %q: %w", f.wrapped.Id(), ErrPatternDeleteUnsupported)
 }

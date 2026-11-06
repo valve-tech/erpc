@@ -772,6 +772,22 @@ func clientWireCode(t *testing.T, err error) JsonRpcErrorNumber {
 	return jre.NormalizedCode()
 }
 
+// A method eRPC declines to serve — stateful filter methods under a
+// multi-upstream pool, eth_accounts/eth_sign, or a subscription over HTTP —
+// must reach the client as -32601 "method not supported", not the generic
+// -32603. ethers only downgrades eth_getFilterChanges to polling when the error
+// classifies as UNSUPPORTED_OPERATION (code -32601 / a "not found|supported"
+// message); a -32603 leaves it re-arming the same call on every block forever.
+func TestTranslateToJsonRpcException_NotImplementedIsMethodNotFound(t *testing.T) {
+	err := NewErrNotImplemented("method eth_newFilter is not supported by any configured upstream")
+	translated := TranslateToJsonRpcException(err)
+
+	assert.EqualValues(t, JsonRpcErrorUnsupportedException, clientWireCode(t, translated),
+		"ErrNotImplemented must map to -32601 so clients detect an unsupported method")
+	assert.Contains(t, translated.Error(), "not supported",
+		"the descriptive reason must survive translation for message-matching clients")
+}
+
 func newExhausted(t *testing.T, order []string, causes map[string]error) error {
 	t.Helper()
 	m := &sync.Map{}
@@ -1022,4 +1038,137 @@ func TestJsonRpcRequest_UnmarshalID_NumericPrecision(t *testing.T) {
 			require.Equal(t, c.idJSON, string(r.IDRawBytes()), "idRaw for %s", c.idJSON)
 		})
 	}
+}
+
+// cacheHashOfRequest decodes a full JSON-RPC request through the same Sonic
+// path the server uses (JsonRpcRequest.UnmarshalJSON) and returns its CacheHash.
+// Going through the real decode path is what makes these regression tests
+// meaningful: they exercise the exact Go value shapes (float64 numbers, nested
+// []interface{}, map[string]interface{}) the request pipeline produces.
+func cacheHashOfRequest(t *testing.T, rawReq string) string {
+	t.Helper()
+	var req JsonRpcRequest
+	require.NoError(t, SonicCfg.UnmarshalFromString(rawReq, &req))
+	h, err := req.CacheHash()
+	require.NoError(t, err)
+	return h
+}
+
+// cacheHashOfParams builds a request from a method and a raw JSON params array
+// and returns its CacheHash. Used for the focused structural collision cases.
+func cacheHashOfParams(t *testing.T, method, rawParams string) string {
+	t.Helper()
+	return cacheHashOfRequest(t, fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"method":%q,"params":%s}`, method, rawParams))
+}
+
+// TestJsonRpcRequest_CacheHash_NestedTopicsCollision reproduces the first
+// collision reported in #1034: for eth_getLogs, `topics: [[A, B]]` (topic[0] is
+// "A OR B") and `topics: [A, B]` (topic[0]=A, topic[1]=B) are semantically
+// different filters, but the old flattening hasher dropped the nested-array
+// boundary and produced the same CacheHash — so the second request could be
+// multiplexed onto / served the first request's response.
+func TestJsonRpcRequest_CacheHash_NestedTopicsCollision(t *testing.T) {
+	reqA := `{
+		"jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
+		"params": [{
+			"fromBlock": "0x64", "toBlock": "0x64",
+			"address": "0x0000000000000000000000000000000000000001",
+			"topics": [[
+				"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			]]
+		}]
+	}`
+	reqB := `{
+		"jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
+		"params": [{
+			"fromBlock": "0x64", "toBlock": "0x64",
+			"address": "0x0000000000000000000000000000000000000001",
+			"topics": [
+				"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			]
+		}]
+	}`
+
+	hashA := cacheHashOfRequest(t, reqA)
+	hashB := cacheHashOfRequest(t, reqB)
+	require.NotEqual(t, hashA, hashB,
+		"nested topics [[A,B]] must not share a CacheHash with flat topics [A,B]")
+}
+
+// TestJsonRpcRequest_CacheHash_FloatPrecisionCollision reproduces the second
+// collision reported in #1034: the old hasher formatted float64 params with
+// "%f" (six decimal places), so eth_feeHistory reward percentiles [25] and
+// [25.0000001] collapsed to the byte string "25.000000" and hashed identically.
+func TestJsonRpcRequest_CacheHash_FloatPrecisionCollision(t *testing.T) {
+	hashA := cacheHashOfParams(t, "eth_feeHistory", `["0x10", "0x64", [25]]`)
+	hashB := cacheHashOfParams(t, "eth_feeHistory", `["0x10", "0x64", [25.0000001]]`)
+	require.NotEqual(t, hashA, hashB,
+		"float params 25 and 25.0000001 must not collapse to the same CacheHash")
+}
+
+// TestJsonRpcRequest_CacheHash_StructuralCollisions covers the remaining ways
+// the old ambiguous flattening could alias structurally distinct params:
+// missing element boundaries, missing type tags, and missing container
+// boundaries. Each pair is semantically different and must hash differently.
+func TestJsonRpcRequest_CacheHash_StructuralCollisions(t *testing.T) {
+	cases := []struct {
+		name    string
+		paramsA string
+		paramsB string
+	}{
+		// Array element boundaries: "ab"+"c" vs "a"+"bc" flatten to the same
+		// "abc" byte run without length/element delimiters.
+		{"array element boundaries", `["ab", "c"]`, `["a", "bc"]`},
+		// Type tags: a string that looks like another JSON scalar must not
+		// alias that scalar.
+		{"string vs number", `["1"]`, `[1]`},
+		{"string vs bool", `["true"]`, `[true]`},
+		{"string vs null", `["null"]`, `[null]`},
+		// Container boundaries: a nested array must not flatten into its parent.
+		{"nested vs flat array", `[["a", "b"]]`, `["a", "b"]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hashA := cacheHashOfParams(t, "eth_call", c.paramsA)
+			hashB := cacheHashOfParams(t, "eth_call", c.paramsB)
+			require.NotEqual(t, hashA, hashB,
+				"%s: %s must not share a CacheHash with %s", c.name, c.paramsA, c.paramsB)
+		})
+	}
+}
+
+// TestJsonRpcRequest_CacheHash_ObjectKeyOrderStable asserts the encoding stays
+// deterministic across JSON object key order (and Go map iteration order):
+// {"a":1,"b":2} and {"b":2,"a":1} are the same request and must hash equally.
+func TestJsonRpcRequest_CacheHash_ObjectKeyOrderStable(t *testing.T) {
+	hashA := cacheHashOfParams(t, "eth_call", `[{"a":1,"b":2}]`)
+	hashB := cacheHashOfParams(t, "eth_call", `[{"b":2,"a":1}]`)
+	require.Equal(t, hashA, hashB,
+		"object key order is not semantically meaningful and must not change the CacheHash")
+}
+
+// TestJsonRpcRequest_CacheHash_EvmHexCaseInsensitive documents the deliberate
+// decision to keep lowercasing string params: EVM hex is case-insensitive, so a
+// checksummed address and its lowercase form are the same request and should
+// share a cache entry / multiplex group. This is the EVM counterpart to SVM's
+// case-preserving key (see svmRequestKey).
+func TestJsonRpcRequest_CacheHash_EvmHexCaseInsensitive(t *testing.T) {
+	hashUpper := cacheHashOfParams(t, "eth_getBalance",
+		`["0xAbC0000000000000000000000000000000000001", "latest"]`)
+	hashLower := cacheHashOfParams(t, "eth_getBalance",
+		`["0xabc0000000000000000000000000000000000001", "latest"]`)
+	require.Equal(t, hashUpper, hashLower,
+		"EVM hex params are case-insensitive and must share a CacheHash")
+}
+
+func TestTranslateToJsonRpcException_SubscriptionLimitIsCapacityNotInternal(t *testing.T) {
+	err := NewErrSubscriptionLimitExceeded(10)
+
+	assert.Equal(t, SeverityInfo, ClassifySeverity(err),
+		"subscription limit is a client condition and must never grade critical")
+	assert.EqualValues(t, JsonRpcErrorCapacityExceeded, clientWireCode(t, TranslateToJsonRpcException(err)),
+		"subscription limit must map to -32005, not -32603")
 }

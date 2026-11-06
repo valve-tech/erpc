@@ -68,13 +68,21 @@ test:
 # standing in. Keeping it under $(CURDIR) makes it unique per worktree and
 # still stable across repeat runs.
 ERPC_TEST_BIN := $(CURDIR)/.erpc.test
+# COVER_DIR=<dir> makes test-fast write one coverage profile per test process
+# into <dir>; -coverpkg counts lines any test reaches, not only its own package.
+ifdef COVER_DIR
+COVER_FLAGS := -cover -covermode=atomic -coverpkg=./...
+cover_out = -coverprofile=$(COVER_DIR)/$(1).out
+cover_bin = -test.coverprofile=$(COVER_DIR)/$(1).out
+endif
 
 .PHONY: test-fast
 test-fast:
 	@go clean -testcache
-	@go test ./cmd/... -count 1 -parallel 1 -v
+	@$(if $(COVER_DIR),mkdir -p $(COVER_DIR))
+	@go test ./cmd/... -count 1 -parallel 1 -v $(COVER_FLAGS) $(call cover_out,cmd)
 	@# Compile erpc test binary once
-	@go test -c -o $(ERPC_TEST_BIN) ./erpc
+	@go test -c -o $(ERPC_TEST_BIN) $(COVER_FLAGS) ./erpc
 	@# Run erpc shards in parallel (each process has isolated gock state)
 	@# DSL shard (requires OpenAI API key, non-blocking)
 	@$(ERPC_TEST_BIN) -test.v -test.timeout 5m -test.run "^TestConsensusPolicy_DSL" || true &
@@ -87,6 +95,9 @@ test-fast:
 	@# of TestNetwork_* was skipped while SHARD_NETWORK only ran an enumerated
 	@# subset — so any test under a skipped prefix but outside a shard ran
 	@# NOWHERE in CI (which is how a deterministically-failing test merged).
+	@# SHARD_ADMIN holds the admin API tests (~210s, Redis-backed). After the
+	@# 2026-11 upstream sync the catch-all reached its 10m budget (599s
+	@# observed), so they run on their own.
 	@# SHARD_CONTAINER_CACHE isolates the testcontainers-backed cache tests:
 	@# their duration is dominated by docker (image pull + dynamodb-local JVM
 	@# startup) and swings from ~15s to 9m+ on degraded runners. In the serial
@@ -99,20 +110,22 @@ test-fast:
 	  SHARD_HTTPSERVER="^TestHttpServer_"; \
 	  SHARD_INTEGRITY="^(TestNetworkRetry_|TestNetworkForward_|TestNetworkIntegrity_|TestHedgeConsensus_|TestEmptyResultAcceptShortCircuit$$|TestNetworkFailsafe_|TestNetworksBootstrap_|TestNetworkAvailability_|TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping$$|TestNetwork_HedgePolicy)"; \
 	  SHARD_CONTAINER_CACHE="^TestEvmJsonRpcCache_(DynamoDB|Redis)$$"; \
-	  SKIP_ALL="$$SHARD_CONSENSUS|$$SHARD_NETWORK|$$SHARD_HTTPSERVER|$$SHARD_INTEGRITY|$$SHARD_CONTAINER_CACHE|^TestConsensusPolicy_DSL|^TestHttp_"; \
+	  SHARD_ADMIN="^TestAdmin"; \
+	  SKIP_ALL="$$SHARD_CONSENSUS|$$SHARD_NETWORK|$$SHARD_HTTPSERVER|$$SHARD_INTEGRITY|$$SHARD_CONTAINER_CACHE|$$SHARD_ADMIN|^TestConsensusPolicy_DSL|^TestHttp_"; \
 	  pids=(); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_CONSENSUS" -test.parallel 4 & pids+=($$!); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_NETWORK" & pids+=($$!); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_HTTPSERVER" & pids+=($$!); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_INTEGRITY" & pids+=($$!); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 15m -test.run "$$SHARD_CONTAINER_CACHE" & pids+=($$!); \
-	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.skip "$$SKIP_ALL" & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_CONSENSUS" -test.parallel 4 $(call cover_bin,erpc-consensus) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_NETWORK" $(call cover_bin,erpc-network) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_HTTPSERVER" $(call cover_bin,erpc-httpserver) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_INTEGRITY" $(call cover_bin,erpc-integrity) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 15m -test.run "$$SHARD_CONTAINER_CACHE" $(call cover_bin,erpc-container-cache) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.run "$$SHARD_ADMIN" $(call cover_bin,erpc-admin) & pids+=($$!); \
+	  $(ERPC_TEST_BIN) -test.v -test.timeout 10m -test.skip "$$SKIP_ALL" $(call cover_bin,erpc-rest) & pids+=($$!); \
 	  fail=0; for pid in "$${pids[@]}"; do wait "$$pid" || fail=1; done; \
 	  exit $$fail'
 	@# TestHttp_ tests run after parallel shards (sensitive to system load, only ~5s)
-	@$(ERPC_TEST_BIN) -test.v -test.timeout 5m -test.run "^TestHttp_"
+	@$(ERPC_TEST_BIN) -test.v -test.timeout 5m -test.run "^TestHttp_" $(call cover_bin,erpc-http)
 	@# Run all other (non-erpc) packages normally
-	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | grep -v "erpc/" | awk '{print "./" $$1 "..."}') -count 1 -parallel 4 -v -timeout 30m -failfast=false
+	@go test $$(ls -d */ | grep -v "cmd/" | grep -v "test/" | grep -v "erpc/" | awk '{print "./" $$1 "..."}') -count 1 -parallel 4 -v -timeout 30m -failfast=false $(COVER_FLAGS) $(call cover_out,packages)
 
 .PHONY: test-race
 test-race:

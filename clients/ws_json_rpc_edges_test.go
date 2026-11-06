@@ -93,7 +93,7 @@ func TestWsSendRequest_MalformedBodyIsRejectedBeforeTheWire(t *testing.T) {
 	require.Error(t, err, "a malformed request body reached the socket")
 }
 
-// A response delivered with an error — the shape drainPending uses when the
+// A response delivered with an error — the shape teardownConn uses when the
 // socket dies — must reach the waiting caller as that error. Swallowing it
 // would leave the caller waiting on a connection that is already gone.
 func TestWsSendRequest_AnErrorResultReachesTheWaitingCaller(t *testing.T) {
@@ -104,11 +104,14 @@ func TestWsSendRequest_AnErrorResultReachesTheWaitingCaller(t *testing.T) {
 		// Wait until SendRequest has registered its pending entry, then kill
 		// every waiting caller the way a dropped socket does.
 		for i := 0; i < 200; i++ {
-			c.pendingMu.RLock()
+			c.pendingMu.Lock()
 			n := len(c.pending)
-			c.pendingMu.RUnlock()
+			c.pendingMu.Unlock()
 			if n > 0 {
-				c.drainPending(common.NewErrEndpointTransportFailure(c.Url, context.Canceled))
+				c.connMu.Lock()
+				conn := c.conn
+				c.connMu.Unlock()
+				c.teardownConn(conn, common.NewErrEndpointTransportFailure(c.Url, context.Canceled))
 				return
 			}
 			time.Sleep(5 * time.Millisecond)
@@ -134,24 +137,24 @@ func TestWsHandleMessage_SurvivesFramesItCannotUse(t *testing.T) {
 	c := newTestWsClient(t, srv.wsURL(t))
 
 	frames := [][]byte{
-		[]byte(`{ this is not json`),                                    // unparseable
-		[]byte(`{"jsonrpc":"2.0"}`),                                     // neither response nor notification
-		[]byte(`{"jsonrpc":"2.0","id":987654321,"result":"0x1"}`),       // response nobody is waiting for
-		[]byte(`{"jsonrpc":"2.0","method":"eth_unknownNotification"}`),  // notification of another kind
-		[]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":`), // notification with broken params
+		[]byte(`{ this is not json`),                                                                           // unparseable
+		[]byte(`{"jsonrpc":"2.0"}`),                                                                            // neither response nor notification
+		[]byte(`{"jsonrpc":"2.0","id":987654321,"result":"0x1"}`),                                              // response nobody is waiting for
+		[]byte(`{"jsonrpc":"2.0","method":"eth_unknownNotification"}`),                                         // notification of another kind
+		[]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":`),                                       // notification with broken params
 		[]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xnope","result":{}}}`), // unknown subscription
 	}
 	for _, f := range frames {
-		c.handleMessage(f)
+		c.handleMessage(f, c.Epoch())
 	}
 
 	// The client must still deliver a normal response afterwards.
 	require.True(t, c.IsConnected(), "the client dropped its connection over an unusable frame")
 	waiting := make(chan *wsPendingResult, 1)
 	c.pendingMu.Lock()
-	c.pending["55"] = waiting
+	c.pending["55"] = &wsPending{ch: waiting}
 	c.pendingMu.Unlock()
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","id":55,"result":"0x2"}`))
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","id":55,"result":"0x2"}`), c.Epoch())
 	select {
 	case got := <-waiting:
 		require.NoError(t, got.err)
@@ -165,21 +168,15 @@ func TestWsHandleMessage_SurvivesFramesItCannotUse(t *testing.T) {
 // caller an empty result and the request would look like a cache-able success.
 func TestWsHandleMessage_AnErrorResponseReachesTheCallerAsAnError(t *testing.T) {
 	srv := newFakeWsServer(t)
+	srv.RefuseMethod("eth_getBlockByNumber", -32000, "header not found")
 	c := newTestWsClient(t, srv.wsURL(t))
 
-	waiting := make(chan *wsPendingResult, 1)
-	c.pendingMu.Lock()
-	c.pending["77"] = waiting
-	c.pendingMu.Unlock()
-
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","id":77,"error":{"code":-32000,"message":"header not found"}}`))
-	select {
-	case got := <-waiting:
-		require.Error(t, got.err, "the upstream's JSON-RPC error was delivered as a success")
-		require.Contains(t, got.err.Error(), "header not found")
-	default:
-		t.Fatal("the error response never reached the caller")
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":77,"method":"eth_getBlockByNumber","params":["0x1",false]}`))
+	_, err := c.SendRequest(ctx, req)
+	require.Error(t, err, "the upstream's JSON-RPC error was delivered as a success")
+	require.Contains(t, err.Error(), "header not found")
 }
 
 // A subscription notification must reach exactly the handler registered for its
@@ -191,10 +188,10 @@ func TestWsHandleNotification_ReachesOnlyTheMatchingSubscriber(t *testing.T) {
 
 	mine := make(chan []byte, 1)
 	theirs := make(chan []byte, 1)
-	c.RegisterSubscriptionHandler("0xaaa", func(_ string, p []byte) { mine <- p })
+	epoch := c.RegisterSubscriptionHandler("0xaaa", func(_ string, p []byte) { mine <- p })
 	c.RegisterSubscriptionHandler("0xbbb", func(_ string, p []byte) { theirs <- p })
 
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xaaa","result":{"number":"0x1"}}}`))
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xaaa","result":{"number":"0x1"}}}`), epoch)
 
 	select {
 	case <-mine:
@@ -208,22 +205,11 @@ func TestWsHandleNotification_ReachesOnlyTheMatchingSubscriber(t *testing.T) {
 	}
 
 	// After unregistering, the same notification must reach nobody.
-	c.UnregisterSubscriptionHandler("0xaaa")
-	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xaaa","result":{"number":"0x2"}}}`))
+	c.UnregisterSubscriptionHandler("0xaaa", epoch)
+	c.handleMessage([]byte(`{"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"0xaaa","result":{"number":"0x2"}}}`), epoch)
 	select {
 	case <-mine:
 		t.Fatal("a torn-down subscription still received notifications")
 	case <-time.After(100 * time.Millisecond):
 	}
-}
-
-// ───────────────────────────── metrics ──────────────────────────────────────
-
-// The connectivity gauge is labelled with the upstream's vendor, network and
-// id. A client built without an upstream has none of those, so publishing must
-// be skipped rather than panic — the constructor accepts a nil upstream.
-func TestWsSetConnectedMetric_SkipsWhenTheClientHasNoUpstream(t *testing.T) {
-	c := &WsJsonRpcClient{projectId: "test-project"}
-	require.NotPanics(t, func() { c.setConnectedMetric(1) },
-		"publishing the gauge without an upstream panicked")
 }

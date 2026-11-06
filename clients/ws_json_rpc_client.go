@@ -1,21 +1,24 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"encoding/json"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
@@ -26,32 +29,19 @@ import (
 )
 
 const (
-	wsWriteWait = 10 * time.Second
-)
-
-// Liveness windows. The peer must produce SOME traffic (a pong reply or a
-// data frame) within wsPongWait, or the connection is declared dead, torn
-// down, and re-dialed. A half-open TCP connection (peer host vanished
-// without FIN/RST, or an intermediate proxy black-holing frames) otherwise
-// blocks ReadMessage forever while ping writes keep "succeeding" into the
-// kernel/proxy buffer — the client then believes it is connected and never
-// re-dials. wsPongWait must comfortably exceed wsPingInterval so at least
-// two pings fit in the window.
-//
-// Vars (not consts) so tests can compress time. They are copied into
-// per-client fields at construction, so client goroutines never read them
-// after NewWsJsonRpcClient returns.
-var (
-	wsPingInterval = 30 * time.Second
-	wsPongWait     = 75 * time.Second
-
-	// Reconnect backoff ladder: the first retry waits wsReconnectMin, each
-	// further retry multiplies by wsReconnectFactor, and the wait saturates
-	// at wsReconnectMax. Same rationale as above — vars so tests can compress
-	// time, snapshotted into per-client fields at construction.
+	wsWriteWait       = 10 * time.Second
 	wsReconnectMin    = 1 * time.Second
 	wsReconnectMax    = 30 * time.Second
 	wsReconnectFactor = 2.0
+)
+
+// Liveness windows: a connection with no pong or data frame for wsPongWait
+// is torn down and re-dialed, since a half-open connection would otherwise
+// block reads forever while pings keep "succeeding" into a buffer. Two
+// pings fit in the window. Vars so tests can shorten them.
+var (
+	wsPingInterval = 30 * time.Second
+	wsPongWait     = 75 * time.Second
 )
 
 // WsJsonRpcClient implements ClientInterface for WebSocket-based JSON-RPC upstream connections.
@@ -64,93 +54,100 @@ type WsJsonRpcClient struct {
 	appCtx    context.Context
 	logger    *zerolog.Logger
 
-	// Liveness windows, snapshotted from wsPingInterval/wsPongWait at
-	// construction (before any goroutine starts).
 	pingInterval time.Duration
 	pongWait     time.Duration
 
-	// Reconnect backoff ladder, snapshotted from
-	// wsReconnectMin/wsReconnectMax/wsReconnectFactor at construction for
-	// the same reason: reconnect() runs in its own goroutine, so reading the
-	// package vars there would race any test that compresses them.
-	reconnectMin    time.Duration
-	reconnectMax    time.Duration
-	reconnectFactor float64
-
-	// Connection state
-	connMu sync.Mutex
-	conn   *websocket.Conn
-
-	// connWake is pulsed by reconnect() once a new connection is in c.conn,
-	// so readLoop can wake up without polling. Capacity 1 coalesces bursts.
-	connWake chan struct{}
+	// Connection state. Only readLoop replaces or tears down conn (besides
+	// the initial dial and shutdown); the dial itself runs without connMu so
+	// requests never wait on a handshake.
+	connMu      sync.Mutex
+	conn        *websocket.Conn
+	connectedAt time.Time
+	// epoch identifies the current connection (0 while disconnected);
+	// written under connMu, epochs counts connections ever installed.
+	epoch  atomic.Uint64
+	epochs uint64
 
 	// Write synchronization (gorilla/websocket requires synchronized writes)
 	writeMu sync.Mutex
 
-	// Pending request tracking: JSON-RPC ID -> response channel.
-	// Uses RWMutex because the hot path (handleMessage dispatching responses)
-	// only needs a read lock, while writes (register/deregister) are less frequent.
-	pendingMu sync.RWMutex
-	pending   map[string]chan *wsPendingResult
+	// Pending request tracking: wire id -> request. Whoever deletes an
+	// entry owns it, so duplicate responses are dropped.
+	pendingMu sync.Mutex
+	pending   map[string]*wsPending
 
-	// Signalled when the first connection is established (or app shutdown).
-	// readLoop blocks on this before entering its main loop.
-	connReady chan struct{}
-	connOnce  sync.Once
-
-	// Subscription notification callbacks: upstreamSubID -> handler
+	// Subscription notification callbacks: upstreamSubID -> handler, for
+	// the current connection only (ids are connection-scoped).
 	subHandlersMu sync.RWMutex
 	subHandlers   map[string]func(method string, params []byte)
 
-	// Disconnect/reconnect callbacks are keyed by caller-supplied IDs so
-	// subscribers can replace (on re-subscribe) and remove (on teardown)
-	// their hooks, preventing the callback slices from growing unbounded
-	// over long-lived connections with subscription churn.
+	// Disconnect/reconnect callbacks, keyed by caller-supplied id so a
+	// caller registering again replaces its callback.
 	onDisconnectMu  sync.RWMutex
 	onDisconnectCbs map[string]func()
 
 	onReconnectMu  sync.RWMutex
 	onReconnectCbs map[string]func()
 
-	// Error extractor for architecture-specific error normalization
 	errorExtractor common.JsonRpcErrorExtractor
 
-	connected atomic.Bool
+	// metricLabels are the labels the connectivity gauge was last set under.
+	metricMu     sync.Mutex
+	metricLabels []string
 
-	// wireIDCounter generates unique JSON-RPC ids on the WS wire so that
-	// concurrent SendRequest calls with the same caller-supplied id do not
-	// collide on the pending response map. The original caller id is
-	// restored on the response before returning. Seeded at wireIDOffset to
-	// stay in the same numeric range internal subscribers use when they
-	// build outbound requests (see indexer/adapters/wsupstream), so callers
-	// inspecting on-wire ids can tell internal traffic apart from
-	// small-int client traffic.
+	// wireIDCounter generates the ids sent on the wire, so concurrent
+	// requests with the same caller id don't collide in pending. The
+	// caller's id is restored on the response.
 	wireIDCounter atomic.Uint64
 }
 
-// wireIDOffset keeps rewritten wire ids in the "internal" id range so they
-// don't collide with the small incrementing ints typical of client traffic
-// or upstream-side state-poller requests.
-const wireIDOffset uint64 = 900_000_000
+// WsSubscription ties an eth_subscribe or eth_unsubscribe request to the
+// connection it is scoped to. The client only sends these methods when the
+// request context carries one (see WithWsSubscription): a subscription
+// created by a routed request would have no owner to receive or cancel it.
+type WsSubscription struct {
+	// Handler receives the subscription's notifications (eth_subscribe
+	// only). It is registered before the next frame is read, so nothing
+	// sent right after the subscribe response is missed.
+	Handler func(params []byte)
+	// ID and Epoch are set when an eth_subscribe succeeds. eth_unsubscribe
+	// must carry the Epoch of the subscription it cancels; it is not sent
+	// once that connection is gone, since ids are reused across connections.
+	ID    string
+	Epoch uint64
+}
+
+type wsSubscriptionCtxKey struct{}
+
+// WithWsSubscription returns ctx carrying sub for an eth_subscribe or
+// eth_unsubscribe sent through SendRequest.
+func WithWsSubscription(ctx context.Context, sub *WsSubscription) context.Context {
+	return context.WithValue(ctx, wsSubscriptionCtxKey{}, sub)
+}
+
+type wsPending struct {
+	ch chan *wsPendingResult
+	// sub is set for eth_subscribe. If the caller gives up, the entry is
+	// kept (abandoned, guarded by pendingMu) so a late success is
+	// unsubscribed instead of leaked.
+	sub       *WsSubscription
+	abandoned bool
+}
 
 type wsPendingResult struct {
-	resp *common.NormalizedResponse
-	err  error
+	message []byte
+	err     error
 }
 
-// wsMessage is a minimal struct for parsing incoming WS messages to determine if they are
-// responses (have "id") or notifications (have "method").
+// wsMessage holds the fields that tell a response (id) from a notification
+// (method).
 type wsMessage struct {
-	JSONRPC string                              `json:"jsonrpc"`
-	ID      interface{}                         `json:"id,omitempty"`
-	Method  string                              `json:"method,omitempty"`
-	Result  json.RawMessage                     `json:"result,omitempty"`
-	Error   *common.ErrJsonRpcExceptionExternal `json:"error,omitempty"`
-	Params  json.RawMessage                     `json:"params,omitempty"`
+	ID     interface{}     `json:"id,omitempty"`
+	Method string          `json:"method,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
-// wsNotificationParams is the structure of subscription notification params.
 type wsNotificationParams struct {
 	Subscription string          `json:"subscription"`
 	Result       json.RawMessage `json:"result"`
@@ -166,7 +163,7 @@ func NewWsJsonRpcClient(
 	extractor common.JsonRpcErrorExtractor,
 ) (ClientInterface, error) {
 	headers := http.Header{}
-	if jsonRpcCfg != nil && jsonRpcCfg.Headers != nil {
+	if jsonRpcCfg != nil {
 		for k, v := range jsonRpcCfg.Headers {
 			headers.Set(k, v)
 		}
@@ -177,30 +174,20 @@ func NewWsJsonRpcClient(
 		headers:         headers,
 		pingInterval:    wsPingInterval,
 		pongWait:        wsPongWait,
-		reconnectMin:    wsReconnectMin,
-		reconnectMax:    wsReconnectMax,
-		reconnectFactor: wsReconnectFactor,
 		projectId:       projectId,
 		upstream:        upstream,
 		appCtx:          appCtx,
 		logger:          logger,
-		pending:         make(map[string]chan *wsPendingResult),
-		connReady:       make(chan struct{}),
-		connWake:        make(chan struct{}, 1),
+		pending:         make(map[string]*wsPending),
 		subHandlers:     make(map[string]func(method string, params []byte)),
 		onDisconnectCbs: make(map[string]func()),
 		onReconnectCbs:  make(map[string]func()),
 		errorExtractor:  extractor,
 	}
-	client.wireIDCounter.Store(wireIDOffset)
 
 	if err := client.connect(); err != nil {
-		// Don't fail on initial connection — start reconnect loop in background.
-		// The upstream may not be available at startup but will be retried.
+		// readLoop keeps re-dialing in the background.
 		logger.Warn().Err(err).Str("url", parsedUrl.String()).Msg("initial websocket connection failed, will retry in background")
-		go client.reconnect()
-	} else {
-		client.connOnce.Do(func() { close(client.connReady) })
 	}
 
 	go client.readLoop()
@@ -217,9 +204,29 @@ func (c *WsJsonRpcClient) GetType() ClientType {
 	return ClientTypeWsJsonRpc
 }
 
-// IsConnected returns true if the upstream WebSocket connection is currently established.
 func (c *WsJsonRpcClient) IsConnected() bool {
-	return c.connected.Load()
+	return c.epoch.Load() != 0
+}
+
+// Epoch identifies the current connection, or is 0 while disconnected. It
+// changes on every reconnect.
+func (c *WsJsonRpcClient) Epoch() uint64 {
+	return c.epoch.Load()
+}
+
+// Done is closed once the client has shut down for good.
+func (c *WsJsonRpcClient) Done() <-chan struct{} { return c.appCtx.Done() }
+
+// Reconnect closes connection epoch, if still current; readLoop then tears
+// it down and re-dials, firing the disconnect and reconnect callbacks.
+func (c *WsJsonRpcClient) Reconnect(epoch uint64) {
+	c.connMu.Lock()
+	conn := c.conn
+	current := conn != nil && c.epoch.Load() == epoch
+	c.connMu.Unlock()
+	if current {
+		_ = conn.Close()
+	}
 }
 
 func (c *WsJsonRpcClient) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
@@ -243,20 +250,18 @@ func (c *WsJsonRpcClient) SendRequest(ctx context.Context, req *common.Normalize
 		)
 	}
 
-	// Use a unique outbound wire id so concurrent SendRequest calls with the
-	// same caller-supplied JSON-RPC id do not collide in c.pending. The
-	// original id is restored on the response below before returning.
 	wireID := c.wireIDCounter.Add(1)
 	idKey := strconv.FormatUint(wireID, 10)
 
 	// Serialize the JSON-RPC request with the rewritten wire id
 	jrReq.RLock()
 	originalID := jrReq.ID
+	method := jrReq.Method
 	requestBody, err := common.SonicCfg.Marshal(map[string]interface{}{
 		"jsonrpc": jrReq.JSONRPC,
 		"id":      wireID,
-		"method":  jrReq.Method,
-		"params":  jrReq.Params,
+		"method":  method,
+		"params":  common.WireParams(ctx, req, jrReq.Params),
 	})
 	jrReq.RUnlock()
 	if err != nil {
@@ -265,25 +270,56 @@ func (c *WsJsonRpcClient) SendRequest(ctx context.Context, req *common.Normalize
 			err,
 			c.upstream,
 			req.NetworkId(),
-			jrReq.Method,
+			method,
 			0, 0, 0, 0,
 		)
 	}
 
-	// Register a response channel
-	respCh := make(chan *wsPendingResult, 1)
-	c.pendingMu.Lock()
-	c.pending[idKey] = respCh
-	c.pendingMu.Unlock()
+	pending := &wsPending{ch: make(chan *wsPendingResult, 1)}
+	var unsubscribe *WsSubscription
+	if method == "eth_subscribe" || method == "eth_unsubscribe" {
+		sub, _ := ctx.Value(wsSubscriptionCtxKey{}).(*WsSubscription)
+		if sub == nil {
+			return nil, common.NewErrUpstreamRequestSkipped(
+				fmt.Errorf("%s is scoped to the upstream connection and only sent by its subscription owner", method),
+				c.upstream.Id(),
+			)
+		}
+		if method == "eth_subscribe" {
+			pending.sub = sub
+		} else {
+			unsubscribe = sub
+		}
+	}
 
-	defer func() {
+	// Register under connMu so the entry belongs to exactly this conn:
+	// teardown swaps conn and drains pending under the same lock.
+	c.connMu.Lock()
+	conn := c.conn
+	stale := unsubscribe != nil && unsubscribe.Epoch != c.epoch.Load()
+	if conn != nil && !stale {
+		c.pendingMu.Lock()
+		c.pending[idKey] = pending
+		c.pendingMu.Unlock()
+	}
+	c.connMu.Unlock()
+
+	if stale {
+		// The subscription died with its connection; its id may since have
+		// been reused on the new one.
+		return nil, common.NewErrUpstreamRequestSkipped(errors.New("subscription's connection is already closed"), c.upstream.Id())
+	}
+	if conn == nil {
+		// Re-dial in progress: fail fast so the request fails over.
+		err := common.NewErrEndpointTransportFailure(c.Url, errors.New("websocket connection not established"))
+		common.SetTraceSpanError(span, err)
+		return nil, err
+	}
+
+	if err := c.writeToConn(conn, websocket.TextMessage, requestBody); err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, idKey)
 		c.pendingMu.Unlock()
-	}()
-
-	// Write to the WebSocket connection
-	if err := c.writeMessage(websocket.TextMessage, requestBody); err != nil {
 		common.SetTraceSpanError(span, err)
 		return nil, common.NewErrEndpointTransportFailure(c.Url, err)
 	}
@@ -293,95 +329,119 @@ func (c *WsJsonRpcClient) SendRequest(ctx context.Context, req *common.Normalize
 		RawJSON("request", requestBody).
 		Msg("sent json rpc websocket request")
 
-	// Wait for response
+	// Wait for response. A caller that gives up after readLoop or teardown
+	// already claimed the entry takes the result anyway: it is on its way,
+	// and dropping it would strand a subscribe it created.
+	var result *wsPendingResult
 	select {
-	case result := <-respCh:
-		if result.err != nil {
-			common.SetTraceSpanError(span, result.err)
-			return nil, result.err
-		}
-		// Restore the caller's original JSON-RPC id on the response, since
-		// the on-wire id was rewritten to our unique counter above.
-		if result.resp != nil {
-			if jrr, perr := result.resp.JsonRpcResponse(ctx); perr == nil && jrr != nil {
-				_ = jrr.SetID(originalID)
-			}
-		}
-		return result.resp, nil
+	case result = <-pending.ch:
 	case <-ctx.Done():
-		err := ctx.Err()
-		if errors.Is(err, context.DeadlineExceeded) {
-			err = common.NewErrEndpointRequestTimeout(time.Since(startedAt), err)
-		} else if errors.Is(err, context.Canceled) {
-			err = common.NewErrEndpointRequestCanceled(err)
+		if c.abandonPending(idKey) {
+			err := ctx.Err()
+			if errors.Is(err, context.DeadlineExceeded) {
+				err = common.NewErrEndpointRequestTimeout(time.Since(startedAt), err)
+			} else if errors.Is(err, context.Canceled) {
+				err = common.NewErrEndpointRequestCanceled(err)
+			}
+			common.SetTraceSpanError(span, err)
+			return nil, err
 		}
-		common.SetTraceSpanError(span, err)
-		return nil, err
+		result = <-pending.ch
 	case <-c.appCtx.Done():
-		return nil, common.NewErrEndpointRequestCanceled(c.appCtx.Err())
+		if c.abandonPending(idKey) {
+			return nil, common.NewErrEndpointRequestCanceled(c.appCtx.Err())
+		}
+		result = <-pending.ch
 	}
+	if result.err != nil {
+		common.SetTraceSpanError(span, result.err)
+		return nil, result.err
+	}
+	nr := common.NewNormalizedResponse().WithRequest(req).WithBody(io.NopCloser(bytes.NewReader(result.message)))
+	// Restore the caller's original JSON-RPC id on the response.
+	jrr, perr := nr.JsonRpcResponse(ctx)
+	if perr == nil && jrr != nil {
+		_ = jrr.SetID(originalID)
+	}
+	if err := classifyJsonRpcError(&http.Response{StatusCode: http.StatusOK, Header: http.Header{}}, nr, jrr, perr, c.errorExtractor, c.upstream); err != nil {
+		common.SetTraceSpanError(span, err)
+		return nr, err
+	}
+	return nr, nil
 }
 
-// RegisterSubscriptionHandler registers a callback for a specific upstream subscription ID.
-// When the upstream sends a notification for this subscription, the handler is
-// called with the notification's own method name and the raw params bytes.
-//
-// The method is passed rather than assumed because the upstream chooses it and
-// it varies: eth writes `eth_subscription`, and reth's msgboard emitted
-// `msgboard_subscribe` up to v2.5.1-pulse-3 before pulse-4 renamed it to
-// `msgboard_subscription`. A caller that has to relay the notification onward
-// needs the string the upstream actually used; the indexer path ignores it.
-func (c *WsJsonRpcClient) RegisterSubscriptionHandler(upstreamSubID string, handler func(method string, params []byte)) {
+// abandonPending drops a request whose caller gave up. A subscribe stays
+// registered so readLoop can cancel it if the upstream still creates it.
+func (c *WsJsonRpcClient) abandonPending(idKey string) bool {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	p, ok := c.pending[idKey]
+	if ok {
+		if p.sub != nil {
+			p.abandoned = true
+		} else {
+			delete(c.pending, idKey)
+		}
+	}
+	return ok
+}
+
+// UnregisterSubscriptionHandler removes the handler of a subscription made
+// on connection epoch. A no-op once that connection is gone: its handlers
+// were dropped with it, and the id may be reused by the next connection.
+func (c *WsJsonRpcClient) UnregisterSubscriptionHandler(upstreamSubID string, epoch uint64) {
 	c.subHandlersMu.Lock()
-	c.subHandlers[upstreamSubID] = handler
+	if c.epoch.Load() == epoch {
+		delete(c.subHandlers, upstreamSubID)
+	}
 	c.subHandlersMu.Unlock()
 }
 
-// UnregisterSubscriptionHandler removes the callback for a specific upstream subscription ID.
-func (c *WsJsonRpcClient) UnregisterSubscriptionHandler(upstreamSubID string) {
-	c.subHandlersMu.Lock()
-	delete(c.subHandlers, upstreamSubID)
-	c.subHandlersMu.Unlock()
-}
-
-// SetOnDisconnect registers (or replaces) the callback keyed by id that fires
-// when the upstream WS connection drops. Use RemoveOnDisconnect(id) to
-// deregister on subscription teardown so long-lived connections don't
-// accumulate dead callbacks.
+// SetOnDisconnect sets the callback under id that runs when the connection
+// drops.
 func (c *WsJsonRpcClient) SetOnDisconnect(id string, callback func()) {
 	c.onDisconnectMu.Lock()
 	c.onDisconnectCbs[id] = callback
 	c.onDisconnectMu.Unlock()
 }
 
-// RemoveOnDisconnect deregisters a disconnect callback previously set with
-// SetOnDisconnect. A no-op if id is not registered.
+// RemoveOnDisconnect removes the disconnect callback set under id.
 func (c *WsJsonRpcClient) RemoveOnDisconnect(id string) {
 	c.onDisconnectMu.Lock()
 	delete(c.onDisconnectCbs, id)
 	c.onDisconnectMu.Unlock()
 }
 
-// SetOnReconnect registers (or replaces) the callback keyed by id that fires
-// after a successful reconnect.
+// RegisterSubscriptionHandler registers a callback for a subscription the
+// caller opened through an ordinary request (the passthrough path: any
+// `<ns>_subscribe` that is not eth's). eth_subscribe registers through
+// WithWsSubscription instead. The handler gets the notification's own method
+// name and the raw params bytes.
+//
+// The method is passed rather than assumed because the upstream chooses it and
+// it varies: eth writes `eth_subscription`, and reth's msgboard emitted
+// `msgboard_subscribe` up to v2.5.1-pulse-3 before pulse-4 renamed it to
+// `msgboard_subscription`. A caller that has to relay the notification onward
+// needs the string the upstream actually used.
+//
+// It returns the connection epoch the handler was registered on; pass it to
+// UnregisterSubscriptionHandler so a later connection's reuse of the id is
+// never removed by mistake.
+func (c *WsJsonRpcClient) RegisterSubscriptionHandler(upstreamSubID string, handler func(method string, params []byte)) uint64 {
+	c.subHandlersMu.Lock()
+	defer c.subHandlersMu.Unlock()
+	c.subHandlers[upstreamSubID] = handler
+	return c.epoch.Load()
+}
+
+// SetOnReconnect sets the callback under id that runs after a reconnect.
 func (c *WsJsonRpcClient) SetOnReconnect(id string, callback func()) {
 	c.onReconnectMu.Lock()
 	c.onReconnectCbs[id] = callback
 	c.onReconnectMu.Unlock()
 }
 
-// RemoveOnReconnect deregisters a reconnect callback previously set with
-// SetOnReconnect. A no-op if id is not registered.
-func (c *WsJsonRpcClient) RemoveOnReconnect(id string) {
-	c.onReconnectMu.Lock()
-	delete(c.onReconnectCbs, id)
-	c.onReconnectMu.Unlock()
-}
-
 func (c *WsJsonRpcClient) connect() error {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
-
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 	}
@@ -397,79 +457,106 @@ func (c *WsJsonRpcClient) connect() error {
 		return err
 	}
 
-	// Arm the liveness deadline: if neither a pong nor a data frame arrives
-	// within pongWait, ReadMessage fails and readLoop re-dials. The pong
-	// handler runs inside ReadMessage's frame processing, so extending the
-	// deadline here covers the ping/pong path; readLoop extends it again on
-	// every data frame.
+	// Every pong (here) and data frame (in readLoop) extends the liveness
+	// deadline.
 	_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(c.pongWait))
 	})
 
-	if c.conn != nil {
-		// Defensive: never leak a previous connection's FD/goroutine state.
-		_ = c.conn.Close()
+	c.connMu.Lock()
+	if c.appCtx.Err() != nil {
+		// shutdown already ran; don't install a connection behind it.
+		c.connMu.Unlock()
+		_ = conn.Close()
+		return c.appCtx.Err()
 	}
 	c.conn = conn
-	c.connected.Store(true)
-	c.setConnectedMetric(1)
+	c.connectedAt = time.Now()
+	c.epochs++
+	c.epoch.Store(c.epochs)
+	c.connMu.Unlock()
+	c.setConnectedMetric()
 
 	c.logger.Info().Str("url", c.Url.String()).Msg("websocket connection established")
 	return nil
 }
 
-// teardownConn marks the client disconnected and closes the given
-// connection, clearing c.conn only if it still points at that same
-// connection (a concurrent reconnect may already have replaced it).
-func (c *WsJsonRpcClient) teardownConn(old *websocket.Conn) {
+// teardownConn closes conn, marks the client disconnected, fails every
+// request pending on it and drops its subscription handlers.
+func (c *WsJsonRpcClient) teardownConn(conn *websocket.Conn, cause error) {
 	c.connMu.Lock()
-	if c.conn == old {
-		c.conn = nil
-	}
+	c.conn = nil
+	c.epoch.Store(0)
+	c.pendingMu.Lock()
+	pending := c.pending
+	c.pending = make(map[string]*wsPending)
+	c.pendingMu.Unlock()
 	c.connMu.Unlock()
-	if old != nil {
-		_ = old.Close()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	c.subHandlersMu.Lock()
+	clear(c.subHandlers)
+	c.subHandlersMu.Unlock()
+	c.setConnectedMetric()
+	for _, p := range pending {
+		p.ch <- &wsPendingResult{err: cause}
 	}
 }
 
-// setConnectedMetric publishes the upstream WS connectivity gauge so
-// operators can alert on a wedged/disconnected upstream socket instead of
-// discovering it from silent client subscriptions.
-func (c *WsJsonRpcClient) setConnectedMetric(v float64) {
-	if c.upstream == nil {
-		return
+// setConnectedMetric publishes the connectivity gauge. Labels are resolved
+// on every publish (pingLoop republishes each tick) because the upstream's
+// network label is assigned after the client is built; the series under
+// the previous labels is deleted when they change.
+func (c *WsJsonRpcClient) setConnectedMetric() {
+	labels := []string{c.projectId, c.upstream.VendorName(), c.upstream.NetworkLabel(), c.upstream.Id()}
+
+	c.metricMu.Lock()
+	defer c.metricMu.Unlock()
+	if c.metricLabels != nil && !slices.Equal(c.metricLabels, labels) {
+		telemetry.MetricUpstreamWebsocketConnected.DeleteLabelValues(c.metricLabels...)
 	}
-	telemetry.GaugeHandle(telemetry.MetricUpstreamWebsocketConnected,
-		c.projectId, c.upstream.VendorName(), c.upstream.NetworkLabel(), c.upstream.Id(),
-	).Set(v)
+	c.metricLabels = labels
+	v := 0.0
+	if c.IsConnected() {
+		v = 1
+	}
+	telemetry.MetricUpstreamWebsocketConnected.WithLabelValues(labels...).Set(v)
 }
 
+// readLoop owns the connection lifecycle: it reads the current connection
+// and, when there is none, re-dials with backoff. pingLoop only closes a
+// broken connection, so a nil conn always has a re-dial behind it.
 func (c *WsJsonRpcClient) readLoop() {
-	// Wait until the first connection is established (or the app shuts down)
-	select {
-	case <-c.connReady:
-	case <-c.appCtx.Done():
-		return
-	}
-
+	backoff := wsReconnectMin
 	for {
 		if c.appCtx.Err() != nil {
 			return
 		}
 
 		c.connMu.Lock()
-		conn := c.conn
+		conn, connectedAt, epoch := c.conn, c.connectedAt, c.epoch.Load()
 		c.connMu.Unlock()
 
 		if conn == nil {
-			// Connection is being re-established after a disconnect; block
-			// until reconnect() pulses connWake (or the app shuts down).
+			// Always wait before dialing so a peer that accepts and then
+			// immediately drops the connection can't drive a hot loop.
+			wait := backoff/2 + rand.N(backoff/2+1) // #nosec G404 -- reconnect jitter, not security-sensitive
+			backoff = min(time.Duration(float64(backoff)*wsReconnectFactor), wsReconnectMax)
+			c.logger.Info().Dur("backoff", wait).Msg("attempting websocket reconnection")
 			select {
-			case <-c.connWake:
+			case <-time.After(wait):
 			case <-c.appCtx.Done():
 				return
 			}
+			if err := c.connect(); err != nil {
+				c.logger.Warn().Err(err).Msg("websocket reconnection failed")
+				continue
+			}
+			c.logger.Info().Msg("websocket reconnected successfully")
+			c.fireCallbacks(&c.onReconnectMu, c.onReconnectCbs)
 			continue
 		}
 
@@ -483,39 +570,30 @@ func (c *WsJsonRpcClient) readLoop() {
 				c.logger.Info().Msg("websocket connection closed normally")
 			} else if errors.As(err, &netErr) && netErr.Timeout() {
 				c.logger.Warn().Err(err).Dur("pongWait", c.pongWait).
-					Msg("websocket peer silent beyond liveness deadline (no pong/data), tearing down connection and reconnecting")
+					Msg("websocket peer silent beyond liveness deadline, reconnecting")
 			} else {
 				c.logger.Warn().Err(err).Msg("websocket read error, will reconnect")
 			}
-			c.connected.Store(false)
-			c.setConnectedMetric(0)
-			c.teardownConn(conn)
-			c.drainPending(common.NewErrEndpointTransportFailure(c.Url, fmt.Errorf("websocket connection lost: %w", err)))
+			// Only a connection that outlived a liveness window resets the
+			// backoff; one dropped right after the handshake keeps growing it.
+			if time.Since(connectedAt) >= c.pongWait {
+				backoff = wsReconnectMin
+			}
+			c.teardownConn(conn, common.NewErrEndpointTransportFailure(c.Url, fmt.Errorf("websocket connection lost: %w", err)))
 			c.fireCallbacks(&c.onDisconnectMu, c.onDisconnectCbs)
-
-			c.reconnect()
 			continue
 		}
 
-		// Any inbound frame proves the peer is alive — push the liveness
-		// deadline forward.
 		_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
 
-		c.handleMessage(message)
+		c.handleMessage(message, epoch)
 	}
 }
 
 // fireCallbacks snapshots the callback map under rlock and invokes each
-// callback synchronously. Snapshotting lets callbacks register/deregister
-// other callbacks without deadlocking on the map's RWMutex.
-//
-// Synchronous invocation is load-bearing: readLoop fires disconnect
-// callbacks, then reconnects, then fires reconnect callbacks. Dispatching
-// them in goroutines (as this used to) let a slow-scheduled disconnect
-// callback run AFTER the reconnect callback — for the wsupstream adapter
-// that cancels the fresh resubscribe epoch and clears the new subscription,
-// silently wedging head delivery. Callbacks must therefore be fast and
-// must not block on the WS client's own request path.
+// callback synchronously, so disconnect callbacks always complete before
+// the reconnect callbacks of the next connection run. Callbacks must
+// therefore be fast and must not block on the WS client's request path.
 func (c *WsJsonRpcClient) fireCallbacks(mu *sync.RWMutex, cbs map[string]func()) {
 	mu.RLock()
 	snapshot := make([]func(), 0, len(cbs))
@@ -524,42 +602,76 @@ func (c *WsJsonRpcClient) fireCallbacks(mu *sync.RWMutex, cbs map[string]func())
 	}
 	mu.RUnlock()
 	for _, cb := range snapshot {
-		cb()
+		func() {
+			defer c.recoverPanic("ws-upstream-callback")
+			cb()
+		}()
 	}
 }
 
-func (c *WsJsonRpcClient) handleMessage(message []byte) {
+// recoverPanic keeps a panic in a callback or a message handler from
+// crashing the process. The read loop carries on with the next frame: the
+// panic comes from the handler, not the connection, so reconnecting would
+// only repeat it.
+func (c *WsJsonRpcClient) recoverPanic(scope string) {
+	if rec := recover(); rec != nil {
+		telemetry.MetricUnexpectedPanicTotal.WithLabelValues(
+			scope,
+			fmt.Sprintf("project:%s upstream:%s", c.projectId, c.upstream.Id()),
+			common.ErrorFingerprint(rec),
+		).Inc()
+		c.logger.Error().
+			Interface("panic", rec).
+			Str("stack", string(debug.Stack())).
+			Msg("unexpected panic in websocket upstream client")
+	}
+}
+
+// handleMessage dispatches one frame read from connection epoch.
+func (c *WsJsonRpcClient) handleMessage(message []byte, epoch uint64) {
+	defer c.recoverPanic("ws-upstream-message")
 	var msg wsMessage
 	if err := common.SonicCfg.Unmarshal(message, &msg); err != nil {
 		c.logger.Warn().Err(err).Str("raw", string(message)).Msg("failed to parse websocket message")
 		return
 	}
 
-	// Subscription notification: has "method" field (typically "eth_subscription")
 	if msg.Method != "" && msg.ID == nil {
-		c.handleNotification(msg.Method, msg.Params)
+		c.handleNotification(msg.Method, msg.Params, epoch)
 		return
 	}
 
-	// Response to a pending request: has "id" field
 	if msg.ID != nil {
 		idKey := normalizeIDKey(msg.ID)
 
-		c.pendingMu.RLock()
-		ch, ok := c.pending[idKey]
-		c.pendingMu.RUnlock()
+		c.pendingMu.Lock()
+		p, ok := c.pending[idKey]
+		delete(c.pending, idKey)
+		abandoned := ok && p.abandoned
+		c.pendingMu.Unlock()
 
 		if !ok {
 			c.logger.Debug().Str("id", idKey).Msg("received response for unknown request ID")
 			return
 		}
-
-		nr := common.NewNormalizedResponse().WithBody(io.NopCloser(strings.NewReader(string(message))))
-
-		if msg.Error != nil {
-			ch <- &wsPendingResult{resp: nr, err: c.classifyError(nr, msg.Error)}
-		} else {
-			ch <- &wsPendingResult{resp: nr}
+		var subID string
+		if p.sub != nil && common.SonicCfg.Unmarshal(msg.Result, &subID) == nil && subID != "" {
+			if abandoned {
+				go c.UnsubscribeOrphan(subID, epoch)
+				return
+			}
+			// The id outlives the frame it was decoded from.
+			subID = strings.Clone(subID)
+			// Register before the next frame is read so no notification
+			// is dropped as belonging to an unknown subscription.
+			handler := p.sub.Handler
+			c.subHandlersMu.Lock()
+			c.subHandlers[subID] = func(_ string, params []byte) { handler(params) }
+			c.subHandlersMu.Unlock()
+			p.sub.ID, p.sub.Epoch = subID, epoch
+		}
+		if !abandoned {
+			p.ch <- &wsPendingResult{message: message}
 		}
 		return
 	}
@@ -567,62 +679,22 @@ func (c *WsJsonRpcClient) handleMessage(message []byte) {
 	c.logger.Debug().Str("raw", string(message)).Msg("received unhandled websocket message")
 }
 
-// classifyError runs the architecture's error extractor over a JSON-RPC error
-// that arrived on the socket — the same extractor the HTTP client runs (see
-// `c.errorExtractor.Extract` in http_json_rpc_client.go).
-//
-// This client held an errorExtractor and never called it. Every error reply
-// therefore reached the caller as a bare *ErrJsonRpcExceptionExternal, which
-// carries a code but no classification, and everything downstream reads an
-// unclassified error as an unknown server fault. A node's -32602 was retried
-// against the same upstream, then against the next one, and finally reported
-// to the client as -32603 Internal error. The code that would have identified
-// it as the caller's own mistake was sitting in the frame the whole time.
-//
-// The extractor's first argument is the HTTP response. A WebSocket frame has
-// none, and every branch that reads it tests an HTTP-level signal — 401, 402,
-// 403, 405, 415, 429 — that a delivered frame genuinely cannot carry. A 200
-// with no headers states exactly that: the transport delivered, and the
-// JSON-RPC layer returned an error. Passing nil is not an option; the
-// extractor dereferences r.StatusCode unconditionally.
-//
-// On anything unexpected the original error is returned unchanged, so a
-// classification failure can never lose the upstream's answer.
-func (c *WsJsonRpcClient) classifyError(
-	nr *common.NormalizedResponse,
-	extErr *common.ErrJsonRpcExceptionExternal,
-) error {
-	if c.errorExtractor == nil {
-		return extErr
-	}
-	jr, err := nr.JsonRpcResponse()
-	if err != nil || jr == nil || jr.Error == nil {
-		return extErr
-	}
-	delivered := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
-	if e := c.errorExtractor.Extract(delivered, nr, jr, c.upstream); e != nil {
-		return e
-	}
-	return extErr
-}
-
-func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
+func (c *WsJsonRpcClient) handleNotification(method string, params []byte, epoch uint64) {
 	// Route on the subscription ID, never on the method name.
 	//
-	// This used to drop every notification not named exactly
-	// "eth_subscription", which silently discarded every non-eth namespace —
-	// a `msgboard_subscribe` returned a live subscription id and then
-	// delivered nothing for the life of the connection. The name is the
-	// upstream's choice and it is not stable even within one namespace: reth
-	// emitted `msgboard_subscribe` up to v2.5.1-pulse-3 and
-	// `msgboard_subscription` from pulse-4 on.
+	// Dropping every notification not named exactly "eth_subscription"
+	// silently discarded every non-eth namespace — a `msgboard_subscribe`
+	// returned a live subscription id and then delivered nothing for the life
+	// of the connection. The name is the upstream's choice and it is not
+	// stable even within one namespace: reth emitted `msgboard_subscribe` up
+	// to v2.5.1-pulse-3 and `msgboard_subscription` from pulse-4 on.
 	//
 	// The id is what identifies a subscription. It is a value the upstream
 	// minted for us, and subHandlers is keyed purely by it, so a hit is
 	// already proof the frame belongs to a subscription this client opened.
 	var notifParams wsNotificationParams
 	if err := common.SonicCfg.Unmarshal(params, &notifParams); err != nil {
-		c.logger.Warn().Err(err).Msg("failed to parse subscription notification params")
+		c.logger.Warn().Err(err).Str("method", method).Msg("failed to parse subscription notification params")
 		return
 	}
 
@@ -635,76 +707,31 @@ func (c *WsJsonRpcClient) handleNotification(method string, params []byte) {
 			Str("method", method).
 			Str("subscriptionId", notifParams.Subscription).
 			Msg("received notification for unknown subscription")
+		// Nothing owns it: cancel it, unless a subscribe in flight may be
+		// about to claim it. Each later notification retries the cancel.
+		// Only eth's: the cancel is an eth_unsubscribe, which means nothing
+		// to another namespace, and a passthrough subscription registers its
+		// handler only after its subscribe response is returned.
+		if method == "eth_subscription" && notifParams.Subscription != "" && !c.subscribeInFlight() {
+			go c.UnsubscribeOrphan(strings.Clone(notifParams.Subscription), epoch)
+		}
 		return
 	}
 
 	handler(method, params)
 }
 
-func (c *WsJsonRpcClient) reconnect() {
-	backoff := c.reconnectMin
-	for {
-		if c.appCtx.Err() != nil {
-			return
-		}
-
-		c.logger.Info().Dur("backoff", backoff).Msg("attempting websocket reconnection")
-
-		if err := c.connect(); err != nil {
-			c.logger.Warn().Err(err).Dur("backoff", backoff).Msg("websocket reconnection failed")
-			select {
-			case <-time.After(backoff):
-			case <-c.appCtx.Done():
-				return
-			}
-			backoff = time.Duration(float64(backoff) * c.reconnectFactor)
-			if backoff > c.reconnectMax {
-				backoff = c.reconnectMax
-			}
-			continue
-		}
-
-		c.logger.Info().Msg("websocket reconnected successfully")
-
-		// Signal readLoop if this is the first successful connection.
-		c.connOnce.Do(func() { close(c.connReady) })
-
-		// Wake readLoop if it's parked waiting for c.conn to be non-nil.
-		// Buffered channel with cap 1 means we coalesce concurrent pulses.
-		select {
-		case c.connWake <- struct{}{}:
-		default:
-		}
-
-		c.fireCallbacks(&c.onReconnectMu, c.onReconnectCbs)
-
-		return
-	}
-}
-
-func (c *WsJsonRpcClient) drainPending(err error) {
+// subscribeInFlight reports whether an eth_subscribe still has a caller
+// waiting for its response.
+func (c *WsJsonRpcClient) subscribeInFlight() bool {
 	c.pendingMu.Lock()
-	pending := c.pending
-	c.pending = make(map[string]chan *wsPendingResult)
-	c.pendingMu.Unlock()
-
-	for _, ch := range pending {
-		select {
-		case ch <- &wsPendingResult{err: err}:
-		default:
+	defer c.pendingMu.Unlock()
+	for _, p := range c.pending {
+		if p.sub != nil && !p.abandoned {
+			return true
 		}
 	}
-}
-
-func (c *WsJsonRpcClient) writeMessage(messageType int, data []byte) error {
-	c.connMu.Lock()
-	conn := c.conn
-	c.connMu.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("websocket connection not established")
-	}
-	return c.writeToConn(conn, messageType, data)
+	return false
 }
 
 // writeToConn writes to an explicit connection so callers that need to act
@@ -720,6 +747,27 @@ func (c *WsJsonRpcClient) writeToConn(conn *websocket.Conn, messageType int, dat
 	return conn.WriteMessage(messageType, data)
 }
 
+// UnsubscribeOrphan cancels a subscription of connection epoch that nobody
+// owns any more. Fire-and-forget: the response is dropped as unknown.
+func (c *WsJsonRpcClient) UnsubscribeOrphan(subID string, epoch uint64) {
+	body, err := common.SonicCfg.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      c.wireIDCounter.Add(1),
+		"method":  "eth_unsubscribe",
+		"params":  []string{subID},
+	})
+	if err != nil {
+		return
+	}
+	c.connMu.Lock()
+	conn := c.conn
+	live := c.epoch.Load() == epoch
+	c.connMu.Unlock()
+	if conn != nil && live {
+		_ = c.writeToConn(conn, websocket.TextMessage, body)
+	}
+}
+
 func (c *WsJsonRpcClient) pingLoop() {
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
@@ -727,9 +775,7 @@ func (c *WsJsonRpcClient) pingLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if !c.connected.Load() {
-				continue
-			}
+			c.setConnectedMetric()
 			c.connMu.Lock()
 			conn := c.conn
 			c.connMu.Unlock()
@@ -737,16 +783,11 @@ func (c *WsJsonRpcClient) pingLoop() {
 				continue
 			}
 			if err := c.writeToConn(conn, websocket.PingMessage, nil); err != nil {
-				// A failed ping write means this connection is unusable.
-				// Close it so readLoop's blocked ReadMessage fails and the
-				// teardown+reconnect path (owned by readLoop) takes over —
-				// logging alone here previously left the client wedged on a
-				// connection that could never deliver another frame.
-				// teardownConn only clears c.conn if it still points at this
-				// same conn, so a concurrent reconnect's fresh connection is
-				// never the one closed here.
+				// Only close it: readLoop's ReadMessage then fails and it
+				// tears down and re-dials. Clearing c.conn here instead would
+				// leave nobody to re-dial if readLoop was busy in a handler.
 				c.logger.Warn().Err(err).Msg("websocket ping write failed, closing connection to force reconnect")
-				c.teardownConn(conn)
+				_ = conn.Close()
 			}
 		case <-c.appCtx.Done():
 			return
@@ -754,14 +795,12 @@ func (c *WsJsonRpcClient) pingLoop() {
 	}
 }
 
-// normalizeIDKey converts a JSON-RPC ID to a stable string key.
-// JSON unmarshalling turns integer IDs into float64, which can produce
-// scientific notation with fmt.Sprintf (e.g., "1.51e+09" vs "1510000000").
-// This function normalizes to avoid mismatches.
+// normalizeIDKey converts a decoded JSON-RPC id to the key used in pending.
+// Numeric ids decode as float64, which %v would print in scientific
+// notation.
 func normalizeIDKey(id interface{}) string {
 	switch v := id.(type) {
 	case float64:
-		// Format without scientific notation
 		return fmt.Sprintf("%.0f", v)
 	case int:
 		return fmt.Sprintf("%d", v)
@@ -775,23 +814,16 @@ func normalizeIDKey(id interface{}) string {
 }
 
 func (c *WsJsonRpcClient) shutdown() {
-	c.connected.Store(false)
-	c.setConnectedMetric(0)
-
 	c.connMu.Lock()
 	conn := c.conn
-	c.conn = nil
 	c.connMu.Unlock()
 
 	if conn != nil {
-		// Send close frame and close
 		_ = conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			time.Now().Add(wsWriteWait),
 		)
-		_ = conn.Close()
 	}
-
-	c.drainPending(common.NewErrEndpointRequestCanceled(fmt.Errorf("websocket client shutting down")))
+	c.teardownConn(conn, common.NewErrEndpointRequestCanceled(fmt.Errorf("websocket client shutting down")))
 }

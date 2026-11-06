@@ -21,9 +21,9 @@ import (
 type grpcStreamStarter struct {
 	name string
 	// wantProcessorCode is the status code a processor error reaches the client
-	// with. The QueryService handlers return the processor's error unchanged, so
-	// gRPC labels it Unknown; StreamBlocks runs it through the status mapper
-	// first, so it arrives as Internal.
+	// with. Since upstream #1212 every streaming handler maps it through
+	// grpcStatusOf (QueryService via queryGrpcError), so all six agree on
+	// Internal. That closes fork bug-log 33, where QueryService said Unknown.
 	wantProcessorCode codes.Code
 	start             func(ctx context.Context, h *grpcHarness) (func() error, error)
 }
@@ -31,35 +31,35 @@ type grpcStreamStarter struct {
 // grpcQueryStarters covers every method of the BDS QueryService.
 func grpcQueryStarters(from, to string) []grpcStreamStarter {
 	return []grpcStreamStarter{
-		{"QueryBlocks", codes.Unknown, func(ctx context.Context, h *grpcHarness) (func() error, error) {
+		{"QueryBlocks", codes.Internal, func(ctx context.Context, h *grpcHarness) (func() error, error) {
 			s, err := h.query.QueryBlocks(ctx, &evm.QueryBlocksRequest{FromBlock: &from, ToBlock: &to})
 			if err != nil {
 				return nil, err
 			}
 			return func() error { _, e := s.Recv(); return e }, nil
 		}},
-		{"QueryTransactions", codes.Unknown, func(ctx context.Context, h *grpcHarness) (func() error, error) {
+		{"QueryTransactions", codes.Internal, func(ctx context.Context, h *grpcHarness) (func() error, error) {
 			s, err := h.query.QueryTransactions(ctx, &evm.QueryTransactionsRequest{FromBlock: &from, ToBlock: &to})
 			if err != nil {
 				return nil, err
 			}
 			return func() error { _, e := s.Recv(); return e }, nil
 		}},
-		{"QueryLogs", codes.Unknown, func(ctx context.Context, h *grpcHarness) (func() error, error) {
+		{"QueryLogs", codes.Internal, func(ctx context.Context, h *grpcHarness) (func() error, error) {
 			s, err := h.query.QueryLogs(ctx, &evm.QueryLogsRequest{FromBlock: &from, ToBlock: &to})
 			if err != nil {
 				return nil, err
 			}
 			return func() error { _, e := s.Recv(); return e }, nil
 		}},
-		{"QueryTraces", codes.Unknown, func(ctx context.Context, h *grpcHarness) (func() error, error) {
+		{"QueryTraces", codes.Internal, func(ctx context.Context, h *grpcHarness) (func() error, error) {
 			s, err := h.query.QueryTraces(ctx, &evm.QueryTracesRequest{FromBlock: &from, ToBlock: &to})
 			if err != nil {
 				return nil, err
 			}
 			return func() error { _, e := s.Recv(); return e }, nil
 		}},
-		{"QueryTransfers", codes.Unknown, func(ctx context.Context, h *grpcHarness) (func() error, error) {
+		{"QueryTransfers", codes.Internal, func(ctx context.Context, h *grpcHarness) (func() error, error) {
 			s, err := h.query.QueryTransfers(ctx, &evm.QueryTransfersRequest{FromBlock: &from, ToBlock: &to})
 			if err != nil {
 				return nil, err

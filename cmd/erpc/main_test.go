@@ -142,7 +142,7 @@ func TestMain_Start_MissingConfigFile(t *testing.T) {
 	// Add info log
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	// Capture logs
-	var logBuf strings.Builder
+	var logBuf lockedBuilder
 	log.Logger = zerolog.New(&logBuf)
 
 	// Replace exit channel with a buffered channel
@@ -184,7 +184,7 @@ func TestMain_Start_InvalidConfig(t *testing.T) {
 	// Add info log
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	// Capture logs
-	var logBuf strings.Builder
+	var logBuf lockedBuilder
 	log.Logger = zerolog.New(&logBuf)
 
 	// Replace exit channel with a buffered channel
@@ -313,7 +313,7 @@ func TestMain_Start_WithInvalidEndpoint(t *testing.T) {
 	// Add info log
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	// Capture logs
-	var logBuf strings.Builder
+	var logBuf lockedBuilder
 	log.Logger = zerolog.New(&logBuf)
 
 	// Replace exit channel with a buffered channel
@@ -396,4 +396,24 @@ server:
 metrics:
   enabled: false
 `, port)
+}
+
+// lockedBuilder is a goroutine-safe log sink. eRPC logs from background
+// goroutines (registry bootstrap) while main logs too, so a bare
+// strings.Builder races under -race.
+type lockedBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuilder) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuilder) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

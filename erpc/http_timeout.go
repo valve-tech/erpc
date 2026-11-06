@@ -14,36 +14,36 @@ import (
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
-	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 )
 
-func TimeoutHandler(logger *zerolog.Logger, h http.Handler, dt time.Duration) http.Handler {
+// wsEnabled passes WebSocket upgrades through untimed; when false they are
+// ordinary requests.
+func TimeoutHandler(logger *zerolog.Logger, h http.Handler, dt time.Duration, wsEnabled bool) http.Handler {
 	return &timeoutHandler{
-		logger:  logger,
-		handler: h,
-		dt:      dt,
+		logger:    logger,
+		handler:   h,
+		dt:        dt,
+		wsEnabled: wsEnabled,
 	}
 }
 
 var ErrHandlerTimeout = errors.New("http request handling timeout")
 
 type timeoutHandler struct {
-	logger  *zerolog.Logger
-	handler http.Handler
-	dt      time.Duration
+	logger    *zerolog.Logger
+	handler   http.Handler
+	dt        time.Duration
+	wsEnabled bool
 }
 
 func (h *timeoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// WebSocket upgrades need direct access to the underlying connection via Hijack().
-	// The timeout writer buffers responses and doesn't implement http.Hijacker,
-	// so we bypass the timeout handler entirely for WS connections.
-	// WS connections are long-lived and use their own ping/pong for liveness.
-	//
-	// gorilla's own predicate, matching parseUrlPath and the dispatcher: those
-	// three have to agree on what an upgrade is, or one of them wraps a writer
-	// that the upgrade then cannot hijack.
-	if websocket.IsWebSocketUpgrade(r) {
+	// The timeout writer cannot be hijacked, which a WebSocket upgrade
+	// needs. Each request over the connection gets the same deadline in
+	// ws_server.go instead. The same predicate gates parseUrlPath, gzip and
+	// the dispatcher: all of them have to agree on what an upgrade is, or one
+	// wraps a writer that the upgrade then cannot hijack.
+	if isWebSocketUpgradeRequest(r, h.wsEnabled) {
 		h.handler.ServeHTTP(w, r)
 		return
 	}

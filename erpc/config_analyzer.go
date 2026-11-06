@@ -257,6 +257,15 @@ func GenerateValidationReport(ctx context.Context, cfg *common.Config) *Validati
 				}
 			}
 		}
+
+		// Warnings: failover enabled but no fallback-tier upstream to escalate to.
+		failoverEnabled := p.NetworkDefaults != nil && p.NetworkDefaults.Failover.Enabled()
+		for _, nw := range p.Networks {
+			failoverEnabled = failoverEnabled || nw.Failover.Enabled()
+		}
+		if failoverEnabled && !projectHasFallbackTier(p) {
+			report.Warnings = append(report.Warnings, fmt.Sprintf("project=%s failover.onDefaultsExhausted is enabled but no upstream is tagged '%s', so requests never escalate", p.Id, common.TagTierFallback))
+		}
 	}
 
 	// Admin auth budgets
@@ -280,10 +289,8 @@ func GenerateValidationReport(ctx context.Context, cfg *common.Config) *Validati
 	// Upstream runtime checks (chain id + block hash comparisons). Use a silent logger and short timeout per upstream
 	silent := zerolog.New(io.Discard)
 
-	// Scope all transient upstreams created below to a validation-only ctx.
-	// Their client goroutines (HTTP shutdown waiter, WS read/ping loops)
-	// listen on this ctx — without scoping, they outlive validation and
-	// accumulate forever.
+	// Transient upstreams below spawn client goroutines bound to their ctx;
+	// cancel it on return so they don't outlive validation.
 	valCtx, cancelVal := context.WithCancel(ctx)
 	defer cancelVal()
 
@@ -972,6 +979,24 @@ func calculateConfigStats(cfg *common.Config) ConfigStats {
 	return stats
 }
 
+// projectHasFallbackTier reports whether any upstream the project defines,
+// directly or via provider overrides, is tagged as fallback tier.
+func projectHasFallbackTier(p *common.ProjectConfig) bool {
+	for _, u := range p.Upstreams {
+		if u.HasTag(common.TagTierFallback) {
+			return true
+		}
+	}
+	for _, pr := range p.Providers {
+		for _, o := range pr.Overrides {
+			if o != nil && o.HasTag(common.TagTierFallback) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func printConfigStats(logger zerolog.Logger, stats ConfigStats) {
 	logger.Info().Msg("Configuration Statistics:")
 
@@ -1008,11 +1033,8 @@ func printConfigStats(logger zerolog.Logger, stats ConfigStats) {
 }
 
 func validateUpstreamEndpoints(ctx context.Context, cfg *common.Config, logger zerolog.Logger) error {
-	// The Upstreams we construct below spawn long-lived client goroutines
-	// (HTTP shutdown waiter, WS read/ping loops) that listen on the appCtx
-	// passed into NewUpstream. If we hand them the caller's ctx, they
-	// outlive validation and accumulate forever. Scope them to a
-	// validation-only ctx that we cancel on return.
+	// Transient upstreams below spawn client goroutines bound to their ctx;
+	// cancel it on return so they don't outlive validation.
 	valCtx, cancelVal := context.WithCancel(ctx)
 	defer cancelVal()
 	err := telemetry.SetHistogramBuckets(

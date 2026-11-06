@@ -143,7 +143,10 @@ func TestRetryPolicyConfig_SetDefaults_ShippedFallbacks(t *testing.T) {
 	require.Equal(t, Duration(0), r.Delay)
 	require.Equal(t, Duration(0), r.Jitter)
 	require.Equal(t, DefaultEmptyResultMaxAttempts, r.EmptyResultMaxAttempts)
-	require.Equal(t, DefaultEmptyResultAccept(), r.EmptyResultAccept)
+	// Upstream leaves an unset list nil; every reader resolves nil to the
+	// shipped default through ResolveEmptyResultAccept.
+	require.Nil(t, r.EmptyResultAccept)
+	require.Equal(t, DefaultEmptyResultAccept(), ResolveEmptyResultAccept(r))
 	require.Equal(t, Duration(0), r.EmptyResultDelay,
 		"there is deliberately no fixed empty-result delay fallback")
 }

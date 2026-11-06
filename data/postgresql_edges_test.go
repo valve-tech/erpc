@@ -9,7 +9,7 @@ import (
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +64,7 @@ func TestPostgreSQLConnector_MigratesALegacyTextValueColumn(t *testing.T) {
 	uri := startPostgresRaw(t, ctx)
 	const table = "legacy_text_table"
 
-	admin, err := pgxpool.Connect(ctx, uri)
+	admin, err := pgxpool.New(ctx, uri)
 	require.NoError(t, err)
 	defer admin.Close()
 

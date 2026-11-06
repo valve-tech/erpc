@@ -397,8 +397,7 @@ func TestGrpcMessageSize_RefusesToSendAResponseOverTheSendLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGrpcMapToGRPCStatus_MapsEachErrorClassToItsCode(t *testing.T) {
-	gs := &GrpcServer{}
-	assert.NoError(t, gs.mapToGRPCStatus(nil))
+	assert.NoError(t, grpcStatusOf(nil))
 
 	cases := []struct {
 		name string
@@ -416,7 +415,7 @@ func TestGrpcMapToGRPCStatus_MapsEachErrorClassToItsCode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mapped := gs.mapToGRPCStatus(tc.err)
+			mapped := grpcStatusOf(tc.err)
 			require.Error(t, mapped)
 			st := status.Convert(mapped)
 			assert.Equal(t, tc.want, st.Code())
@@ -430,12 +429,11 @@ func TestGrpcMapToGRPCStatus_MapsEachErrorClassToItsCode(t *testing.T) {
 // request path produces: the endpoint error is nested inside eRPC's own error
 // types by the time a handler sees it, and the code must still be found.
 func TestGrpcMapToGRPCStatus_LooksThroughEuRpcsOwnWrappers(t *testing.T) {
-	gs := &GrpcServer{}
 	nested := common.NewErrUpstreamRequest(
 		common.NewErrEndpointUnsupported(errors.New("no such method")),
 		nil, "evm:123", "eth_getLogs", time.Second, 1, 0, 0,
 	)
-	assert.Equal(t, codes.Unimplemented, status.Code(gs.mapToGRPCStatus(nested)))
+	assert.Equal(t, codes.Unimplemented, status.Code(grpcStatusOf(nested)))
 }
 
 // ---------------------------------------------------------------------------

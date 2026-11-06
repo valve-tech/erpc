@@ -46,8 +46,8 @@ func newMaintainPool(t *testing.T, addr string, poolSize int, expectedChainId ui
 	lg := zerolog.New(io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr,
-		insecure.NewCredentials(), identityServiceConfig, poolSize, expectedChainId)
+	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr, "",
+		insecure.NewCredentials(), identityServiceConfig, poolSize, expectedChainId, nil)
 	require.NoError(t, err)
 	t.Cleanup(p.Shutdown)
 	return p
@@ -185,8 +185,8 @@ func TestPoolShutdown_JoinsTheMaintainer(t *testing.T) {
 	// Built unarmed so construction does not probe, then armed so the FIRST
 	// thing the maintainer does is a verification probe — which the server
 	// holds open until this test releases it.
-	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr,
-		insecure.NewCredentials(), identityServiceConfig, 1, 0)
+	p, err := newBdsPool(ctx, &lg, "prj1", "bds1", "dns:///"+addr, "",
+		insecure.NewCredentials(), identityServiceConfig, 1, 0, nil)
 	require.NoError(t, err)
 	p.expectedChainId.Store(137)
 

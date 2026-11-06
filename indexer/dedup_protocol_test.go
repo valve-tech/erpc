@@ -22,7 +22,7 @@ func newLogsIndexer(t *testing.T, opts Options) (*Indexer, *fakeEgress, string) 
 	t.Helper()
 	logger := zerolog.New(zerolog.NewTestWriter(t)).Level(zerolog.WarnLevel)
 	idx := New(&logger, opts)
-	idx.RegisterNetwork(newFakeNetwork("evm:1", 0))
+	idx.RegisterNetwork(newFakeNetwork("evm:1"))
 	for _, name := range []string{"ws:a", "ws:b"} {
 		if err := idx.AddIngress(context.Background(), "evm:1", &fakeIngress{name: name}); err != nil {
 			t.Fatal(err)
@@ -93,23 +93,26 @@ func TestDedupFullProtocolBlockFromTwoUpstreams(t *testing.T) {
 func TestDedupLateBeyondWindowIsCounted(t *testing.T) {
 	w := NewProtocolDedupWindow(1, func() int { return 3 })
 	for i := 0; i < 3; i++ {
-		if fresh, late := w.MarkAt(fmt.Sprintf("b10:%d", i), 10); !fresh || late {
+		if fresh, _, late := w.MarkAt(fmt.Sprintf("b10:%d", i), false, 10); !fresh || late {
 			t.Fatalf("block 10 key %d: fresh=%v late=%v", i, fresh, late)
 		}
 	}
 	for i := 0; i < 3; i++ {
-		w.MarkAt(fmt.Sprintf("b11:%d", i), 11) // evicts all of block 10
+		w.MarkAt(fmt.Sprintf("b11:%d", i), false, 11) // evicts all of block 10
 	}
-	if fresh, late := w.MarkAt("b10:0", 10); !fresh || !late {
+	if fresh, _, late := w.MarkAt("b10:0", false, 10); !fresh || !late {
 		t.Fatalf("re-sent block-10 key: fresh=%v late=%v, want true/true", fresh, late)
 	}
-	if fresh, late := w.MarkAt("b12:0", 12); !fresh || late {
+	if fresh, _, late := w.MarkAt("b12:0", false, 12); !fresh || late {
 		t.Fatalf("new block: fresh=%v late=%v, want true/false", fresh, late)
 	}
-	if fresh, _ := w.MarkAt("b12:0", 12); fresh {
+	if fresh, _, _ := w.MarkAt("b12:0", false, 12); fresh {
 		t.Fatal("a key still in the window must dedupe")
 	}
-	if !w.Mark("nokey-block") || w.Mark("nokey-block") {
+	if d, _ := w.Mark("nokey-block", false); !d {
+		t.Fatal("Mark without a block must deliver a new key")
+	}
+	if d, _ := w.Mark("nokey-block", false); d {
 		t.Fatal("Mark without a block must still dedupe")
 	}
 }
@@ -141,7 +144,7 @@ func TestIngestReportsLateDedup(t *testing.T) {
 func TestDedupAgesOutOldBlocks(t *testing.T) {
 	w := NewProtocolDedupWindow(1, func() int { return 1_000_000 })
 	for b := int64(1); b <= 100; b++ {
-		w.MarkAt(fmt.Sprintf("b%d", b), b)
+		w.MarkAt(fmt.Sprintf("b%d", b), false, b)
 	}
 	w.mu.Lock()
 	n := len(w.order)
@@ -149,10 +152,10 @@ func TestDedupAgesOutOldBlocks(t *testing.T) {
 	if n != dedupAgeBlocks+1 {
 		t.Fatalf("window holds %d keys, want %d (blocks 36..100)", n, dedupAgeBlocks+1)
 	}
-	if fresh, late := w.MarkAt("b10", 10); !fresh || !late {
+	if fresh, _, late := w.MarkAt("b10", false, 10); !fresh || !late {
 		t.Fatalf("aged-out block: fresh=%v late=%v, want true/true", fresh, late)
 	}
-	if fresh, _ := w.MarkAt("b50", 50); fresh {
+	if fresh, _, _ := w.MarkAt("b50", false, 50); fresh {
 		t.Fatal("block within the age must still dedupe")
 	}
 }
@@ -169,7 +172,7 @@ func TestPendingTxWindowKeepsConfiguredSize(t *testing.T) {
 	nsRaw, _ := idx.networks.Load("evm:1")
 	ns := nsRaw.(*networkState)
 	ns.filterMu.RLock()
-	w := ns.filterDedup[h]
+	w := ns.filters[h].dedup
 	ns.filterMu.RUnlock()
 	if w.sizeFn != nil || w.capacity() != DefaultDedupWindowSize {
 		t.Fatalf("pending-tx window capacity = %d, sizeFn set = %v", w.capacity(), w.sizeFn != nil)

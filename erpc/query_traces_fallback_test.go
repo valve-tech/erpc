@@ -87,6 +87,9 @@ func TestGrpcQueryTraces_FallsBackToTheGethTracerWhenTraceBlockIsMissing(t *test
 	h.node.replyBlockByNumber()
 	h.node.replyError("trace_block", 200, -32601, traceMethodMissing)
 	txHash := fmt.Sprintf("0x%064x", 0xbeef)
+	// Upstream #1212's shim checks each traced tx against the block's own
+	// transaction list, so the block must carry the tx it traces.
+	h.node.replyBlockTransactions(0x10, fmt.Sprintf("%q", txHash))
 	h.node.reply("debug_traceBlockByNumber", gethCallTracerBlock(txHash))
 
 	traces := startTraceQuery(t, h)
@@ -110,6 +113,8 @@ func TestGrpcQueryTraces_AcceptsATracerThatAnswersWithOneObject(t *testing.T) {
 	h.node.replyBlockByNumber()
 	h.node.replyError("trace_block", 200, -32601, traceMethodMissing)
 	txHash := fmt.Sprintf("0x%064x", 0xfeed)
+	// The shim checks every traced tx against the block's own list (#1212).
+	h.node.replyBlockTransactions(0x10, fmt.Sprintf("%q", txHash))
 	h.node.reply("debug_traceBlockByNumber", fmt.Sprintf(`{
 		"type": "CALL",
 		"from": "0x1111111111111111111111111111111111111111",

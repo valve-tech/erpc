@@ -3,7 +3,6 @@ package nullingress_test
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"testing"
 	"time"
 
@@ -44,12 +43,11 @@ func (s *captureSink) next(t *testing.T) indexer.StreamEvent {
 
 func headEvent(n int64, hash string) indexer.StreamEvent {
 	return indexer.StreamEvent{
-		Kind:       indexer.KindNewHead,
-		NetworkId:  "evm:1",
-		SourceId:   "null:test",
-		Block:      indexer.BlockRef{Number: n, Hash: hash},
-		Payload:    json.RawMessage(`{"number":"0x1"}`),
-		ObservedAt: time.Unix(0, 0),
+		Kind:      indexer.KindNewHead,
+		NetworkId: "evm:1",
+		SourceId:  "null:test",
+		Block:     indexer.BlockRef{Number: n, Hash: hash},
+		Payload:   json.RawMessage(`{"number":"0x1"}`),
 	}
 }
 
@@ -71,7 +69,6 @@ func TestAdapter_StartNeedsNoNetworkState_ProvingTheInterfaceIsTransportFree(t *
 	a := nullingress.New("null:test")
 	sink := newCaptureSink()
 	require.NoError(t, a.Start(ctx, nil, sink))
-	defer func() { require.NoError(t, a.Stop(context.Background())) }()
 
 	a.Push(headEvent(100, "0xA"))
 	got := sink.next(t)
@@ -90,7 +87,6 @@ func TestAdapter_PreservesPushOrder(t *testing.T) {
 	a := nullingress.New("null:test")
 	sink := newCaptureSink()
 	require.NoError(t, a.Start(ctx, nil, sink))
-	defer func() { require.NoError(t, a.Stop(context.Background())) }()
 
 	for i := int64(1); i <= 5; i++ {
 		a.Push(headEvent(i, "0x0"))
@@ -111,7 +107,6 @@ func TestAdapter_SecondStartIsANoOpAndKeepsTheFirstSink(t *testing.T) {
 	first, second := newCaptureSink(), newCaptureSink()
 	require.NoError(t, a.Start(ctx, nil, first))
 	require.NoError(t, a.Start(ctx, nil, second), "a repeat Start must not error")
-	defer func() { require.NoError(t, a.Stop(context.Background())) }()
 
 	a.Push(headEvent(1, "0xA"))
 	require.Equal(t, int64(1), first.next(t).Block.Number)
@@ -126,56 +121,6 @@ func TestAdapter_SecondStartIsANoOpAndKeepsTheFirstSink(t *testing.T) {
 		t.Fatalf("the event was delivered twice: %v", ev)
 	case <-time.After(100 * time.Millisecond):
 	}
-}
-
-func TestAdapter_StopEndsDelivery(t *testing.T) {
-	// After Stop returns, the indexer assumes no further events arrive.
-	// A late delivery would land on a torn-down egress set.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	a := nullingress.New("null:test")
-	sink := newCaptureSink()
-	require.NoError(t, a.Start(ctx, nil, sink))
-
-	a.Push(headEvent(1, "0xA"))
-	require.Equal(t, int64(1), sink.next(t).Block.Number)
-
-	require.NoError(t, a.Stop(context.Background()))
-	a.Push(headEvent(2, "0xB"))
-	select {
-	case ev := <-sink.got:
-		t.Fatalf("an event arrived after Stop: %v", ev)
-	case <-time.After(200 * time.Millisecond):
-	}
-}
-
-func TestAdapter_StopBeforeStartIsSafe(t *testing.T) {
-	// Boot can fail between construction and Start. Stop must not panic on
-	// a nil cancel func, or one bad upstream takes the process down.
-	a := nullingress.New("null:test")
-	require.NoError(t, a.Stop(context.Background()))
-	require.NoError(t, a.Stop(context.Background()), "Stop must stay idempotent")
-}
-
-func TestAdapter_RestartsAfterStop(t *testing.T) {
-	// Stop clears the started flag, so a reconnect can re-Start the same
-	// adapter. Without that, a reconnected ingress would go permanently
-	// silent while still reporting itself as registered.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	a := nullingress.New("null:test")
-	first := newCaptureSink()
-	require.NoError(t, a.Start(ctx, nil, first))
-	require.NoError(t, a.Stop(context.Background()))
-
-	second := newCaptureSink()
-	require.NoError(t, a.Start(ctx, nil, second))
-	defer func() { require.NoError(t, a.Stop(context.Background())) }()
-
-	a.Push(headEvent(7, "0xC"))
-	require.Equal(t, int64(7), second.next(t).Block.Number)
 }
 
 func TestAdapter_ContextCancellationEndsDeliveryWithoutStop(t *testing.T) {
@@ -198,69 +143,16 @@ func TestAdapter_ContextCancellationEndsDeliveryWithoutStop(t *testing.T) {
 	}
 }
 
-func TestAdapter_EnsureFilterIsIdempotentPerKey(t *testing.T) {
-	// The indexer refcounts filters and calls EnsureFilter on every new
-	// subscriber. An adapter that treated a repeat call as a new
-	// subscription would open one upstream subscription per client.
-	ctx := context.Background()
-	a := nullingress.New("null:test")
-
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-	require.Equal(t, []string{"logs:h1"}, a.ActiveFilters())
-}
-
-func TestAdapter_FilterKeyCombinesSubTypeAndParamsHash(t *testing.T) {
-	// Two different filters must never collapse into one key, or one
-	// client's unsubscribe silently kills another client's stream.
-	ctx := context.Background()
-	a := nullingress.New("null:test")
-
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h2", nil))
-	require.NoError(t, a.EnsureFilter(ctx, "newPendingTransactions", "h1", nil))
-
-	got := a.ActiveFilters()
-	sort.Strings(got)
-	require.Equal(t, []string{"logs:h1", "logs:h2", "newPendingTransactions:h1"}, got)
-}
-
-func TestAdapter_RemoveFilterDropsOnlyItsOwnKey(t *testing.T) {
-	ctx := context.Background()
-	a := nullingress.New("null:test")
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h2", nil))
-
-	require.NoError(t, a.RemoveFilter(ctx, "logs", "h1"))
-	require.Equal(t, []string{"logs:h2"}, a.ActiveFilters())
-}
-
-func TestAdapter_RemoveFilterForAnUnknownKeyIsANoOp(t *testing.T) {
+func TestAdapter_FilterCallsAreSafeNoOps(t *testing.T) {
 	// The interface promises RemoveFilter is safe for a filter that was
-	// never subscribed — teardown races make that call routine.
+	// never subscribed — teardown races make that call routine. Upstream's
+	// nullingress keeps no filter state, so every filter is reported live.
 	ctx := context.Background()
 	a := nullingress.New("null:test")
 	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-
+	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
 	require.NoError(t, a.RemoveFilter(ctx, "logs", "never-subscribed"))
 	require.NoError(t, a.RemoveFilter(ctx, "logs", "h1"))
 	require.NoError(t, a.RemoveFilter(ctx, "logs", "h1"))
-	require.Empty(t, a.ActiveFilters())
-}
-
-func TestAdapter_ActiveFiltersReturnsAnIndependentSnapshot(t *testing.T) {
-	// Callers hold the slice while the indexer keeps subscribing. A shared
-	// backing array would make the snapshot mutate under them.
-	ctx := context.Background()
-	a := nullingress.New("null:test")
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h1", nil))
-
-	snap := a.ActiveFilters()
-	require.NoError(t, a.EnsureFilter(ctx, "logs", "h2", nil))
-	require.Equal(t, []string{"logs:h1"}, snap, "the earlier snapshot must not grow")
-	require.Len(t, a.ActiveFilters(), 2)
-}
-
-func TestAdapter_FreshAdapterHasNoFilters(t *testing.T) {
-	require.Empty(t, nullingress.New("null:test").ActiveFilters())
+	require.True(t, a.FilterLive("logs", "h1"))
 }

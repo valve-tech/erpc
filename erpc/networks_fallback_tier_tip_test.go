@@ -174,14 +174,10 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 			Architecture: common.ArchitectureEvm,
 			Evm: &common.EvmNetworkConfig{
 				ChainId: 123,
-				ServedTip: &common.EvmServedTipConfig{
-					EnabledFor: []string{"latest", "finalized"},
-					// The trajectory referee needs ten minutes of recorded
-					// history to participate at all, so it is already inert
-					// here; switching it off states that rather than relying
-					// on it. Nothing else in this test is history-dependent.
-					TrajectoryWindow: new(common.Duration),
-				},
+				// The served tip is upstream's majority picker, which has no
+				// per-tag switch or trajectory referee: setting the block
+				// selects it for both latest and finalized.
+				ServedTip: &common.EvmServedTipConfig{},
 			},
 		}
 		network, err := NewNetwork(ctx, &log.Logger, "test", networkConfig,

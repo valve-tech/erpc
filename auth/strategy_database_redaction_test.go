@@ -31,6 +31,12 @@ const syntheticApiKey = "vk_SYNTHETIC_REDACTION_TEST_KEY_0001"
 // captured, not only those above Debug.
 func newLoggingStrategy(t *testing.T, fc *fakeConnector) (*DatabaseStrategy, *bytes.Buffer) {
 	t.Helper()
+	// util.ConfigureTestLogger (run from an init in this package) disables
+	// logging globally. These tests read the log, so lift the global level
+	// for their duration.
+	prev := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(prev) })
 	buf := &bytes.Buffer{}
 	logger := zerolog.New(buf).Level(zerolog.DebugLevel)
 	return &DatabaseStrategy{

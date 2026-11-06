@@ -2,8 +2,8 @@ package erpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,132 +14,68 @@ import (
 	"github.com/erpc/erpc/indexer/adapters/wsclient"
 	"github.com/erpc/erpc/indexer/adapters/wsupstream"
 	"github.com/erpc/erpc/telemetry"
-	"github.com/erpc/erpc/upstream"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
-// JSON-RPC subscription methods. Kept in erpc/ rather than the indexer
-// because they are JSON-RPC-specific — a Kafka or gRPC egress deals in
-// SubType only, never in RPC method strings.
 const (
 	MethodEthSubscribe   = "eth_subscribe"
 	MethodEthUnsubscribe = "eth_unsubscribe"
 )
 
-// Subscription type aliases for convenient use in the erpc package.
-// The canonical definitions live in the indexer package.
-const (
-	SubTypeNewHeads               = indexer.SubTypeNewHeads
-	SubTypeLogs                   = indexer.SubTypeLogs
-	SubTypeNewPendingTransactions = indexer.SubTypeNewPendingTransactions
-)
+// unsubscribeTimeout bounds best-effort unsubscribes during connection
+// cleanup.
+const unsubscribeTimeout = 5 * time.Second
 
-const (
-	// unsubscribeTimeout is the deadline for best-effort upstream
-	// unsubscribe calls during connection cleanup.
-	unsubscribeTimeout = 5 * time.Second
-)
-
-// SubscriptionManager is the client-facing egress layer. It owns
-// per-connection *wsclient.Adapter instances, lazily registers networks +
-// ingresses with the indexer the first time a client subscribes on a
-// given network, and translates the public eth_subscribe / eth_unsubscribe
-// surface into indexer calls.
+// SubscriptionManager serves eth_subscribe and eth_unsubscribe on client
+// WebSocket connections through the indexer. A network's upstream ingresses
+// are registered the first time a client subscribes on it.
 type SubscriptionManager struct {
 	logger *zerolog.Logger
 	idx    *indexer.Indexer
 
-	// conns maps connId -> *connEntry. One egress adapter per live WS
-	// connection.
-	conns sync.Map
+	// connMu guards conns and every WsConnection.subsClosed, so no adapter
+	// is created for a connection after CleanupConnection.
+	connMu sync.Mutex
+	conns  map[string]*connEntry // connId -> entry
+
+	networks    sync.Map // indexerNetworkKey -> struct{}, once bootstrapped
+	bootstrapMu sync.Mutex
 
 	budgetOnce sync.Once
 	budget     *wsclient.ByteBudget
 	queueCaps  sync.Map // networkId -> int, last value set on the gauge
 
-	// bySubID maps a client-facing subscription ID to the record needed
-	// to route Unsubscribe/Cleanup without walking every connection.
-	bySubID sync.Map // clientSubId -> *subRecord
-
-	// networks tracks which networkIds have been bootstrapped with
-	// ingresses so we don't double-register on every Subscribe call.
-	networks sync.Map // networkId -> struct{}
-
-	// bootstrapMu serialises bootstrapNetwork; the indexer's
-	// RegisterNetwork is idempotent but ingress creation (WS connects on
-	// upstreams) is not, so we avoid duplicate adapters.
-	bootstrapMu sync.Mutex
+	// activeSubs counts client subscriptions on this instance for
+	// server.webSocket.maxSubscriptions.
+	activeSubs atomic.Int64
 }
 
-// connEntry is the per-connection bookkeeping: the egress adapter and
-// the indexer detach handle.
 type connEntry struct {
 	adapter *wsclient.Adapter
-
-	// mu orders attach against detach: the subscribe that creates the
-	// entry attaches after publishing it, so a cleanup can run first.
-	mu       sync.Mutex
-	detachFn func()
-	detached bool
+	detach  func()
 }
 
-// attach registers the adapter with the indexer unless the entry was
-// already detached.
-func (c *connEntry) attach(idx *indexer.Indexer) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.detached {
-		c.detachFn = idx.Attach(c.adapter)
-	}
-}
-
-func (c *connEntry) detach() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.detached = true
-	if c.detachFn != nil {
-		c.detachFn()
-		c.detachFn = nil
-	}
-}
-
-// subRecord is the per-subscription record kept for Unsubscribe /
-// CleanupConnection routing. We don't persist these in the adapter
-// because the adapter can't know the original subType (it holds
-// EventKind, which is a lossy projection of subType for filters).
-type subRecord struct {
-	clientSubID string
-	connID      string
-	networkID   string
-	subType     string
-	kind        indexer.EventKind
-	filterHash  string
-}
-
-// NewSubscriptionManager creates a client-facing SubscriptionManager
-// backed by the given indexer.
 func NewSubscriptionManager(logger *zerolog.Logger, idx *indexer.Indexer) *SubscriptionManager {
 	return &SubscriptionManager{
 		logger: logger,
 		idx:    idx,
+		conns:  make(map[string]*connEntry),
 	}
 }
 
-// IsSubscriptionMethod returns true when the JSON-RPC method targets the
-// subscription surface (eth_subscribe or eth_unsubscribe).
+// IsSubscriptionMethod reports whether method is eth_subscribe or
+// eth_unsubscribe.
 func IsSubscriptionMethod(method string) bool {
 	return method == MethodEthSubscribe || method == MethodEthUnsubscribe
 }
 
-// IsSubscribeMethod returns true when the method is eth_subscribe.
 func IsSubscribeMethod(method string) bool {
 	return method == MethodEthSubscribe
 }
 
-// Subscribe handles an eth_subscribe request from a client WS connection.
-// Generates a client-facing subscription ID, ensures the corresponding
-// upstream subscription exists (via the indexer's EnsureFilter), and
-// registers the client with the connection's egress adapter.
+// Subscribe handles eth_subscribe: it ensures the upstream subscription
+// exists and registers a new client subscription on the connection.
 func (sm *SubscriptionManager) Subscribe(
 	ctx context.Context,
 	wsc *WsConnection,
@@ -157,20 +93,24 @@ func (sm *SubscriptionManager) Subscribe(
 	}
 	nq.SetNetwork(nw)
 
-	// Bootstrap the network if this is the first touch. Returns
-	// ErrNoWsUpstreamAvailable if the network has no WS-capable
-	// upstreams configured.
 	if err := sm.bootstrapNetwork(ctx, nw); err != nil {
 		return nil, err
 	}
 
-	// Per-connection subscription limit. Get/create the egress adapter
-	// up-front — we need it for the limit check and for the subsequent
-	// AddSubscription call anyway.
-	conn := sm.getOrCreateConn(wsc)
+	conn := sm.getOrCreateConn(wsc, nw.Label())
+	if conn == nil {
+		return nil, wsclient.ErrClosed
+	}
+	// Fail fast before touching upstream filters; AddSubscription below
+	// enforces the limit atomically.
 	maxSubs := wsc.server.serverCfg.WebSocket.MaxSubscriptionsPerConnection
 	if conn.adapter.Count() >= maxSubs {
 		return nil, common.NewErrSubscriptionLimitExceeded(maxSubs)
+	}
+	maxTotal := wsc.server.serverCfg.WebSocket.MaxSubscriptions
+	if maxTotal > 0 && sm.activeSubs.Load() >= int64(maxTotal) {
+		telemetry.CounterHandle(telemetry.MetricWebsocketRejectedTotal, project.Config.Id, wsRejectSubGlobal).Inc()
+		return nil, common.NewErrInstanceSubscriptionLimitExceeded(maxTotal)
 	}
 
 	if err := sm.acquireRateLimits(ctx, project, nw, nq); err != nil {
@@ -192,41 +132,46 @@ func (sm *SubscriptionManager) Subscribe(
 	subType := indexer.ExtractSubscriptionType(jrReq.Params)
 	clientSubID, err := indexer.GenerateClientSubID()
 	if err != nil {
-		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, fmt.Errorf("failed to generate subscription ID: %w", err))
-		return nil, fmt.Errorf("failed to generate subscription ID: %w", err)
+		err = fmt.Errorf("failed to generate subscription ID: %w", err)
+		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
+		return nil, err
 	}
 
-	kind, filterHash, err := sm.resolveSubscription(ctx, networkId, subType, jrReq.Params)
+	key := indexerNetworkKey(nw)
+	kind, filterHash, err := sm.resolveSubscription(ctx, key, subType, jrReq.Params)
 	if err != nil {
 		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
 		return nil, err
 	}
 
-	conn.adapter.AddSubscription(clientSubID, networkId, kind, filterHash)
-	sm.bySubID.Store(clientSubID, &subRecord{
-		clientSubID: clientSubID,
-		connID:      wsc.id,
-		networkID:   networkId,
-		subType:     subType,
-		kind:        kind,
-		filterHash:  filterHash,
-	})
+	if !sm.reserveSub(maxTotal) {
+		sm.releaseFilter(ctx, key, kind, filterHash)
+		telemetry.CounterHandle(telemetry.MetricWebsocketRejectedTotal, project.Config.Id, wsRejectSubGlobal).Inc()
+		err := common.NewErrInstanceSubscriptionLimitExceeded(maxTotal)
+		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
+		return nil, err
+	}
+	// Counted before it is visible, so a racing cleanup never takes the
+	// gauge below zero.
+	wsc.subscriptionsGauge(kind).Inc()
+	if err := conn.adapter.AddSubscription(clientSubID, key, kind, filterHash, maxSubs); err != nil {
+		wsc.subscriptionsGauge(kind).Dec()
+		sm.activeSubs.Add(-1)
+		sm.releaseFilter(ctx, key, kind, filterHash)
+		if errors.Is(err, wsclient.ErrLimitExceeded) {
+			err = common.NewErrSubscriptionLimitExceeded(maxSubs)
+		}
+		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
+		return nil, err
+	}
 
 	lg.Info().
 		Str("clientSubId", clientSubID).
 		Str("subType", subType).
 		Msg("subscription established")
 
-	telemetry.CounterHandle(telemetry.MetricNetworkSuccessfulRequests,
-		project.Config.Id, nw.Label(), "proxy", "proxy",
-		method, "1", reqFinality.String(), "false", nq.UserId(), nq.AgentName(),
-	).Inc()
-	telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
-		project.Config.Id, nw.Label(), "proxy", "proxy",
-		method, reqFinality.String(), nq.UserId(),
-	).Observe(time.Since(start).Seconds())
-
-	return sm.buildSubscribeResponse(nq, jrReq, clientSubID), nil
+	sm.recordSuccessMetrics(project, nw, method, reqFinality, start, nq)
+	return newJsonRpcResultResponse(nq, jrReq, []byte(`"`+clientSubID+`"`)), nil
 }
 
 // Unsubscribe handles an eth_unsubscribe request.
@@ -269,98 +214,86 @@ func (sm *SubscriptionManager) Unsubscribe(
 		return nil, err
 	}
 
-	recRaw, ok := sm.bySubID.LoadAndDelete(clientSubID)
-	if !ok {
+	// Only the connection that created a subscription can remove it, and
+	// only the caller that actually removed it releases its filter.
+	sm.connMu.Lock()
+	conn := sm.conns[wsc.id]
+	sm.connMu.Unlock()
+	var kind indexer.EventKind
+	var subNetworkID, filterHash string
+	existed := false
+	if conn != nil {
+		kind, subNetworkID, filterHash, existed = conn.adapter.RemoveSubscription(clientSubID)
+	}
+	if !existed {
 		err := common.NewErrSubscriptionNotFound(clientSubID)
 		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
 		return nil, err
 	}
-	rec := recRaw.(*subRecord)
+	wsc.subscriptionsGauge(kind).Dec()
+	sm.releaseFilter(ctx, subNetworkID, kind, filterHash)
+	sm.activeSubs.Add(-1)
 
-	if connRaw, ok := sm.conns.Load(rec.connID); ok {
-		connRaw.(*connEntry).adapter.RemoveSubscription(clientSubID)
-	}
-	if rec.kind != indexer.KindNewHead && rec.filterHash != "" {
-		sm.idx.ReleaseFilter(ctx, rec.networkID, rec.subType, rec.filterHash)
-	}
+	lg.Info().Str("clientSubId", clientSubID).Str("subType", kind.String()).Msg("subscription removed")
 
-	lg.Info().Str("clientSubId", clientSubID).Str("subType", rec.subType).Msg("subscription removed")
-
-	telemetry.CounterHandle(telemetry.MetricNetworkSuccessfulRequests,
-		project.Config.Id, nw.Label(), "proxy", "proxy",
-		method, "1", reqFinality.String(), "false", nq.UserId(), nq.AgentName(),
-	).Inc()
-	telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
-		project.Config.Id, nw.Label(), "proxy", "proxy",
-		method, reqFinality.String(), nq.UserId(),
-	).Observe(time.Since(start).Seconds())
-
-	resp := common.NewNormalizedResponse().WithRequest(nq)
-	jrr := &common.JsonRpcResponse{}
-	_ = jrr.SetID(jrReq.ID)
-	jrr.SetResult([]byte("true"))
-	resp.WithJsonRpcResponse(jrr)
-	return resp, nil
+	sm.recordSuccessMetrics(project, nw, method, reqFinality, start, nq)
+	return newJsonRpcResultResponse(nq, jrReq, []byte("true")), nil
 }
 
-// CleanupConnection is invoked on WS disconnect. It walks the adapter's
-// active subscriptions, releases each filter refcount in the indexer,
-// drains the adapter, and detaches it from the indexer's egress set.
-func (sm *SubscriptionManager) CleanupConnection(wsc *WsConnection, _ *PreparedProject) {
-	lg := sm.logger.With().Str("connId", wsc.id).Logger()
-
-	connRaw, ok := sm.conns.LoadAndDelete(wsc.id)
-	if !ok {
+// CleanupConnection removes every subscription of a closed connection and
+// detaches it from the indexer. Later Subscribe calls on it fail.
+func (sm *SubscriptionManager) CleanupConnection(wsc *WsConnection) {
+	sm.connMu.Lock()
+	wsc.subsClosed = true
+	conn := sm.conns[wsc.id]
+	delete(sm.conns, wsc.id)
+	sm.connMu.Unlock()
+	if conn == nil {
 		return
 	}
-	conn := connRaw.(*connEntry)
 
-	for _, sub := range conn.adapter.Subscriptions() {
-		sm.bySubID.Delete(sub.ClientSubID)
-		if sub.Kind != indexer.KindNewHead && sub.FilterHash != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), unsubscribeTimeout)
-			sm.idx.ReleaseFilter(ctx, sub.NetworkID, subTypeFor(sub.Kind), sub.FilterHash)
-			cancel()
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), unsubscribeTimeout)
+	defer cancel()
+	for _, sub := range conn.adapter.Drain() {
+		wsc.subscriptionsGauge(sub.Kind).Dec()
+		sm.releaseFilter(ctx, sub.NetworkID, sub.Kind, sub.FilterHash)
+		sm.activeSubs.Add(-1)
 	}
-	conn.adapter.Drain()
 	conn.detach()
 
-	lg.Debug().Msg("cleaned up all subscriptions for connection")
+	sm.logger.Debug().Str("connId", wsc.id).Msg("cleaned up all subscriptions for connection")
 }
 
-// --- internals --------------------------------------------------------
-
-// buildWsAdapterOptions resolves network-level toggles that the wsupstream
-// adapter needs into a flat Options struct. Returns nil when no override
-// applies so the adapter keeps its defaults.
-func buildWsAdapterOptions(cfg *common.NetworkConfig) *wsupstream.Options {
-	if cfg == nil || cfg.Evm == nil {
-		return nil
+// reserveSub takes one slot of the instance-wide subscription cap (0 =
+// unlimited); the caller gives it back with activeSubs.Add(-1).
+func (sm *SubscriptionManager) reserveSub(maxTotal int) bool {
+	n := sm.activeSubs.Add(1)
+	if maxTotal > 0 && n > int64(maxTotal) {
+		sm.activeSubs.Add(-1)
+		return false
 	}
-	opts := &wsupstream.Options{}
-	set := false
-	if cfg.Evm.StripSubscribeFromBlockZero != nil && *cfg.Evm.StripSubscribeFromBlockZero {
-		opts.StripSubscribeFromBlockZero = true
-		set = true
-	}
-	if !set {
-		return nil
-	}
-	return opts
+	return true
 }
 
-// bootstrapNetwork registers the network with the indexer and attaches a
-// wsupstream.Adapter for each WS upstream on the network. Idempotent per
-// networkId — subsequent calls are no-ops.
+// releaseFilter drops a subscription's filter reference; newHeads
+// subscriptions hold none.
+func (sm *SubscriptionManager) releaseFilter(ctx context.Context, networkID string, kind indexer.EventKind, filterHash string) {
+	if kind != indexer.KindNewHead && filterHash != "" {
+		sm.idx.ReleaseFilter(ctx, networkID, kind.String(), filterHash)
+	}
+}
+
+// bootstrapNetwork registers the network with the indexer, with an ingress
+// per WebSocket upstream, once.
 func (sm *SubscriptionManager) bootstrapNetwork(ctx context.Context, nw *Network) error {
 	networkID := nw.networkId
-	if _, ok := sm.networks.Load(networkID); ok {
+	key := indexerNetworkKey(nw)
+	if _, ok := sm.networks.Load(key); ok {
 		return nil
 	}
 	sm.bootstrapMu.Lock()
 	defer sm.bootstrapMu.Unlock()
-	if _, ok := sm.networks.Load(networkID); ok {
+	if _, ok := sm.networks.Load(key); ok {
 		return nil
 	}
 
@@ -369,95 +302,82 @@ func (sm *SubscriptionManager) bootstrapNetwork(ctx context.Context, nw *Network
 		return common.NewErrNoWsUpstreamAvailable(networkID)
 	}
 
-	sm.idx.RegisterNetwork(&networkHandle{nw: nw})
-	sm.idx.RegisterNetworkSelector(networkID, &subIngressSelector{nw: nw, networkID: networkID})
-	adapterOpts := buildWsAdapterOptions(nw.cfg)
+	var adapterOpts wsupstream.Options
+	if cfg := nw.cfg; cfg != nil && cfg.Evm != nil && cfg.Evm.StripSubscribeFromBlockZero != nil {
+		adapterOpts.StripSubscribeFromBlockZero = *cfg.Evm.StripSubscribeFromBlockZero
+	}
+	adapters := make(map[string]*wsupstream.Adapter, len(wsUpstreams))
+	heads := make(map[string]headSource, len(wsUpstreams))
 	for _, up := range wsUpstreams {
-		adapter := wsupstream.New(up, networkID, sm.logger, adapterOpts)
+		if adapter := wsupstream.New(up, key, sm.logger, adapterOpts); adapter != nil {
+			adapters[up.Id()] = adapter
+			heads[up.Id()] = adapter
+		}
+	}
+	sm.idx.RegisterNetwork(&networkHandle{nw: nw, heads: heads})
+	sm.idx.RegisterNetworkSelector(key, &subIngressSelector{nw: nw})
+	for _, up := range wsUpstreams {
+		adapter := adapters[up.Id()]
 		if adapter == nil {
 			continue
 		}
-		if err := sm.idx.AddIngress(ctx, networkID, adapter); err != nil {
+		if err := sm.idx.AddIngress(ctx, key, adapter); err != nil {
 			sm.logger.Warn().Err(err).Str("upstreamId", up.Id()).
 				Msg("failed to register upstream ingress with indexer")
 		}
 	}
-	sm.networks.Store(networkID, struct{}{})
+	sm.networks.Store(key, struct{}{})
 	return nil
 }
 
-// subIngressSelector routes filter subscribes through the same upstream
-// selector used by the HTTP request path: score-ordered, circuit-breaker
-// aware, and tier-split when failover.onDefaultsExhausted is set. The
-// output is a list of EventIngress names (matching wsupstream.Adapter.Name()
-// == "ws:" + upstreamId).
-//
-// The key means the same thing here as it does on HTTP — "after every
-// default upstream fails this request, escalate to the tier:fallback
-// upstreams". The mechanism differs: HTTP gets it from the selection
-// policy (see common.FailoverConfig), subscribes get it from the two
-// tiers below, which the indexer consumes in order.
+// subIngressSelector picks the ingresses that carry a filter subscription.
+// With failover on, the defaults are the upstreams outside the fallback tier
+// that the selection policy routes to, and the fallback-tier upstreams stand
+// in for them (see indexer.IngressSelector): the same rule newHeads follows
+// (see networkHandle.deliversHeadsFrom). Without failover every WebSocket
+// upstream is a default.
 type subIngressSelector struct {
-	nw        *Network
-	networkID string
+	nw *Network
 }
 
-// Select returns (defaults, fallbacks) for a filter subscribe. Both tiers
-// are ordered by the upstream registry's score for eth_subscribe; upstreams
-// whose circuit breaker is open are skipped. A `tier:fallback` upstream
-// only populates the fallback tier when network-level
-// failover.onDefaultsExhausted is enabled — otherwise it mixes into the
-// defaults. Note this path reads the registry directly, not the selection
-// policy, so with the key off a subscribe still reaches a `tier:fallback`
-// upstream where an HTTP request would not.
-func (s *subIngressSelector) Select(_networkId, _subType string, _params []interface{}) (defaults, fallbacks []string) {
-	if s == nil || s.nw == nil || s.nw.upstreamsRegistry == nil {
-		return nil, nil
-	}
-	// A single method key keeps subscribe-path scoring warm across subTypes
-	// and mirrors how the HTTP path warms method-scoped sort lists.
-	ups, err := s.nw.upstreamsRegistry.GetSortedUpstreams(context.Background(), s.networkID, MethodEthSubscribe)
-	if err != nil {
-		return nil, nil
-	}
-
+func (s *subIngressSelector) Select(_, _ string, _ []interface{}) (defaults, fallbacks []string) {
+	ctx := context.Background()
 	failoverOn := s.nw.cfg != nil && s.nw.cfg.Failover.Enabled()
-	for _, u := range ups {
-		up, ok := u.(*upstream.Upstream)
-		if !ok {
-			continue
+	eligible := make(map[string]struct{})
+	if failoverOn {
+		for u := range s.nw.EvmRoutableUpstreams(ctx) {
+			eligible[u.Id()] = struct{}{}
 		}
-		cfg := up.Config()
-		if cfg == nil {
-			continue
-		}
-		if !isWsEndpoint(cfg.Endpoint) {
-			continue
-		}
-		if up.IsDown() {
-			continue
-		}
+	}
+	var ws []common.Upstream
+	for _, up := range s.nw.upstreamsRegistry.GetWsUpstreams(ctx, s.nw.networkId) {
+		ws = append(ws, up)
+	}
+	return tierWsIngresses(ws, eligible, failoverOn)
+}
+
+// tierWsIngresses names the ingresses of the WebSocket upstreams ws: with
+// failover on, the eligible ones outside the fallback tier are the defaults
+// and the fallback tier the fallbacks; otherwise all are defaults.
+func tierWsIngresses(ws []common.Upstream, eligible map[string]struct{}, failoverOn bool) (defaults, fallbacks []string) {
+	for _, up := range ws {
 		name := "ws:" + up.Id()
-		if failoverOn && cfg.HasTag(common.TagTierFallback) {
+		switch {
+		case !failoverOn:
+			defaults = append(defaults, name)
+		case isFallbackTier(up):
 			fallbacks = append(fallbacks, name)
-			continue
+		default:
+			if _, ok := eligible[up.Id()]; ok {
+				defaults = append(defaults, name)
+			}
 		}
-		defaults = append(defaults, name)
 	}
 	return defaults, fallbacks
 }
 
-func isWsEndpoint(endpoint string) bool {
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	return parsed.Scheme == "ws" || parsed.Scheme == "wss"
-}
-
-// resolveSubscription validates the subType and, for filter subs,
-// translates params into a filterHash via the indexer. Returns
-// (kind, filterHash) for subsequent AddSubscription.
+// resolveSubscription maps subType to its event kind and, for filter
+// subscriptions, takes a filter reference.
 func (sm *SubscriptionManager) resolveSubscription(ctx context.Context, networkID, subType string, params []interface{}) (indexer.EventKind, string, error) {
 	switch subType {
 	case indexer.SubTypeNewHeads:
@@ -473,17 +393,23 @@ func (sm *SubscriptionManager) resolveSubscription(ctx context.Context, networkI
 		}
 		return kind, hash, nil
 	default:
-		return 0, "", fmt.Errorf("unsupported subscription type: %s", subType)
+		return 0, "", common.NewErrJsonRpcExceptionInternal(0, common.JsonRpcErrorInvalidArgument,
+			fmt.Sprintf("unsupported subscription type: %q", subType), nil, nil)
 	}
 }
 
-// getOrCreateConn returns the egress adapter for a WsConnection,
-// attaching a new one to the indexer if this is the first subscription
-// on that connection.
-func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
-	if existing, ok := sm.conns.Load(wsc.id); ok {
-		return existing.(*connEntry)
+// getOrCreateConn returns the connection's entry, attaching a new egress
+// on first use, or nil once the connection was cleaned up.
+func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection, networkLabel string) *connEntry {
+	sm.connMu.Lock()
+	defer sm.connMu.Unlock()
+	if wsc.subsClosed {
+		return nil
 	}
+	if existing, ok := sm.conns[wsc.id]; ok {
+		return existing
+	}
+	wsc.networkLabel = networkLabel
 	wsCfg := wsc.server.serverCfg.WebSocket
 	budget := sm.notifyBudget(wsCfg.NotifyBudgetBytes)
 	opts := wsclient.Options{
@@ -496,10 +422,10 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 		},
 		OnClose: func(reason wsclient.CloseReason) {
 			telemetry.MetricWsBudgetClosesTotal.WithLabelValues(string(reason)).Inc()
-			// Close off the indexer's delivery goroutine: closeWithCode runs
-			// the connection cleanup, which detaches this adapter from the
-			// indexer that is calling us.
-			go wsc.closeWithCode(SlowSubscriberCloseCode, "subscriber too slow; resubscribe and back-fill")
+			// stop only records the close and wakes the read loop; teardown
+			// (on the read loop's goroutine) detaches this adapter from the
+			// indexer that is calling us, so this cannot deadlock.
+			wsc.stop(SlowSubscriberCloseCode, "subscriber too slow; resubscribe and back-fill", 0)
 		},
 		OnQueue: func(networkID string, deltaItems int, deltaBytes int64) {
 			telemetry.MetricWsQueuedNotifications.WithLabelValues(networkID).Add(float64(deltaItems))
@@ -508,16 +434,8 @@ func (sm *SubscriptionManager) getOrCreateConn(wsc *WsConnection) *connEntry {
 		},
 	}
 	adapter := wsclient.New(wsc.id, wsc, sm.logger, opts)
-	entry := &connEntry{adapter: adapter}
-	// Publish first, attach only if we won. Every adapter for a connection
-	// has the same indexer name, so a losing subscribe that attached would
-	// overwrite the winner's registration, and its detach would then
-	// remove it — leaving the connection with no egress at all.
-	if existing, loaded := sm.conns.LoadOrStore(wsc.id, entry); loaded {
-		adapter.Drain()
-		return existing.(*connEntry)
-	}
-	entry.attach(sm.idx)
+	entry := &connEntry{adapter: adapter, detach: sm.idx.Attach(adapter)}
+	sm.conns[wsc.id] = entry
 	return entry
 }
 
@@ -549,8 +467,10 @@ func (sm *SubscriptionManager) queueCap(networkID string) int {
 	return c
 }
 
-// acquireRateLimits acquires rate-limit permits at both project and
-// network level.
+func (wsc *WsConnection) subscriptionsGauge(kind indexer.EventKind) prometheus.Gauge {
+	return telemetry.GaugeHandle(telemetry.MetricWebsocketSubscriptionsActive, wsc.project.Config.Id, wsc.networkLabel, kind.String())
+}
+
 func (sm *SubscriptionManager) acquireRateLimits(
 	ctx context.Context,
 	project *PreparedProject,
@@ -563,23 +483,31 @@ func (sm *SubscriptionManager) acquireRateLimits(
 	return nw.acquireRateLimitPermit(ctx, nq)
 }
 
-// buildSubscribeResponse constructs the JSON-RPC response carrying the
-// client-facing subscription ID.
-func (sm *SubscriptionManager) buildSubscribeResponse(
-	nq *common.NormalizedRequest,
-	jrReq *common.JsonRpcRequest,
-	clientSubID string,
-) *common.NormalizedResponse {
-	resp := common.NewNormalizedResponse().WithRequest(nq)
+func newJsonRpcResultResponse(nq *common.NormalizedRequest, jrReq *common.JsonRpcRequest, result []byte) *common.NormalizedResponse {
 	jrr := &common.JsonRpcResponse{}
 	_ = jrr.SetID(jrReq.ID)
-	jrr.SetResult([]byte(fmt.Sprintf(`"%s"`, clientSubID)))
-	resp.WithJsonRpcResponse(jrr)
-	return resp
+	jrr.SetResult(result)
+	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(jrr)
 }
 
-// recordFailureMetrics emits the failure-path metrics when a subscribe
-// or unsubscribe request fails before reaching the indexer.
+func (sm *SubscriptionManager) recordSuccessMetrics(
+	project *PreparedProject,
+	nw *Network,
+	method string,
+	finality common.DataFinalityState,
+	start time.Time,
+	nq *common.NormalizedRequest,
+) {
+	telemetry.CounterHandle(telemetry.MetricNetworkSuccessfulRequests,
+		project.Config.Id, nw.Label(), "proxy", "proxy",
+		method, "1", finality.String(), "false", nq.UserId(), nq.AgentName(),
+	).Inc()
+	telemetry.ObserverHandle(telemetry.MetricNetworkRequestDuration,
+		project.Config.Id, nw.Label(), "proxy", "proxy",
+		method, finality.String(), nq.UserId(),
+	).Observe(time.Since(start).Seconds())
+}
+
 func (sm *SubscriptionManager) recordFailureMetrics(
 	project *PreparedProject,
 	nw *Network,
@@ -604,83 +532,106 @@ func (sm *SubscriptionManager) recordFailureMetrics(
 	).Observe(time.Since(start).Seconds())
 }
 
-// subTypeFor is the inverse of the kind-to-subType mapping done in
-// resolveSubscription. Used by CleanupConnection where we've only got
-// the adapter's Kind in hand.
-func subTypeFor(kind indexer.EventKind) string {
-	switch kind {
-	case indexer.KindLog:
-		return indexer.SubTypeLogs
-	case indexer.KindPendingTx:
-		return indexer.SubTypeNewPendingTransactions
-	}
-	return ""
-}
-
-// internalReqIdCounter generates unique JSON-RPC IDs for internal
-// requests (subscribe/unsubscribe). Kept here so erpc-level callers
-// still have access to a uniform counter; the wsupstream adapter
-// maintains its own counter since it can't import erpc.
-var internalReqIdCounter atomic.Int64
-
-// internalReqIdOffset keeps internal IDs out of the range clients
-// typically use (small incrementing integers).
-const internalReqIdOffset = 900_000_000
-
-// buildJsonRpcBody marshals a JSON-RPC request with the given method and
-// params. Retained for non-subscription JSON-RPC send paths that still
-// live inside erpc/.
-func buildJsonRpcBody(method string, params interface{}) ([]byte, error) {
-	id := internalReqIdCounter.Add(1) + internalReqIdOffset
-	return common.SonicCfg.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  method,
-		"params":  params,
-	})
-}
-
-// --- NetworkHandle ----------------------------------------------------
-
-// networkHandle adapts *Network to indexer.NetworkHandle. Lives here
-// (rather than in indexer/) because it touches Network internals; the
-// indexer package deliberately doesn't know about erpc.
+// networkHandle adapts *Network to indexer.NetworkHandle.
 type networkHandle struct {
 	nw *Network
+	// heads are the network's WebSocket ingresses by upstream id; fixed once
+	// the network is registered.
+	heads map[string]headSource
 }
 
-func (h *networkHandle) Id() string { return h.nw.networkId }
-
-func (h *networkHandle) FinalityDepth() int64 {
-	if h.nw.cfg != nil && h.nw.cfg.Evm != nil {
-		return h.nw.cfg.Evm.FallbackFinalityDepth
-	}
-	return 0
+// headSource is an ingress that streams newHeads.
+type headSource interface {
+	// HeadsLive reports whether its newHeads subscription is live.
+	HeadsLive() bool
 }
 
-// SuggestLatestBlock routes a per-source block observation to the
-// upstream's state poller. sourceId is the ingress adapter's Name(),
-// which for wsupstream.Adapter is "ws:<upstreamId>".
-func (h *networkHandle) SuggestLatestBlock(sourceId string, blockNumber int64) {
-	const prefix = "ws:"
-	if !strings.HasPrefix(sourceId, prefix) {
-		return
+func (h *networkHandle) Id() string { return indexerNetworkKey(h.nw) }
+
+func (h *networkHandle) DedupDropped(kind indexer.EventKind) {
+	telemetry.CounterHandle(telemetry.MetricSubscriptionDedupDroppedTotal, h.nw.projectId, h.nw.Label(), kind.String()).Inc()
+}
+
+func (h *networkHandle) DedupEntriesAdded(delta int) {
+	telemetry.GaugeHandle(telemetry.MetricSubscriptionDedupEntries, h.nw.projectId, h.nw.Label()).Add(float64(delta))
+}
+
+func (h *networkHandle) HeadIndexed() {
+	telemetry.GaugeHandle(telemetry.MetricNetworkSubscriptionLastHeadTimestamp, h.nw.projectId, h.nw.Label()).SetToCurrentTime()
+}
+
+func (h *networkHandle) Undelivered(kind indexer.EventKind) {
+	telemetry.CounterHandle(telemetry.MetricSubscriptionUndeliveredTotal, h.nw.projectId, h.nw.Label(), kind.String()).Inc()
+}
+
+// DeliveringHead floors "latest" to a head a client is about to receive. Only
+// such heads count: a head no client subscribed to (a prewarmed subscription)
+// would otherwise lift "latest" past the upstreams that poll, and their
+// blockAvailability upper bound would then mark them unable to serve it.
+func (h *networkHandle) DeliveringHead(blockNumber int64) {
+	h.nw.NoteObservedLatestBlock(h.nw.appCtx, blockNumber)
+}
+
+// indexerNetworkKey names nw in the indexer and its adapters. Projects can
+// define the same network, each with its own upstreams, so the key includes
+// the project.
+func indexerNetworkKey(nw *Network) string { return nw.projectId + "/" + nw.networkId }
+
+// SuggestLatestBlock passes a head from the ingress "ws:<upstreamId>" to
+// that upstream's state poller and reports whether clients may receive it:
+// only once the poller has accepted it (a major jump is verified
+// asynchronously first, so that head is not delivered) and the fallback-tier
+// gate allows it (see deliversHeadsFrom). A head from an upstream with no
+// poller (not bootstrapped, e.g. its chain could not be verified) or one the
+// network doesn't know is not delivered.
+func (h *networkHandle) SuggestLatestBlock(sourceId string, blockNumber int64) bool {
+	deliver := h.suggestLatestBlock(sourceId, blockNumber)
+	if !deliver {
+		telemetry.CounterHandle(telemetry.MetricSubscriptionWithheldHeadsTotal, h.nw.projectId, h.nw.Label()).Inc()
 	}
-	upstreamID := sourceId[len(prefix):]
-	for _, u := range h.nw.upstreamsRegistry.GetNetworkUpstreams(context.Background(), h.nw.networkId) {
+	return deliver
+}
+
+func (h *networkHandle) suggestLatestBlock(sourceId string, blockNumber int64) bool {
+	upstreamID, ok := strings.CutPrefix(sourceId, "ws:")
+	if !ok {
+		return true
+	}
+	ctx := context.Background()
+	for _, u := range h.nw.upstreamsRegistry.GetNetworkUpstreams(ctx, h.nw.networkId) {
 		if u.Id() != upstreamID {
 			continue
 		}
+		deliver := h.deliversHeadsFrom(ctx, u)
 		poller := u.EvmStatePoller()
 		if poller == nil || poller.IsObjectNull() {
-			return
+			return false
 		}
 		poller.SuggestLatestBlock(blockNumber)
-		return
+		return deliver && poller.LatestBlock() >= blockNumber
 	}
+	return false
 }
 
-// Interface checks: fail the build if either contract drifts.
+// deliversHeadsFrom reports whether clients may receive u's heads. With
+// failover on, a fallback-tier upstream's heads are held back while some
+// upstream outside that tier, which the selection policy routes to, has a
+// live newHeads subscription of its own: clients are not told of a block
+// only a fallback has while the primaries are up. Whether they are up is the
+// policy's verdict, as for reads. Without such a primary (none eligible, or
+// none streaming heads) the fallbacks' heads are delivered.
+func (h *networkHandle) deliversHeadsFrom(ctx context.Context, u common.Upstream) bool {
+	if h.nw.cfg == nil || !h.nw.cfg.Failover.Enabled() || !isFallbackTier(u) {
+		return true
+	}
+	for c := range h.nw.EvmRoutableUpstreams(ctx) {
+		if s := h.heads[c.Id()]; s != nil && !isFallbackTier(c) && s.HeadsLive() {
+			return false
+		}
+	}
+	return true
+}
+
 var (
 	_ wsclient.NotificationWriter = (*WsConnection)(nil)
 	_ indexer.NetworkHandle       = (*networkHandle)(nil)

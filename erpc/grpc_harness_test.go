@@ -86,6 +86,9 @@ type grpcTestNode struct {
 	// dynamicBlocks makes the node answer eth_getBlockByNumber for ANY hex
 	// number with a block of that number, which is what a range query needs.
 	dynamicBlocks bool
+	// blockTxs lists the transaction hashes a dynamic block carries, by
+	// number. A block absent here has none.
+	blockTxs map[uint64][]string
 }
 
 // grpcNodeCall is one JSON-RPC body the node received.
@@ -157,7 +160,7 @@ func (n *grpcTestNode) route(method string, params []interface{}) grpcNodeReply 
 		if n.dynamicBlocks {
 			var num uint64
 			if _, err := fmt.Sscanf(tag, "0x%x", &num); err == nil {
-				return grpcNodeReply{result: json.RawMessage(grpcBlockJSON(num, nil))}
+				return grpcNodeReply{result: json.RawMessage(grpcBlockJSON(num, n.blockTxs[num]))}
 			}
 		}
 	}
@@ -182,6 +185,17 @@ func (n *grpcTestNode) replyBlockByNumber() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.dynamicBlocks = true
+}
+
+// replyBlockTransactions makes dynamic block num carry txs, each a raw JSON
+// value (a quoted hash, or a transaction object).
+func (n *grpcTestNode) replyBlockTransactions(num uint64, txHashes ...string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.blockTxs == nil {
+		n.blockTxs = map[uint64][]string{}
+	}
+	n.blockTxs[num] = txHashes
 }
 
 // bumpHead moves the node's chain head on by one block.
@@ -319,7 +333,13 @@ func grpcTestUpstream(id, endpoint string) *common.UpstreamConfig {
 		Type:     common.UpstreamTypeEvm,
 		Endpoint: endpoint,
 		JsonRpc:  &common.JsonRpcUpstreamConfig{SupportsBatch: &common.FALSE},
-		Evm:      &common.EvmUpstreamConfig{ChainId: grpcTestChainID},
+		Evm: &common.EvmUpstreamConfig{
+			ChainId: grpcTestChainID,
+			// Upstream #1212: eth_query* reaches a plain JSON-RPC node only
+			// through the opt-in shim; without it the executor refuses with
+			// Unimplemented ("none enables evm.queryShim").
+			QueryShim: &common.EvmQueryShimConfig{Enabled: &common.TRUE},
+		},
 	}
 }
 

@@ -75,9 +75,9 @@ func pointTenderlyAt(t *testing.T, url string) {
 // pointQuicknodeAt redirects the package-level endpoint for one test.
 func pointQuicknodeAt(t *testing.T, url string) {
 	t.Helper()
-	prev := quicknodeEndpointsApiUrl
-	quicknodeEndpointsApiUrl = url
-	t.Cleanup(func() { quicknodeEndpointsApiUrl = prev })
+	prev := quicknodeEndpointsURL
+	quicknodeEndpointsURL = url
+	t.Cleanup(func() { quicknodeEndpointsURL = prev })
 }
 
 // pointChainstackAt redirects the package-level endpoint for one test.

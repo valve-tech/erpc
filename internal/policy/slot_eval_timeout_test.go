@@ -11,11 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests pin bug 46/144: the eval timeout used to race the eval's own
-// result and then always lose it, so `ErrEvalTimeout` never reached a
-// caller. Every eval below busy-waits in JS, because that is what a real
-// overrunning policy does — sobek cannot be interrupted mid-call, so the
-// slot has to wait for the eval either way.
+// These tests pin upstream #1284: sobek cannot interrupt a running eval, so
+// evalTimeout cannot cut one short. An eval past the timeout is reported
+// (a Warn log and selection_eval_errors_total{kind="timeout"}) and its
+// result still replaces the older cache. Every eval below busy-waits in JS,
+// because that is what a real overrunning policy does.
 
 // slowEval returns an eval source that busy-waits for `busy` and then
 // returns every upstream unchanged.
@@ -37,25 +37,21 @@ func frozenPolicy(evalFunc string, timeout time.Duration) *common.SelectionPolic
 	}
 }
 
-// TestSlot_EvalTimeout_ReachesTheDecision is the core pin. The eval
-// overruns its timeout by 15x, so the slot MUST record the timeout on the
-// decision. Before the fix the late result overwrote the timeout verdict
-// and the decision carried no error at all.
-func TestSlot_EvalTimeout_ReachesTheDecision(t *testing.T) {
+// TestSlot_EvalTimeout_IsReportedNotFailed: an eval 15x over its timeout
+// still yields a decision with no error, and the overrun is logged.
+func TestSlot_EvalTimeout_IsReportedNotFailed(t *testing.T) {
 	f := newEngineFixture(t)
 	f.register("evm:1", frozenPolicy(slowEval(300*time.Millisecond), 20*time.Millisecond),
 		f.upstream("rpc1"), f.upstream("rpc2"))
 
-	d := f.lastDecision("evm:1", "*")
-	require.Contains(t, d.Error, "selection policy eval timed out",
-		"a slow eval must report ErrEvalTimeout on its decision")
+	require.Empty(t, f.lastDecision("evm:1", "*").Error, "a late eval is applied, not failed")
+	require.Contains(t, f.Logs.String(), "selection policy eval exceeded evalTimeout")
 }
 
-// TestSlot_EvalTimeout_KeepsThePreviousOrder pins the verdict half: a tick
-// that times out retains the previous cache instead of publishing the late
-// result. The eval is fast on its first call and slow on every call after,
-// so one slot produces both outcomes.
-func TestSlot_EvalTimeout_KeepsThePreviousOrder(t *testing.T) {
+// TestSlot_EvalTimeout_PublishesTheLateOrder: a tick that overruns still
+// replaces the previous cache with its result. The eval is fast on its first
+// call and slow on every call after, so one slot shows both.
+func TestSlot_EvalTimeout_PublishesTheLateOrder(t *testing.T) {
 	f := newEngineFixture(t)
 	evalFunc := `(ups, _ctx) => {
 		globalThis.__tick = (globalThis.__tick || 0) + 1;
@@ -71,15 +67,14 @@ func TestSlot_EvalTimeout_KeepsThePreviousOrder(t *testing.T) {
 
 	f.tick("evm:1", "*")
 
-	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out")
-	require.Equal(t, []string{"rpc1"}, f.orderIDs("evm:1", "*"),
-		"a timed-out tick keeps the previous order; it must not publish the late result")
+	require.Empty(t, f.lastDecision("evm:1", "*").Error)
+	require.Equal(t, []string{"rpc1", "rpc2"}, f.orderIDs("evm:1", "*"),
+		"an overrunning tick publishes its late result")
 }
 
-// TestSlot_EvalTimeout_CountsAndLogs pins the operator surfaces. A
-// timed-out tick increments `selection_eval_errors_total{kind="timeout"}`
-// and writes the eval-failed warning. Both read the decision error, which
-// the fix is what makes non-empty.
+// TestSlot_EvalTimeout_CountsAndLogs pins the operator surfaces: each
+// overrunning tick increments selection_eval_errors_total{kind="timeout"}
+// once and writes the overrun warning.
 func TestSlot_EvalTimeout_CountsAndLogs(t *testing.T) {
 	f := newEngineFixture(t)
 	counter := telemetry.MetricSelectionEvalErrorsTotal.WithLabelValues("p1", "evm:1", "*", "timeout")
@@ -89,24 +84,18 @@ func TestSlot_EvalTimeout_CountsAndLogs(t *testing.T) {
 		f.upstream("rpc1"))
 
 	require.Equal(t, 1.0, promUtil.ToFloat64(counter)-before,
-		`one timed-out tick must increment selection_eval_errors_total{kind="timeout"} exactly once`)
-	// The first tick has no previous cache, so it publishes its late result
-	// and says so; see TestSlot_EvalTimeout_FirstTickPublishesItsLateResult.
-	require.Contains(t, f.Logs.String(), "selection policy eval failed; no ordering exists yet, so publishing its late result")
-	require.Contains(t, f.Logs.String(), "selection policy eval timed out")
+		`one overrunning tick must increment selection_eval_errors_total{kind="timeout"} exactly once`)
+	require.Contains(t, f.Logs.String(), "selection policy eval exceeded evalTimeout")
 
 	f.tick("evm:1", "*")
 	require.Equal(t, 2.0, promUtil.ToFloat64(counter)-before,
-		"a later timed-out tick counts once more")
-	require.Contains(t, f.Logs.String(), "selection policy eval failed; retaining previous cache")
+		"a later overrunning tick counts once more")
 }
 
-// TestSlot_EvalTimeout_FirstTickPublishesItsLateResult pins the cold start.
-// The first eval runs inside RegisterNetwork, where a busy host can miss a
-// 100ms deadline. With no previous cache, discarding the late result left
-// the network on raw registration order, fallback tier included, until the
-// next tick 15s later. The late result is the policy's real answer, so the
-// slot publishes it, and the decision still records the timeout.
+// TestSlot_EvalTimeout_FirstTickPublishesItsLateResult pins the cold start:
+// the first eval runs inside RegisterNetwork, where a busy host can miss a
+// short deadline. Its late result is the policy's real answer and is
+// published, so the network never sits on raw registration order.
 func TestSlot_EvalTimeout_FirstTickPublishesItsLateResult(t *testing.T) {
 	f := newEngineFixture(t)
 	evalFunc := `(ups, _ctx) => {
@@ -119,13 +108,12 @@ func TestSlot_EvalTimeout_FirstTickPublishesItsLateResult(t *testing.T) {
 
 	require.Equal(t, []string{"rpc2"}, f.orderIDs("evm:1", "*"),
 		"the late first result is published; the slot must not stay empty")
-	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out",
-		"the decision still records the timeout")
+	require.Empty(t, f.lastDecision("evm:1", "*").Error)
 }
 
-// TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing: only a valid late
+// TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing: only a valid
 // result is published. A first eval that overruns and then throws leaves the
-// slot empty, as before.
+// slot empty, and the decision carries the throw.
 func TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing(t *testing.T) {
 	f := newEngineFixture(t)
 	evalFunc := `(ups, _ctx) => {
@@ -137,7 +125,7 @@ func TestSlot_EvalTimeout_FirstTickLateThrowPublishesNothing(t *testing.T) {
 		f.upstream("rpc1"), f.upstream("rpc2"))
 
 	require.Empty(t, f.orderIDs("evm:1", "*"), "a late throw publishes no ordering")
-	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out")
+	require.Contains(t, f.lastDecision("evm:1", "*").Error, "boom")
 }
 
 // TestSlot_EvalWithinTimeout_PublishesItsResult is the control. An eval
@@ -175,9 +163,8 @@ func TestSlot_UserThrowAboutATimeout_IsNotAPolicyTimeout(t *testing.T) {
 		"a user throw must not increment the policy-timeout counter")
 }
 
-// TestSlot_EvalTimeout_HasNoRaceOnTheOutcome drives many timed-out ticks
-// so the race detector gets a wide window on the eval goroutine and the
-// timeout branch. Before the fix both wrote the same variable.
+// TestSlot_EvalTimeout_HasNoRaceOnTheOutcome drives many overrunning ticks
+// so the race detector gets a wide window on the eval and its reporting.
 func TestSlot_EvalTimeout_HasNoRaceOnTheOutcome(t *testing.T) {
 	f := newEngineFixture(t)
 	f.register("evm:1", frozenPolicy(slowEval(30*time.Millisecond), time.Millisecond),
@@ -186,5 +173,6 @@ func TestSlot_EvalTimeout_HasNoRaceOnTheOutcome(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		f.tick("evm:1", "*")
 	}
-	require.Contains(t, f.lastDecision("evm:1", "*").Error, "selection policy eval timed out")
+	require.Empty(t, f.lastDecision("evm:1", "*").Error)
+	require.Equal(t, []string{"rpc1"}, f.orderIDs("evm:1", "*"))
 }

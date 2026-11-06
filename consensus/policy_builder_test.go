@@ -95,7 +95,7 @@ func TestNewConsensus_CarriesTheWholeOperatorConfig(t *testing.T) {
 		RequiredParticipants:    []*common.ConsensusRequiredParticipant{{Tag: "archive", MinParticipants: 2}},
 	}
 
-	c, err := NewConsensus(cfg, &lg)
+	c, err := NewConsensus(cfg, &lg, "test-project")
 	require.NoError(t, err)
 	require.NotNil(t, c.policy)
 	got := c.policy.config
@@ -123,7 +123,7 @@ func TestNewConsensus_OptionalSettings(t *testing.T) {
 	lg := zerolog.Nop()
 
 	t.Run("a nil config is refused", func(t *testing.T) {
-		c, err := NewConsensus(nil, &lg)
+		c, err := NewConsensus(nil, &lg, "test-project")
 		require.Error(t, err)
 		assert.Nil(t, c)
 	})
@@ -132,7 +132,7 @@ func TestNewConsensus_OptionalSettings(t *testing.T) {
 		c, err := NewConsensus(&common.ConsensusPolicyConfig{
 			MaxParticipants:    3,
 			AgreementThreshold: 2,
-		}, &lg)
+		}, &lg, "test-project")
 		require.NoError(t, err)
 
 		assert.False(t, c.policy.config.preferNonEmpty)
@@ -150,7 +150,7 @@ func TestNewConsensus_OptionalSettings(t *testing.T) {
 			MaxParticipants:    3,
 			AgreementThreshold: 2,
 			DisputeLogLevel:    "verbose",
-		}, &lg)
+		}, &lg, "test-project")
 		require.NoError(t, err)
 		assert.Equal(t, zerolog.WarnLevel, c.policy.disputeLogLevel)
 	})
@@ -160,7 +160,7 @@ func TestNewConsensus_OptionalSettings(t *testing.T) {
 			MaxParticipants:    3,
 			AgreementThreshold: 2,
 			DisputeLogLevel:    "info",
-		}, &lg)
+		}, &lg, "test-project")
 		require.NoError(t, err)
 		assert.Equal(t, zerolog.InfoLevel, c.policy.disputeLogLevel)
 	})

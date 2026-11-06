@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -59,7 +60,7 @@ func wsFrames(t *testing.T, raw []byte) []string {
 func TestWsFrames_ReadsBackWhatTheServerWrote(t *testing.T) {
 	wsc, sock := newFaultWsConnection(t)
 
-	require.NoError(t, wsc.writeJSON(map[string]string{"hello": "world"}))
+	require.NoError(t, wsc.writeJSON(nil, map[string]string{"hello": "world"}))
 
 	frames := wsFrames(t, sock.Bytes())
 	require.Len(t, frames, 1, "one writeJSON must produce exactly one text frame")
@@ -164,7 +165,7 @@ func TestWsWriteBatchResponse_AbandonsTheBatchWhenTheSocketDiesMidFrame(t *testi
 
 	// Measure the undamaged batch first, so the fault below lands inside it.
 	wsc, sock := newFaultWsConnection(t)
-	wsc.writeBatchResponse(build())
+	wsc.writeBatchResponse(nil, build())
 	full := sock.Bytes()
 	require.Greater(t, sock.Writes(), 1,
 		"the fixture needs a batch big enough to reach the socket more than once")
@@ -184,7 +185,7 @@ func TestWsWriteBatchResponse_AbandonsTheBatchWhenTheSocketDiesMidFrame(t *testi
 
 	wsc2, sock2 := newFaultWsConnection(t)
 	sock2.FailAfterBytes(len(full) / 2)
-	wsc2.writeBatchResponse(build())
+	wsc2.writeBatchResponse(nil, build())
 
 	require.True(t, sock2.Failed(), "the fault must have fired inside the batch")
 	require.Zero(t, sock2.WritesAfterFailure(),
@@ -202,7 +203,7 @@ func TestWsWriteBatchResponse_WritesNothingOnAClosedConnection(t *testing.T) {
 	wsc, sock := newFaultWsConnection(t)
 	wsc.closed.Store(true)
 
-	wsc.writeBatchResponse([]interface{}{jsonRpcResponse(t, 1, "0x1")})
+	wsc.writeBatchResponse(nil, []interface{}{jsonRpcResponse(t, 1, "0x1")})
 	require.Zero(t, sock.Writes())
 }
 
@@ -210,11 +211,11 @@ func TestWsWriteBatchResponse_GivesUpBeforeTouchingADeadSocket(t *testing.T) {
 	wsc, sock := newFaultWsConnection(t)
 
 	sock.HangUp()
-	wsc.writeBatchResponse([]interface{}{jsonRpcResponse(t, 1, "0x1")})
+	wsc.writeBatchResponse(nil, []interface{}{jsonRpcResponse(t, 1, "0x1")})
 	require.True(t, sock.Failed())
 
 	sock.Reset()
-	wsc.writeBatchResponse([]interface{}{jsonRpcResponse(t, 2, "0x2")})
+	wsc.writeBatchResponse(nil, []interface{}{jsonRpcResponse(t, 2, "0x2")})
 	require.Zero(t, sock.Writes(),
 		"the connection already recorded a write error, so the batch must not be encoded again")
 }
@@ -228,7 +229,7 @@ func TestWsWriteJSON_ReportsWhatTheCallerMustActUpon(t *testing.T) {
 		wsc, sock := newFaultWsConnection(t)
 		wsc.closed.Store(true)
 
-		err := wsc.writeJSON(map[string]string{"a": "b"})
+		err := wsc.writeJSON(nil, map[string]string{"a": "b"})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "connection closed")
 		require.Zero(t, sock.Writes())
@@ -238,7 +239,7 @@ func TestWsWriteJSON_ReportsWhatTheCallerMustActUpon(t *testing.T) {
 		wsc, sock := newFaultWsConnection(t)
 		sock.HangUp()
 
-		err := wsc.writeJSON(map[string]string{"a": "b"})
+		err := wsc.writeJSON(nil, map[string]string{"a": "b"})
 		require.ErrorIs(t, err, errPeerHungUp,
 			"the transport error must reach the caller unchanged")
 		require.Zero(t, sock.WritesAfterFailure())
@@ -247,7 +248,7 @@ func TestWsWriteJSON_ReportsWhatTheCallerMustActUpon(t *testing.T) {
 	t.Run("a subscription notification reports the delivery failure", func(t *testing.T) {
 		wsc, sock := newFaultWsConnection(t)
 
-		require.NoError(t, wsc.WriteSubscriptionNotification("0xsub", json.RawMessage(`{"number":"0x1"}`)))
+		require.NoError(t, wsc.WriteSubscriptionNotificationAs("eth_subscription", "0xsub", json.RawMessage(`{"number":"0x1"}`)))
 		frames := wsFrames(t, sock.Bytes())
 		require.Len(t, frames, 1)
 		var note struct {
@@ -265,7 +266,7 @@ func TestWsWriteJSON_ReportsWhatTheCallerMustActUpon(t *testing.T) {
 
 		sock.Reset()
 		sock.HangUp()
-		require.ErrorIs(t, wsc.WriteSubscriptionNotification("0xsub", json.RawMessage(`{"number":"0x2"}`)),
+		require.ErrorIs(t, wsc.WriteSubscriptionNotificationAs("eth_subscription", "0xsub", json.RawMessage(`{"number":"0x2"}`)),
 			errPeerHungUp,
 			"the subscription manager only learns the client is gone from this error")
 	})
@@ -275,16 +276,16 @@ func TestWsWriteJSON_ReportsWhatTheCallerMustActUpon(t *testing.T) {
 // covers the raw-frame helper the same way.
 func TestWsWriteMessage_RefusesOnAClosedConnectionAndReportsATransportError(t *testing.T) {
 	wsc, sock := newFaultWsConnection(t)
-	require.NoError(t, wsc.writeMessage(1, []byte(`{"ok":true}`)))
+	require.NoError(t, wsc.writeMessage(nil, writeRaw(`{"ok":true}`)))
 	require.Equal(t, []string{`{"ok":true}`}, wsFrames(t, sock.Bytes()))
 
 	sock.Reset()
 	sock.HangUp()
-	require.ErrorIs(t, wsc.writeMessage(1, []byte(`{"ok":true}`)), errPeerHungUp)
+	require.ErrorIs(t, wsc.writeMessage(nil, writeRaw(`{"ok":true}`)), errPeerHungUp)
 
 	wsc.closed.Store(true)
 	sock.Reset()
-	err := wsc.writeMessage(1, []byte(`{"ok":true}`))
+	err := wsc.writeMessage(nil, writeRaw(`{"ok":true}`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "connection closed")
 	require.Zero(t, sock.Writes())
@@ -320,4 +321,12 @@ func TestWsWriteErrorResponse_SendsAJsonRpcEnvelopeCarryingTheRequestId(t *testi
 	wsc.writeErrorResponse(nq, common.NewErrInvalidRequest(fmt.Errorf("bad params")), nil, &common.TRUE)
 	require.Zero(t, sock.WritesAfterFailure())
 	require.Empty(t, sock.Bytes())
+}
+
+// writeRaw returns a writeMessage body that writes s verbatim.
+func writeRaw(s string) func(io.Writer) error {
+	return func(w io.Writer) error {
+		_, err := w.Write([]byte(s))
+		return err
+	}
 }

@@ -240,10 +240,11 @@ func newForwardingNetwork(chainId int64) *forwardingNetwork {
 	return n
 }
 
-func (n *forwardingNetwork) Id() string                    { return n.networkId }
-func (n *forwardingNetwork) Label() string                 { return n.networkId }
-func (n *forwardingNetwork) ProjectId() string             { return "test-project" }
-func (n *forwardingNetwork) Config() *common.NetworkConfig { return n.cfg }
+func (n *forwardingNetwork) EvmRefreshLatestBlock(context.Context) {}
+func (n *forwardingNetwork) Id() string                            { return n.networkId }
+func (n *forwardingNetwork) Label() string                         { return n.networkId }
+func (n *forwardingNetwork) ProjectId() string                     { return "test-project" }
+func (n *forwardingNetwork) Config() *common.NetworkConfig         { return n.cfg }
 func (n *forwardingNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }

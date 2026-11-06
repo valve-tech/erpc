@@ -25,6 +25,8 @@ type captureExporter struct {
 	failWith error
 }
 
+func (c *captureExporter) Close() error { return nil }
+
 func (c *captureExporter) AppendWithMetadata(line []byte, method string, networkId string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

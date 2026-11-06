@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,6 +341,8 @@ func TestStart_ServesOverTlsAndReturnsCleanlyWhenShutDown(t *testing.T) {
 	require.NoError(t, held.Close())
 
 	srv := &HttpServer{
+		// NewHttpServer always sets draining; Shutdown stores to it.
+		draining: &atomic.Bool{},
 		serverV4: &http.Server{
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`served`))

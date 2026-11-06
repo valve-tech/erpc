@@ -57,7 +57,7 @@ func TestErrorStatusCode_AuthAndBillingKeepTheirOwnCodes(t *testing.T) {
 		want int
 	}{
 		// 401 tells a client to re-authenticate; a 500 would make it retry.
-		{"auth unauthorized", NewErrAuthUnauthorized("secret", "bad token"), http.StatusUnauthorized},
+		{"auth unauthorized", NewErrAuthUnauthorized("secret", "invalid_secret", "bad token"), http.StatusUnauthorized},
 		{"endpoint unauthorized", NewErrEndpointUnauthorized(errors.New("bad key")), 401},
 		// 402 separates "you ran out of plan" from "we are broken", which is
 		// what an operator's alerting needs to distinguish.

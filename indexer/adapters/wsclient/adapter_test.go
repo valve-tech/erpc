@@ -3,6 +3,7 @@ package wsclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"runtime"
 	"strconv"
 	"sync"
@@ -12,7 +13,12 @@ import (
 
 	"github.com/erpc/erpc/indexer"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// testMaxSubs is a per-connection subscription limit no test reaches.
+const testMaxSubs = 100
 
 // blockingWriter holds every write until release is closed.
 type blockingWriter struct {
@@ -24,7 +30,7 @@ type blockingWriter struct {
 
 func newBlockingWriter() *blockingWriter { return &blockingWriter{release: make(chan struct{})} }
 
-func (w *blockingWriter) WriteSubscriptionNotification(_ string, result json.RawMessage) error {
+func (w *blockingWriter) WriteSubscriptionNotification(_ Subscription, result json.RawMessage, _ int) error {
 	<-w.release
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -110,7 +116,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // delivery stays queued. The parked event counts as pending.
 func pin(t *testing.T, a *Adapter) {
 	t.Helper()
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	a.Deliver(logEvent(`"pin"`))
 	waitFor(t, "writer to take the first event", func() bool { return a.subs["s1"].q.depth() == 0 })
 }
@@ -293,8 +299,8 @@ func TestBudgetTieGoesToNewest(t *testing.T) {
 	defer c.Drain()
 	// Both pin 5 bytes in flight; the 1-byte budget is over by 9 with no
 	// closing adapter holding any of it.
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
-	b.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
+	b.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	budget.used.Add(10)
 	a.queued.Add(5)
 	b.queued.Add(5)
@@ -322,12 +328,12 @@ func TestBudgetNoCascadeWhileVictimDrains(t *testing.T) {
 
 	// The slow writer takes one big payload and blocks on it: in flight,
 	// so close() cannot release it.
-	slow.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	slow.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	slow.Deliver(logEvent(payloadOf(900 << 10)))
 	waitFor(t, "slow writer to take its payload", func() bool { return slow.subs["s1"].q.depth() == 0 })
 	slow.Deliver(logEvent(payloadOf(50 << 10))) // queued behind it
 
-	healthy.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	healthy.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	healthy.Deliver(logEvent(payloadOf(200 << 10))) // over budget: slow is largest
 	if _, closes, _, _ := rs.snapshot(); len(closes) != 1 {
 		t.Fatalf("slow closes = %v, want one", closes)
@@ -393,7 +399,7 @@ func TestBudgetReleasedOnDrain(t *testing.T) {
 	r := newRecorder()
 	a := New("a", w, &nopLogger, r.opts(Options{Budget: budget}))
 	pin(t, a)
-	a.AddSubscription("s2", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s2", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	for i := 0; i < 100; i++ {
 		a.Deliver(logEvent(`12345`))
 	}
@@ -420,7 +426,7 @@ func TestWriterReleasesUnwrittenBatchOnStop(t *testing.T) {
 	w := newBlockingWriter()
 	r := newRecorder()
 	a := New("a", w, &nopLogger, r.opts(Options{Budget: budget}))
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	// Queue three before the writer wakes, so it pops them as one batch.
 	sub := a.subs["s1"]
 	for i := 0; i < 3; i++ {
@@ -441,7 +447,7 @@ func TestWriterReleasesUnwrittenBatchOnStop(t *testing.T) {
 func TestEnqueueAfterRemoveIsRefused(t *testing.T) {
 	budget := NewByteBudget(1 << 30)
 	a := New("a", newBlockingWriter(), &nopLogger, Options{Budget: budget})
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	sub := a.subs["s1"]
 	a.RemoveSubscription("s1")
 	a.enqueue(sub, json.RawMessage(`1`))
@@ -459,7 +465,7 @@ func TestWriteErrorKeepsDelivering(t *testing.T) {
 	close(w.release)
 	a := New("a", w, &nopLogger, Options{})
 	defer a.Drain()
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	a.Deliver(logEvent(`1`))
 	a.Deliver(logEvent(`2`))
 	waitFor(t, "both writes", func() bool { return len(w.written()) == 2 })
@@ -473,7 +479,7 @@ func TestIdleSubscriptionsCostNothing(t *testing.T) {
 	adapters := make([]*Adapter, 100)
 	for i := range adapters {
 		adapters[i] = New("c"+strconv.Itoa(i), newBlockingWriter(), &nopLogger, Options{Budget: budget, QueueCap: capOf(320_000)})
-		adapters[i].AddSubscription("s", "evm:1", indexer.KindLog, "f")
+		adapters[i].AddSubscription("s", "evm:1", indexer.KindLog, "f", testMaxSubs)
 	}
 	runtime.GC()
 	runtime.ReadMemStats(&after)
@@ -488,10 +494,10 @@ func TestIdleSubscriptionsCostNothing(t *testing.T) {
 func TestSubscriptionsAndCount(t *testing.T) {
 	a := New("a", newBlockingWriter(), &nopLogger, Options{})
 	defer a.Drain()
-	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f")
-	a.AddSubscription("s2", "evm:1", indexer.KindNewHead, "")
-	if a.Count() != 2 || len(a.Subscriptions()) != 2 {
-		t.Fatalf("count=%d subs=%d", a.Count(), len(a.Subscriptions()))
+	a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", testMaxSubs)
+	a.AddSubscription("s2", "evm:1", indexer.KindNewHead, "", testMaxSubs)
+	if a.Count() != 2 {
+		t.Fatalf("count=%d", a.Count())
 	}
 	if !a.InterestedIn(indexer.KindLog, "evm:1", "f") || a.InterestedIn(indexer.KindLog, "evm:1", "g") {
 		t.Fatal("InterestedIn mismatch")
@@ -575,4 +581,96 @@ func TestBudgetHardCeiling(t *testing.T) {
 	}
 	budget.used.Add(-250)
 	a.queued.Add(-(1 << 20))
+}
+
+type fakeWriter struct {
+	mu      sync.Mutex
+	written []string
+}
+
+func (w *fakeWriter) WriteSubscriptionNotification(_ Subscription, result json.RawMessage, _ int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.written = append(w.written, string(result))
+	return nil
+}
+
+func (w *fakeWriter) snapshot() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.written...)
+}
+
+func newTestAdapter(w *fakeWriter, minQueue int) *Adapter {
+	lg := zerolog.Nop()
+	return New("c1", w, &lg, Options{MinQueue: minQueue})
+}
+
+func deliver(a *Adapter, kind indexer.EventKind, filterHash string, n int) {
+	for i := 0; i < n; i++ {
+		a.Deliver(indexer.IndexedEvent{StreamEvent: indexer.StreamEvent{
+			Kind: kind, NetworkId: "evm:1", FilterHash: filterHash, Payload: json.RawMessage(fmt.Sprintf("%d", i)),
+		}})
+	}
+}
+
+func TestAdapter_AddAfterDrainIsRefused(t *testing.T) {
+	a := newTestAdapter(&fakeWriter{}, 8)
+	require.NoError(t, a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", 10))
+
+	removed := a.Drain()
+	require.Len(t, removed, 1)
+	assert.Equal(t, "s1", removed[0].ClientSubID)
+
+	assert.ErrorIs(t, a.AddSubscription("s2", "evm:1", indexer.KindLog, "f", 10), ErrClosed)
+	assert.Equal(t, 0, a.Count())
+}
+
+// A sub removed by RemoveSubscription is not returned by a later Drain, so
+// its filter reference is released exactly once.
+func TestAdapter_RemoveAndDrainAreExclusive(t *testing.T) {
+	a := newTestAdapter(&fakeWriter{}, 8)
+	require.NoError(t, a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", 10))
+	require.NoError(t, a.AddSubscription("s2", "evm:1", indexer.KindLog, "f", 10))
+
+	_, _, _, existed := a.RemoveSubscription("s1")
+	require.True(t, existed)
+	_, _, _, existed = a.RemoveSubscription("s1")
+	assert.False(t, existed)
+
+	removed := a.Drain()
+	require.Len(t, removed, 1)
+	assert.Equal(t, "s2", removed[0].ClientSubID)
+}
+
+func TestAdapter_SubscriptionLimitIsAtomic(t *testing.T) {
+	a := newTestAdapter(&fakeWriter{}, 8)
+	var ok atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if a.AddSubscription(fmt.Sprintf("s%d", i), "evm:1", indexer.KindNewHead, "", 10) == nil {
+				ok.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	assert.EqualValues(t, 10, ok.Load())
+	assert.Equal(t, 10, a.Count())
+	a.Drain()
+}
+
+// A burst within the buffer reaches a client that keeps up.
+func TestAdapter_BurstWithinBufferIsDelivered(t *testing.T) {
+	w := &fakeWriter{}
+	a := newTestAdapter(w, 256)
+	require.NoError(t, a.AddSubscription("s1", "evm:1", indexer.KindLog, "f", 10))
+	defer a.Drain()
+
+	deliver(a, indexer.KindLog, "f", 200)
+	require.Eventually(t, func() bool {
+		return len(w.snapshot()) == 200
+	}, 2*time.Second, 10*time.Millisecond)
 }
