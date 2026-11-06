@@ -842,6 +842,20 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 					details,
 				),
 			).WithRetryableTowardNetwork(false)
+		} else if code == -32602 && strings.Contains(msg, "bundle missing txs") {
+			// reth's eth_callBundle with no transactions. The bundle itself is
+			// empty, so no node accepts it, now or later. A generic -32602 is not
+			// final: reth's "request beyond head block" clears once the block
+			// arrives, so only this observed shape skips the retry.
+			return common.NewErrEndpointClientSideException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorInvalidArgument,
+					err.Message,
+					nil,
+					details,
+				),
+			).WithRetryableTowardNetwork(false)
 		} else if code == -32602 || code == -32600 {
 			// For generic invalid args/params errors, we retry.
 			return common.NewErrEndpointClientSideException(

@@ -150,6 +150,10 @@ type EvmStatePoller interface {
 	Bootstrap(ctx context.Context) error
 	Poll(ctx context.Context) error
 	PollLatestBlockNumber(ctx context.Context) (int64, error)
+	// PollLatestBlockNumberAtLeast is PollLatestBlockNumber for a request that
+	// needs block want; it may poll past the debounce once per new want when
+	// the network already holds that block.
+	PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error)
 	PollFinalizedBlockNumber(ctx context.Context) (int64, error)
 	PollEarliestBlockNumber(ctx context.Context, probe EvmAvailabilityProbeType, staleness time.Duration) (int64, error)
 	SyncingState() EvmSyncingState

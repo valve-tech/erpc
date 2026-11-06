@@ -26,6 +26,10 @@ type mockEvmStatePollerEnhanced struct {
 
 func (m *mockEvmStatePollerEnhanced) Bootstrap(ctx context.Context) error { return nil }
 func (m *mockEvmStatePollerEnhanced) Poll(ctx context.Context) error      { return m.pollError }
+func (m *mockEvmStatePollerEnhanced) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
+	return m.PollLatestBlockNumber(ctx)
+}
+
 func (m *mockEvmStatePollerEnhanced) PollLatestBlockNumber(ctx context.Context) (int64, error) {
 	if m.pollError != nil {
 		return 0, m.pollError
@@ -602,6 +606,10 @@ type mockEvmStatePollerWithCustomBehavior struct {
 
 func (m *mockEvmStatePollerWithCustomBehavior) Bootstrap(ctx context.Context) error { return nil }
 func (m *mockEvmStatePollerWithCustomBehavior) Poll(ctx context.Context) error      { return nil }
+func (m *mockEvmStatePollerWithCustomBehavior) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
+	return m.PollLatestBlockNumber(ctx)
+}
+
 func (m *mockEvmStatePollerWithCustomBehavior) PollLatestBlockNumber(ctx context.Context) (int64, error) {
 	return m.pollLatestBlockNumber(ctx)
 }

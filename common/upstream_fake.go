@@ -354,6 +354,10 @@ func (p *FakeEvmStatePoller) SuggestLatestBlock(blockNumber int64) {
 }
 
 func (p *FakeEvmStatePoller) RefreshLatestBlock() {}
+
+func (p *FakeEvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
+	return p.PollLatestBlockNumber(ctx)
+}
 func (p *FakeEvmStatePoller) ResetChainIdCordon() {}
 
 func (p *FakeEvmStatePoller) SyncingState() EvmSyncingState {
