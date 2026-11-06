@@ -418,8 +418,13 @@ func TestShouldRetry_AnErrorNoNodeCanFixIsNotRetriedOnTheSameNode(t *testing.T) 
 	e := newTestExecutor(t, &common.UpstreamFailsafeConfig{Retry: &common.RetryPolicyConfig{MaxAttempts: 3}})
 	req := requestFor(t, "eth_call")
 
+	transient := common.NewErrEndpointRequestTimeout(time.Second, nil)
+	require.True(t, e.shouldRetry(req, nil, transient, 0), "sanity: a timeout still retries on the same node")
+
+	// An untagged client-side error is this node's verdict on the request
+	// bytes, so it is not retried on the same node either (bug log 197).
 	generic := common.NewErrEndpointClientSideException(errors.New("invalid params"))
-	require.True(t, e.shouldRetry(req, nil, generic, 0), "sanity: an untagged client-side error still retries")
+	require.False(t, e.shouldRetry(req, nil, generic, 0))
 
 	terminal := common.NewErrEndpointClientSideException(errors.New("invalid params")).WithRetryableTowardNetwork(false)
 	require.False(t, e.shouldRetry(req, nil, terminal, 0))
