@@ -527,11 +527,14 @@ func (e *EvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want 
 	e.forcedMu.Lock()
 	c := e.forcedInFlight
 	if c == nil {
-		if want <= e.forcedFor || want > e.tracker.GetNetworkLatestBlock(e.upstream.NetworkId()) {
+		networkHead := e.tracker.GetNetworkLatestBlock(e.upstream.NetworkId())
+		if want <= e.forcedFor || want > networkHead {
 			e.forcedMu.Unlock()
 			return head, nil
 		}
 		e.forcedFor = want
+		e.logger.Debug().Int64("cachedHead", head).Int64("want", want).Int64("networkHead", networkHead).
+			Msg("polling latest block past the debounce: the network already has the requested block")
 		c = &forcedLatestPoll{done: make(chan struct{})}
 		e.forcedInFlight = c
 		e.forcedMu.Unlock()
