@@ -7741,3 +7741,31 @@ time, but a client-side exception is no longer one of those.
 count came from gock's `ReplyFunc`, which runs once at mock setup, not once per
 request, so the count proved nothing. The new tests use one-shot mocks in
 order and count the ones used.
+
+## 199. A near-tip read waits a full block time when a background head poll ran just before the block
+
+**Status: FIXED in the fork.** The `TestPollLatestBlockNumberAtLeast_*` tests
+(`architecture/evm/evm_state_poller_at_least_test.go`) pin it. Found by valve's
+rollout gate on edge-a (`0.3.0.7-valve`). Per hour, chain 369 had 38 near-tip
+`eth_getLogs` calls over 5 s and 37 client cancels, against 0 and 0 on
+`0.3.0.5-valve`.
+
+Three changes combine. Option (b) (a valve config at `0.3.0.6` and later) moves
+near-tip reads off the `newHeads`-fed WS siblings onto the HTTP upstreams, whose
+heads come from polls. Upstream #1263 made a head read (`eth_blockNumber`) start
+a background poll (`RefreshLatestBlock`). And upstream #1208 made the poll
+debounce (0.7 × block time, 7 s on 369) count from each local poll's start. When
+such a poll returns the old head just before a block lands, the request-path
+poll for that block (`EvmAssertBlockAvailability`) is refused by the debounce.
+Every upstream then refuses the block, and the network retry sleeps block time
+× `blockUnavailableDelayMultiplier`, 10 s on 369. In the harness case
+(`tip-run.mts`, 10 s blocks, option (b)), p50 was 10,004 ms on `0.3.0.7`
+against 5 ms on `0.3.0.5`.
+
+The fix: `PollLatestBlockNumberAtLeast(want)`. When the cached head is below
+the requested block and the network's corroborated head (the second-highest
+upstream head) already holds it, the poller polls once past the debounce.
+Requests that arrive while that poll runs share it. It polls at most once per
+new block number per upstream, so a lagging upstream costs about one extra poll
+per block. A block no second upstream reports gets no bypass, so an arbitrary
+future block cannot drive polls. Not yet reported upstream.

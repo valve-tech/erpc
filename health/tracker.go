@@ -2345,6 +2345,13 @@ func (t *Tracker) GetNetworkBlockTime(networkId string) time.Duration {
 	return 0
 }
 
+// GetNetworkLatestBlock returns the network's corroborated latest block (see
+// corroboratedNetworkHead): the second-highest head across its non-benched
+// upstreams, or the only one. 0 until reported.
+func (t *Tracker) GetNetworkLatestBlock(networkId string) int64 {
+	return t.getMetadata(metadataKey{nil, networkId}).evmLatestBlockNumber.Load()
+}
+
 // GetNetworkFinalizedBlock returns the network's corroborated finalized block
 // (see corroboratedNetworkHead): the second-highest finalized block across its
 // non-benched upstreams, or the only one. 0 until reported.

@@ -229,7 +229,7 @@ func (u *Upstream) EvmAssertBlockAvailability(ctx context.Context, forMethod str
 		// tolerance), try force-polling once
 		if blockNumber > latestBlock+tolerance && forceFreshIfStale {
 			var err error
-			latestBlock, err = statePoller.PollLatestBlockNumber(ctx)
+			latestBlock, err = statePoller.PollLatestBlockNumberAtLeast(ctx, blockNumber-tolerance)
 			if err != nil {
 				return false, fmt.Errorf("failed to poll latest block number: %w", err)
 			}
