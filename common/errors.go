@@ -2926,6 +2926,13 @@ func IsRetryableTowardsUpstream(err error) bool {
 		// Execution exceptions are not retryable
 		ErrCodeEndpointExecutionException,
 
+		// A client-side exception is this node's verdict on the request bytes
+		// (a generic -32602, an unsupported block tag). The same node gives the
+		// same verdict on a retry, so only another upstream can help. The
+		// network still fails over (IsRetryableTowardNetwork is unchanged), but
+		// once every upstream has answered this way a second sweep is skipped.
+		ErrCodeEndpointClientSideException,
+
 		// Upstream-level + 401 / 403 -> No Retry
 		// RPC vendor billing/capacity/auth -> No Retry
 		// Request too-large -> No Retry

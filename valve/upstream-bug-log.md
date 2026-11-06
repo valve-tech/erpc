@@ -7683,3 +7683,30 @@ by 2 minutes, against 240 on `0.3.0.5`). Not yet reported upstream.
 **Status:** open. Failed once in `make test-fast` on the sync branch (31 s, in
 the admin shard) and passed 3 of 3 when run alone on the same binary. The
 Redis-backed admin setup is the likely cause; it is not root-caused yet.
+
+## 197. A client-side error from every upstream waits out the network retry delays
+
+**Status: FIXED in the fork.** `TestNetwork_ClientErrorFromEveryUpstreamDoesNotResweep`
+(`erpc/networks_client_error_retry_test.go`) pins it. Reported by reth on chain
+369 against `0.3.0.5-valve`.
+
+reth answers `eth_callBundle` with no transactions with `-32602 bundle missing
+txs`. The normalizer maps a generic `-32602` to `ErrEndpointClientSideException`,
+which `IsRetryableTowardsUpstream` called retryable. Two costs followed. Under
+the single query executor each failover to the next upstream is a network retry,
+so it waited the configured delay (500 ms on the fleet). And once every upstream
+had answered, `AllUpstreamsFailedPermanently` still saw a retryable error, so a
+second sweep asked the same nodes again. With two upstreams and `maxAttempts: 3,
+delay: 500ms` the answer took 1.1 s.
+
+The fix has two parts. A client-side exception is now final for the upstream
+that gave it (`IsRetryableTowardsUpstream` false): the same node gives the same
+verdict on the same bytes. The network still fails over, because
+`IsRetryableTowardNetwork` is unchanged. And `computeDelay` skips the delay
+after an error the upstream will give again, except a capacity limit or an open
+breaker, which clear with time. Measured on the fake: 1.1 s before, a few ms
+after.
+
+`-32601` (method not found, for example `tenderly_simulateTransaction`) was
+already fast in the sync build: 2 ms, against 1.1 s on `0.3.0.5`. Not yet
+reported upstream.

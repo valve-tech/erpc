@@ -75,8 +75,8 @@ func newTagRequest(t *testing.T, network *tagTestNetwork, method string, params 
 	return nrq, jrq
 }
 
-// paramAt reads a nested key out of the (possibly rewritten) params.
-func paramAt(t *testing.T, jrq *common.JsonRpcRequest, idx int, key string) interface{} {
+// testParamAt reads a nested key out of the (possibly rewritten) params.
+func testParamAt(t *testing.T, jrq *common.JsonRpcRequest, idx int, key string) interface{} {
 	t.Helper()
 	jrq.RLock()
 	defer jrq.RUnlock()
@@ -104,7 +104,7 @@ func TestNormalizeHttpJsonRpc_TranslatesLatestToTheHighestKnownHead(t *testing.T
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-	if got := paramAt(t, jrq, 0, "toBlock"); got != "0x1234" {
+	if got := testParamAt(t, jrq, 0, "toBlock"); got != "0x1234" {
 		t.Fatalf("toBlock = %v, want 0x1234 (the network's highest known head)", got)
 	}
 	if got := nrq.EvmBlockRef(); got != "latest" {
@@ -129,7 +129,7 @@ func TestNormalizeHttpJsonRpc_TranslatesFinalizedFromTheFinalizedHeadNotTheLates
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-	if got := paramAt(t, jrq, 0, "fromBlock"); got != "0x1000" {
+	if got := testParamAt(t, jrq, 0, "fromBlock"); got != "0x1000" {
 		t.Fatalf("fromBlock = %v, want 0x1000 (the FINALIZED head, not the latest head 0x9999)", got)
 	}
 	if got := nrq.EvmBlockRef(); got != "finalized" {
@@ -181,7 +181,7 @@ func TestNormalizeHttpJsonRpc_PassesSafeAndPendingThroughUntouched(t *testing.T)
 
 			NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-			if got := paramAt(t, jrq, 0, "fromBlock"); got != tag {
+			if got := testParamAt(t, jrq, 0, "fromBlock"); got != tag {
 				t.Fatalf("fromBlock = %v, want the untouched tag %q", got, tag)
 			}
 			if got := nrq.EvmBlockRef(); got != nil {
@@ -204,7 +204,7 @@ func TestNormalizeHttpJsonRpc_LeavesBlockHashParamsAlone(t *testing.T) {
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-	if got := paramAt(t, jrq, 0, "blockHash"); got != hash {
+	if got := testParamAt(t, jrq, 0, "blockHash"); got != hash {
 		t.Fatalf("blockHash = %v, want it untouched", got)
 	}
 	if got := nrq.EvmBlockNumber(); got != nil {
@@ -240,7 +240,7 @@ func TestNormalizeHttpJsonRpc_CanonicalisesNonCanonicalHexHeights(t *testing.T) 
 
 			NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-			if got := paramAt(t, jrq, 0, "fromBlock"); got != tc.want {
+			if got := testParamAt(t, jrq, 0, "fromBlock"); got != tc.want {
 				t.Fatalf("fromBlock = %#v, want %q", got, tc.want)
 			}
 			if got := nrq.EvmBlockNumber(); got != tc.num {
@@ -292,7 +292,7 @@ func TestNormalizeHttpJsonRpc_SkipInterpolationLeavesParamsButStillRecordsTheTag
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-	if got := paramAt(t, jrq, 0, "fromBlock"); got != "latest" {
+	if got := testParamAt(t, jrq, 0, "fromBlock"); got != "latest" {
 		t.Fatalf("fromBlock = %v, want the literal tag; skipInterpolation must forward it verbatim", got)
 	}
 	if ref := nrq.EvmBlockRef(); ref != "latest" {
@@ -316,7 +316,7 @@ func TestNormalizeHttpJsonRpc_SkipInterpolationAlsoLeavesNonCanonicalHexAlone(t 
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-	if got := paramAt(t, jrq, 0, "fromBlock"); got != "0x01" {
+	if got := testParamAt(t, jrq, 0, "fromBlock"); got != "0x01" {
 		t.Fatalf("fromBlock = %v, want the literal \"0x01\"; skipInterpolation gates the write-back too", got)
 	}
 	// The height is still CACHED, because the availability check needs it even

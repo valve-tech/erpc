@@ -382,7 +382,7 @@ func TestCovErrors_Classification(t *testing.T) {
 		severity          Severity
 	}{
 		{"Nil", nil, false, false, false, true, SeverityInfo},
-		{"ClientSide", NewErrEndpointClientSideException(nil), true, false, true, true, SeverityInfo},
+		{"ClientSide", NewErrEndpointClientSideException(nil), true, false, false, true, SeverityInfo},
 		{"InvalidRequest", NewErrInvalidRequest(nil), true, false, false, false, SeverityInfo},
 		{"GetLogsRange", NewErrGetLogsExceededMaxAllowedRange(2, 1), true, false, true, true, SeverityInfo},
 		{"GetLogsAddresses", NewErrGetLogsExceededMaxAllowedAddresses(2, 1), true, false, true, true, SeverityInfo},
