@@ -355,6 +355,12 @@ type Tracker struct {
 	windowSize time.Duration
 	logger     *zerolog.Logger
 
+	// headAdvanceSubs are called with (networkId, head) each time a network's
+	// corroborated latest head moves up. Callbacks run under the network's
+	// headMu, so they must not block.
+	headAdvanceMu   sync.RWMutex
+	headAdvanceSubs []func(networkId string, head int64)
+
 	metadata   sync.Map // map[common.Upstream]*NetworkMetadata
 	upsMetrics sync.Map // map[upsKey]*TrackedMetrics
 	ntwMetrics sync.Map // map[ntwKey]*TrackedMetrics
@@ -2138,6 +2144,10 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 				Int64("previousValue", oldNtwVal).
 				Int64("newValue", ntwBn).
 				Msg("re-derived network latest block from corroborated upstream heads in tracker")
+		} else if oldNtwVal > 0 {
+			// The first head a network learns is not an advance: every poller is
+			// still bootstrapping its own.
+			t.notifyHeadAdvance(net, ntwBn)
 		}
 	}
 
@@ -2343,6 +2353,25 @@ func (t *Tracker) GetNetworkBlockTime(networkId string) time.Duration {
 	}
 
 	return 0
+}
+
+// OnNetworkHeadAdvance registers fn to be called with (networkId, head) each
+// time a network's corroborated latest head moves up. fn runs while the
+// tracker holds that network's head lock, so it must return at once (start a
+// goroutine for any work).
+func (t *Tracker) OnNetworkHeadAdvance(fn func(networkId string, head int64)) {
+	t.headAdvanceMu.Lock()
+	t.headAdvanceSubs = append(t.headAdvanceSubs, fn)
+	t.headAdvanceMu.Unlock()
+}
+
+func (t *Tracker) notifyHeadAdvance(networkId string, head int64) {
+	t.headAdvanceMu.RLock()
+	subs := t.headAdvanceSubs
+	t.headAdvanceMu.RUnlock()
+	for _, fn := range subs {
+		fn(networkId, head)
+	}
 }
 
 // GetNetworkLatestBlock returns the network's corroborated latest block (see
