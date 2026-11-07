@@ -25,13 +25,16 @@ type headUpstream struct {
 
 func (h *headUpstream) Forward(ctx context.Context, nq *common.NormalizedRequest, _, _ bool) (*common.NormalizedResponse, error) {
 	h.forwards.Add(1)
+	// A node answers with the head it has when the request arrives; the
+	// delay is the network round trip after that.
+	head := h.head.Load()
 	if h.delay > 0 {
 		time.Sleep(h.delay)
 	}
 	block := map[string]interface{}{
-		"number":    fmt.Sprintf("0x%x", h.head.Load()),
+		"number":    fmt.Sprintf("0x%x", head),
 		"timestamp": fmt.Sprintf("0x%x", time.Now().Unix()),
-		"hash":      fmt.Sprintf("0x%064x", h.head.Load()),
+		"hash":      fmt.Sprintf("0x%064x", head),
 	}
 	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(common.MustNewJsonRpcResponse(1, block, nil)), nil
 }
@@ -92,8 +95,9 @@ func reportPeers(tracker *health.Tracker, head int64) {
 func TestPollLatestBlockNumberAtLeast_PollsPastTheDebounceForABlockTheNetworkHas(t *testing.T) {
 	poller, up, tracker, ctx := newAtLeastPoller(t, 100, 0)
 	up.head.Store(101)
-	reportPeers(tracker, 101)
+	// Read the count first: reportPeers can start the head-advance poll at once.
 	before := up.forwards.Load()
+	reportPeers(tracker, 101)
 
 	got, err := poller.PollLatestBlockNumberAtLeast(ctx, 101)
 
@@ -122,8 +126,8 @@ func TestPollLatestBlockNumberAtLeast_KeepsTheDebounceForABlockTheNetworkLacks(t
 // block number, so the extra load is bounded by the chain's own rate.
 func TestPollLatestBlockNumberAtLeast_PollsOncePerNewBlockForALaggingUpstream(t *testing.T) {
 	poller, up, tracker, ctx := newAtLeastPoller(t, 100, 0)
-	reportPeers(tracker, 101)
 	before := up.forwards.Load()
+	reportPeers(tracker, 101)
 
 	for range 5 {
 		got, err := poller.PollLatestBlockNumberAtLeast(ctx, 101)
@@ -147,8 +151,8 @@ func TestPollLatestBlockNumberAtLeast_ConcurrentRequestsShareOnePoll(t *testing.
 	// for the poll, but long enough that the 20 requests overlap it.
 	up.delay = 20 * time.Millisecond
 	up.head.Store(101)
-	reportPeers(tracker, 101)
 	before := up.forwards.Load()
+	reportPeers(tracker, 101)
 
 	var wg sync.WaitGroup
 	var served atomic.Int32
@@ -192,4 +196,30 @@ func TestEvmStatePoller_NoPollWhenTheNetworkHeadIsNotAhead(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, before, up.forwards.Load())
 	assert.Equal(t, int64(100), poller.LatestBlock())
+}
+
+// Two blocks close together (Sepolia, bug log 201): block 102 arrives while
+// the forced poll for 101 is still running. The call for 102 joins that
+// poll, which answers 101; it must then poll again for 102, not stop and
+// leave 102 to the next debounced poll (8.4 s on a 12 s chain).
+func TestPollLatestBlockNumberAtLeast_ABlockThatArrivesDuringAPollGetsItsOwnPoll(t *testing.T) {
+	poller, up, tracker, ctx := newAtLeastPoller(t, 100, 0)
+	up.delay = 20 * time.Millisecond
+	up.head.Store(101)
+	reportPeers(tracker, 101)
+
+	first := make(chan int64, 1)
+	go func() {
+		got, _ := poller.PollLatestBlockNumberAtLeast(ctx, 101)
+		first <- got
+	}()
+	// Block 102 lands while the poll for 101 is in flight.
+	time.Sleep(5 * time.Millisecond)
+	up.head.Store(102)
+	reportPeers(tracker, 102)
+
+	got, err := poller.PollLatestBlockNumberAtLeast(ctx, 102)
+	require.NoError(t, err)
+	assert.Equal(t, int64(102), got, "the request for 102 must poll again after joining the poll for 101")
+	assert.Equal(t, int64(101), <-first)
 }

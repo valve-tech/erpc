@@ -551,46 +551,56 @@ type forcedLatestPoll struct {
 // that poll runs share it.
 func (e *EvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
 	head, err := e.PollLatestBlockNumber(ctx)
-	if err != nil || head >= want || e.shouldSkipLatestBlockCheck() || e.tracker == nil {
+	if err != nil || e.shouldSkipLatestBlockCheck() || e.tracker == nil {
 		return head, err
 	}
-	e.forcedMu.Lock()
-	c := e.forcedInFlight
-	if c == nil {
-		networkHead := e.tracker.GetNetworkLatestBlock(e.upstream.NetworkId())
-		if want <= e.forcedFor || want > networkHead {
-			e.forcedMu.Unlock()
-			return head, nil
-		}
-		e.forcedFor = want
-		e.logger.Debug().Int64("cachedHead", head).Int64("want", want).Int64("networkHead", networkHead).
-			Msg("polling latest block past the debounce: the network already has the requested block")
-		c = &forcedLatestPoll{done: make(chan struct{})}
-		e.forcedInFlight = c
-		e.forcedMu.Unlock()
-
-		e.stateMu.RLock()
-		cfg, networkLabel := e.cfg, e.networkLabel
-		e.stateMu.RUnlock()
-		// A negative staleness makes the poll run whatever the last stamp. The
-		// shared counter stamps each poll at least 1 ms after the previous one
-		// (allocateUpdatedAtMs), so under a burst a stamp runs ahead of the
-		// clock; 0 or -1ns would then read as fresh and skip the poll.
-		c.head, c.err = e.pollLatestBlockNumber(ctx, cfg, networkLabel, -time.Second)
-
+	// Each pass either waits for a poll already running or starts one; a poll
+	// is started at most once per new want. Waiting can end below want: the
+	// running poll was for an earlier block (two blocks close together), so
+	// the next pass starts this request's own poll.
+	for head < want {
 		e.forcedMu.Lock()
-		e.forcedInFlight = nil
+		c := e.forcedInFlight
+		if c == nil {
+			networkHead := e.tracker.GetNetworkLatestBlock(e.upstream.NetworkId())
+			if want <= e.forcedFor || want > networkHead {
+				e.forcedMu.Unlock()
+				return head, nil
+			}
+			e.forcedFor = want
+			e.logger.Debug().Int64("cachedHead", head).Int64("want", want).Int64("networkHead", networkHead).
+				Msg("polling latest block past the debounce: the network already has the requested block")
+			c = &forcedLatestPoll{done: make(chan struct{})}
+			e.forcedInFlight = c
+			e.forcedMu.Unlock()
+
+			e.stateMu.RLock()
+			cfg, networkLabel := e.cfg, e.networkLabel
+			e.stateMu.RUnlock()
+			// A negative staleness makes the poll run whatever the last stamp. The
+			// shared counter stamps each poll at least 1 ms after the previous one
+			// (allocateUpdatedAtMs), so under a burst a stamp runs ahead of the
+			// clock; 0 or -1ns would then read as fresh and skip the poll.
+			c.head, c.err = e.pollLatestBlockNumber(ctx, cfg, networkLabel, -time.Second)
+
+			e.forcedMu.Lock()
+			e.forcedInFlight = nil
+			e.forcedMu.Unlock()
+			close(c.done)
+			return c.head, c.err
+		}
 		e.forcedMu.Unlock()
-		close(c.done)
-		return c.head, c.err
+		select {
+		case <-c.done:
+			if c.err != nil {
+				return c.head, c.err
+			}
+			head = max(head, c.head)
+		case <-ctx.Done():
+			return head, ctx.Err()
+		}
 	}
-	e.forcedMu.Unlock()
-	select {
-	case <-c.done:
-		return c.head, c.err
-	case <-ctx.Done():
-		return head, ctx.Err()
-	}
+	return head, nil
 }
 
 func (e *EvmStatePoller) pollLatestBlockNumber(ctx context.Context, cfg *common.EvmNetworkConfig, networkLabel string, dbi time.Duration) (int64, error) {

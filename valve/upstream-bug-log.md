@@ -7795,3 +7795,29 @@ upstream, shared with any poll already running. The siblings report a block
 within milliseconds, the HTTP pollers catch up within one round trip, and the
 served tip moves with them. A network's first head is not an advance, and an
 upstream whose poller is off (interval 0) is skipped. Not yet reported upstream.
+
+## 201. A block that arrives during the forced poll for the block before it waits a full debounce
+
+**Status: FIXED in the fork.** `TestPollLatestBlockNumberAtLeast_ABlockThatArrivesDuringAPollGetsItsOwnPoll`
+(`architecture/evm/evm_state_poller_at_least_test.go`) pins it. Found by valve's
+head-lag gate on edge-a (`0.3.0.9-valve`, drained, no clients), on Sepolia only:
+mean 2.5 s and max 9.0 s; 4 of 15 blocks reached the served tip about 8.7 s late,
+among them the adjacent pair 12084344 and 12084345.
+
+`PollLatestBlockNumberAtLeast` (entry 199) lets a call that finds a forced poll
+already running wait for it and return its answer. When block N+1 arrives while
+the forced poll for N is still running, the call for N+1 joins that poll, gets N
+back and returns. Nothing then polls for N+1 until the next debounced poll, 0.7
+× 12 s on Sepolia. Sepolia's 12 s slots, missed slots and occasional close
+pairs of heads make this common there; the other chains rarely deliver two
+heads that close together.
+
+The fix: after a joined poll returns below the wanted block, the call checks
+again and starts its own poll for that block. It is still at most one forced
+poll per new block per upstream. The test's fake upstream now answers with the
+head it holds when the request arrives, as a node does; the old fake read its
+head after the simulated delay, so a joined poll always saw the newer block and
+hid this. Three older tests read their poll count after reporting peer heads,
+which since entry 200 can start a background poll at once; they now read it
+first. The harness gained an irregular block cadence (monorepo
+`fake-node.ts --block-pattern`). Not yet reported upstream.
