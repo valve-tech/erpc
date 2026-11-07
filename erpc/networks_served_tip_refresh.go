@@ -25,6 +25,7 @@ func (n *Network) startServedTipRefresh() {
 		return
 	}
 	n.servedTipRefreshOnce.Do(func() {
+		n.startTipFollow()
 		go func() {
 			ticker := time.NewTicker(servedTipRefreshInterval)
 			defer ticker.Stop()

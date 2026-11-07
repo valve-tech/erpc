@@ -171,33 +171,6 @@ func TestPollLatestBlockNumberAtLeast_ConcurrentRequestsShareOnePoll(t *testing.
 	assert.Equal(t, before+1, up.forwards.Load(), "one poll for all of them")
 }
 
-// When the network's corroborated head moves past this upstream's cached head
-// (the newHeads-fed ws siblings report a block first), the poller polls at once
-// instead of waiting out its debounce. eth_blockNumber is answered from the
-// served tip, which only the HTTP upstreams vote on under option (b), so
-// without this the answer trails the chain by up to a debounce (bug log 200).
-func TestEvmStatePoller_PollsWhenTheNetworkHeadPassesIt(t *testing.T) {
-	poller, up, tracker, _ := newAtLeastPoller(t, 100, 0)
-	up.head.Store(101)
-
-	reportPeers(tracker, 101)
-
-	require.Eventually(t, func() bool { return poller.LatestBlock() == 101 }, 2*time.Second, 10*time.Millisecond,
-		"the poller must learn block 101 without waiting for its one-hour debounce")
-}
-
-// A network head that does not pass this upstream's head starts no poll.
-func TestEvmStatePoller_NoPollWhenTheNetworkHeadIsNotAhead(t *testing.T) {
-	poller, up, tracker, _ := newAtLeastPoller(t, 100, 0)
-	before := up.forwards.Load()
-
-	reportPeers(tracker, 100)
-
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, before, up.forwards.Load())
-	assert.Equal(t, int64(100), poller.LatestBlock())
-}
-
 // Two blocks close together (Sepolia, bug log 201): block 102 arrives while
 // the forced poll for 101 is still running. The call for 102 joins that
 // poll, which answers 101; it must then poll again for 102, not stop and

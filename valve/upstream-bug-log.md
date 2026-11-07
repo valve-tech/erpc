@@ -7772,9 +7772,9 @@ future block cannot drive polls. Not yet reported upstream.
 
 ## 200. `eth_blockNumber` trails the chain by up to a poll debounce when only polled upstreams vote on the served tip
 
-**Status: FIXED in the fork.** `TestEvmStatePoller_PollsWhenTheNetworkHeadPassesIt`
-(`architecture/evm/evm_state_poller_at_least_test.go`) pins it, with the
-harness case `bn-lag.mts`. Found by valve's head-lag check on edge-a
+**Status: FIXED in the fork.** `TestNetwork_ServedTipFollowsTheNetworkHeadWithQuorumVotersOnly`
+(`erpc/networks_tip_follow_test.go`) pins it, with the harness case
+`bn-lag.mts`. Found by valve's head-lag check on edge-a
 (`0.3.0.8-valve`), before it took traffic. Edge-a reported each new block 0.9–8.5
 s late against edge-b (chain 369 mean about 3.9 s, chain 1 about 6.1 s), while
 `eth_getBlockByNumber("latest")` stayed current. `0.3.0.7` had it too; its soak
@@ -7788,13 +7788,20 @@ the tip comes from the HTTP upstreams' polled heads, which are up to one
 debounce (0.7 × block time) old.
 
 The fix keeps #1256's local answer. The tracker now notifies a callback each
-time a network's corroborated head moves up (`OnNetworkHeadAdvance`). Every
-state poller whose own head is behind then polls at once through
-`PollLatestBlockNumberAtLeast` (entry 199): at most one poll per new block per
-upstream, shared with any poll already running. The siblings report a block
-within milliseconds, the HTTP pollers catch up within one round trip, and the
-served tip moves with them. A network's first head is not an advance, and an
-upstream whose poller is off (interval 0) is skipped. Not yet reported upstream.
+time a network's corroborated head moves up (`OnNetworkHeadAdvance`). The
+network (`erpc/networks_tip_follow.go`) then asks the voters that decide the
+served tip to reach that head: the best-ranked ones in routing order, only as
+many as the quorum needs, as `EvmRefreshLatestBlock` does. A voter already at
+the head counts; the others poll through `PollLatestBlockNumberAtLeast` (entry
+199), at most once per new block each. The siblings report a block within
+milliseconds, the voters catch up within one round trip, and the served tip
+moves with them. A network's first head is not an advance.
+
+`0.3.0.9-valve` shipped a first version that made every lagging poller poll on
+each advance. That polled public and fallback upstreams on every block, and it
+broke `TestNetworkPolicy_RealPoll_SlowPolledUpstreamAtTipStaysIn`, whose mocked
+slow upstream answered its old head to every extra poll. The CI erpc job does
+not block, so only a local run showed it. Not yet reported upstream.
 
 ## 201. A block that arrives during the forced poll for the block before it waits a full debounce
 

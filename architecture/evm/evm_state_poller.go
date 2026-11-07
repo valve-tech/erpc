@@ -202,9 +202,6 @@ func NewEvmStatePoller(
 	fbs.OnLargeRollback(func(currentVal, newVal int64) {
 		e.tracker.RecordBlockHeadLargeRollback(e.upstream, "finalized", currentVal, newVal)
 	})
-	if e.tracker != nil {
-		e.tracker.OnNetworkHeadAdvance(e.onNetworkHeadAdvance)
-	}
 
 	return e
 }
@@ -504,33 +501,6 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 	e.stateMu.RUnlock()
 
 	return e.pollLatestBlockNumber(ctx, cfg, networkLabel, e.resolveDebounce(cfg))
-}
-
-// onNetworkHeadAdvance polls at once when the network's corroborated head
-// passes this upstream's cached head, instead of waiting out the debounce. A
-// newHeads-fed upstream (an option (b) ws sibling) reports a block within
-// milliseconds; a polled one learns it only at its next poll, and the served
-// tip that answers eth_blockNumber and anchors "latest" is voted only by the
-// upstreams that serve the method. PollLatestBlockNumberAtLeast bounds this
-// to one poll per new block per upstream and shares a poll already running.
-func (e *EvmStatePoller) onNetworkHeadAdvance(networkId string, head int64) {
-	if e.appCtx.Err() != nil || e.IsObjectNull() || e.latestBlockShared == nil {
-		return
-	}
-	if e.upstream.NetworkId() != networkId || head <= e.latestBlockShared.GetValue() || e.shouldSkipLatestBlockCheck() {
-		return
-	}
-	// An upstream whose poller is off (interval 0) is not polled for its head.
-	if cfg := e.upstream.Config(); cfg == nil || cfg.Evm == nil || cfg.Evm.StatePollerInterval == 0 {
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(e.appCtx, 10*time.Second)
-		defer cancel()
-		if _, err := e.PollLatestBlockNumberAtLeast(ctx, head); err != nil {
-			e.logger.Debug().Err(err).Int64("networkHead", head).Msg("poll on network head advance failed in evm state poller")
-		}
-	}()
 }
 
 // forcedLatestPoll is one request-path latest-block poll run past the
