@@ -7828,3 +7828,14 @@ hid this. Three older tests read their poll count after reporting peer heads,
 which since entry 200 can start a background poll at once; they now read it
 first. The harness gained an irregular block cadence (monorepo
 `fake-node.ts --block-pattern`). Not yet reported upstream.
+
+## 202. Three erpc tests fail at random on the GitLab runners and are quarantined there
+
+**Status:** open. `TestWebSocket_SubscriptionDedup` (pipelines 4679, 4683),
+`TestWebSocket_UnsubscribeIsScopedToConnection` (4700) and
+`TestInit_ServesTheSecondCallFromTheCacheItsConfigNames` (4679) each failed once
+in the `test-erpc` job on code where they pass locally, and the next pipeline on
+the same code passed them. `.gitlab-ci.yml` skips them by name (`QUARANTINE`,
+with `TestAdminApi_ReadOnlyMethods` from entry 196) so the job can block. They
+still run in local `make test-fast`. None is root-caused; take each name out of
+the quarantine when its cause is fixed.

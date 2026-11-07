@@ -49,18 +49,24 @@ test:
     # siblings, so run those siblings here.
     - go test -count 1 -timeout 5m -run '^(TestDynamoDBConnectorInitialization|TestPostgreConnectorInitialization)$/^(fails|Fails)' ./data
 
-# The erpc package holds many timing-sensitive tests. On these slow shared
-# runners, six pipelines (3111-3139) hit ten different ones, on Go code
-# that passed elsewhere. This job reports them without blocking: a failure
-# shows as a warning with its full log. GitHub's test.yml still runs erpc
-# and stays the blocking gate for it. Log each flake this job finds in
-# valve/upstream-bug-log.md, so it gets a root-cause fix.
+# The erpc package. It blocks: 0.3.0.9-valve shipped green with a test that
+# failed 10 of 10 because this job only reported. GitHub's test.yml is
+# disabled in this fork, so nothing else gates erpc.
+#
+# QUARANTINE names tests that failed here at random on unchanged code
+# (pipelines 4677-4701). Each has an open entry in valve/upstream-bug-log.md
+# (196, 202). Remove a name when its entry is fixed; never add one without an
+# entry. A runner system failure retries once.
 test-erpc:
   timeout: 1h
-  allow_failure: true
+  allow_failure: false
+  retry:
+    max: 1
+    when: [runner_system_failure, stuck_or_timeout_failure]
   before_script:
     # Same toolchain as test: some erpc tests start a real redis-server.
     - apt-get update -qq && apt-get install -y -qq redis-server
   script:
     - !reference [.container-tests, script]
-    - go test -count 1 -parallel 2 -timeout 30m -skip "$CONTAINER_TESTS" ./erpc
+    - export QUARANTINE='^(TestAdminApi_ReadOnlyMethods|TestWebSocket_SubscriptionDedup|TestWebSocket_UnsubscribeIsScopedToConnection|TestInit_ServesTheSecondCallFromTheCacheItsConfigNames)$'
+    - go test -count 1 -parallel 2 -timeout 30m -skip "$CONTAINER_TESTS|$QUARANTINE" ./erpc
