@@ -7839,3 +7839,23 @@ the same code passed them. `.gitlab-ci.yml` skips them by name (`QUARANTINE`,
 with `TestAdminApi_ReadOnlyMethods` from entry 196) so the job can block. They
 still run in local `make test-fast`. None is root-caused; take each name out of
 the quarantine when its cause is fixed.
+
+## 203. Production `eth_blockNumber` trails the chain on four tags in a row; `evm.forwardBlockNumber` is the escape hatch
+
+**Status:** open. `TestEthBlockNumber_ForwardBlockNumberForwardsAndFloors`
+(`architecture/evm/eth_blockNumber_test.go`) pins the escape hatch; the
+production cause is not found yet. Valve's head-lag gate failed on edge-a for
+0.3.0.7 to 0.3.0.10. On `0.3.0.10-valve` (drained, no clients, all four
+chains) the mean / max lag was 0.42 / 7.8 s (chain 1), 1.05 / 7.3 s (369), 0.58
+/ 7.9 s (943) and 3.75 / 9.4 s (Sepolia), against at most 0.07 / 0.39 s on
+`0.3.0.5`. Late blocks were always one behind "latest" and arrived at about the
+old poll cadence. The local harness (`bn-lag.mts`) passes the same build, so it
+lacks something production has; the leading suspect is public upstreams among
+the served-tip voters (entry 200's follower polls the voters the quorum needs).
+
+`evm.forwardBlockNumber: true` (per network) sends `eth_blockNumber` to an
+upstream, as `0.3.0.5` did: the post-forward hook raises an answer below the
+served tip to it and lets a fresher answer through. It gives up upstream #1256's
+exact pin for that method, so `eth_blockNumber` can again read one block ahead
+of "latest" interpolation, which is `0.3.0.5` behavior. Unset keeps the local
+answer.

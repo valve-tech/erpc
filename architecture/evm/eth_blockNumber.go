@@ -22,6 +22,10 @@ func networkPreForward_eth_blockNumber(ctx context.Context, network common.Netwo
 	if dirs := nq.Directives(); dirs == nil || !dirs.EnforceHighestBlock {
 		return false, nil, nil
 	}
+	// evm.forwardBlockNumber: an upstream answers; the post-forward hook floors it.
+	if forwardsBlockNumber(network) {
+		return false, nil, nil
+	}
 	ctx = context.WithValue(ctx, common.RequestContextKey, nq)
 	tip := common.EvmHighestLatestBlockNumber(network, ctx)
 	if tip <= 0 {
@@ -113,6 +117,11 @@ func networkPostForward_eth_blockNumber(ctx context.Context, network common.Netw
 	if blockNumber == highestBlock {
 		return nr, re
 	}
+	// evm.forwardBlockNumber: floor only, as 0.3.0.5-valve. A fresher upstream
+	// answer is the chain tip and passes through.
+	if blockNumber > highestBlock && forwardsBlockNumber(network) {
+		return nr, re
+	}
 	ups := nr.Upstream()
 	if blockNumber > highestBlock {
 		// Pin-down: the response is AHEAD of the served head — freshness, not
@@ -176,4 +185,9 @@ func networkPostForward_eth_blockNumber(ctx context.Context, network common.Netw
 	// We are replacing the original response, so release it to avoid retaining buffers
 	nr.Release()
 	return corrected, nil
+}
+
+func forwardsBlockNumber(network common.Network) bool {
+	cfg := network.Config()
+	return cfg != nil && cfg.Evm.ForwardsBlockNumber()
 }
