@@ -97,3 +97,53 @@ func TestNetworkPostForward_EthBlockNumber(t *testing.T) {
 		assert.Equal(t, int64(0x1002), bn)
 	})
 }
+
+// evm.forwardBlockNumber restores 0.3.0.5-valve's eth_blockNumber: the request
+// goes to an upstream, an answer below the served tip is raised to it, and a
+// fresher answer passes through. It is the escape hatch for networks whose
+// served tip trails the chain (bug log 203).
+func TestEthBlockNumber_ForwardBlockNumberForwardsAndFloors(t *testing.T) {
+	on := true
+	netWith := func(tip int64) *testNetwork {
+		return &testNetwork{
+			cfg: &common.NetworkConfig{
+				Architecture: common.ArchitectureEvm,
+				Evm:          &common.EvmNetworkConfig{ChainId: 123, ForwardBlockNumber: &on},
+			},
+			highestLatest: tip,
+		}
+	}
+	req := func() *common.NormalizedRequest {
+		r := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`))
+		r.SetDirectives(&common.RequestDirectives{EnforceHighestBlock: true})
+		return r
+	}
+	post := func(t *testing.T, network common.Network, respHex string) int64 {
+		t.Helper()
+		r := req()
+		jrr, err := common.NewJsonRpcResponse(1, respHex, nil)
+		require.NoError(t, err)
+		out, err := networkPostForward_eth_blockNumber(context.Background(), network, r, common.NewNormalizedResponse().WithRequest(r).WithJsonRpcResponse(jrr), nil)
+		require.NoError(t, err)
+		_, bn, err := ExtractBlockReferenceFromResponse(context.Background(), out)
+		require.NoError(t, err)
+		return bn
+	}
+
+	t.Run("IsForwardedNotAnsweredLocally", func(t *testing.T) {
+		handled, resp, err := networkPreForward_eth_blockNumber(context.Background(), netWith(0x1000), req())
+		require.NoError(t, err)
+		assert.False(t, handled, "the request must reach an upstream")
+		assert.Nil(t, resp)
+	})
+	t.Run("BelowTipIsRaisedToTip", func(t *testing.T) {
+		assert.Equal(t, int64(0x1000), post(t, netWith(0x1000), "0x800"))
+	})
+	t.Run("AboveTipPassesThrough", func(t *testing.T) {
+		assert.Equal(t, int64(0x1002), post(t, netWith(0x1000), "0x1002"),
+			"a fresher upstream answer is the chain tip and must not be pinned down")
+	})
+	t.Run("UnknownTipPassesThrough", func(t *testing.T) {
+		assert.Equal(t, int64(0x1002), post(t, netWith(0), "0x1002"))
+	})
+}

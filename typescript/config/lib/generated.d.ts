@@ -1833,6 +1833,13 @@ export interface EvmNetworkConfig {
      * EvmServedTipConfig.
      */
     servedTip?: EvmServedTipConfig;
+  /**
+   * ForwardBlockNumber sends eth_blockNumber to an upstream, as
+   * 0.3.0.5-valve did, instead of answering it from the served tip. An
+   * answer below the served tip is raised to it; a fresher answer passes
+   * through. Nil or false keeps the local answer pinned to the served tip.
+   */
+  forwardBlockNumber?: boolean;
     getLogsMaxAllowedRange?: number;
     getLogsMaxAllowedAddresses?: number;
     getLogsMaxAllowedTopics?: number;

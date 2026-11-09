@@ -3188,12 +3188,20 @@ type EvmNetworkConfig struct {
 	// block it advertises to clients (and enforces via block-availability).
 	// Nil uses the defaults: quorum 2, regression guard on, no guarantees. See
 	// EvmServedTipConfig.
-	ServedTip                  *EvmServedTipConfig `yaml:"servedTip,omitempty" json:"servedTip,omitempty"`
-	GetLogsMaxAllowedRange     int64               `yaml:"getLogsMaxAllowedRange,omitempty" json:"getLogsMaxAllowedRange"`
-	GetLogsMaxAllowedAddresses int64               `yaml:"getLogsMaxAllowedAddresses,omitempty" json:"getLogsMaxAllowedAddresses"`
-	GetLogsMaxAllowedTopics    int64               `yaml:"getLogsMaxAllowedTopics,omitempty" json:"getLogsMaxAllowedTopics"`
-	GetLogsSplitOnError        *bool               `yaml:"getLogsSplitOnError,omitempty" json:"getLogsSplitOnError"`
-	GetLogsSplitConcurrency    int                 `yaml:"getLogsSplitConcurrency,omitempty" json:"getLogsSplitConcurrency"`
+	ServedTip *EvmServedTipConfig `yaml:"servedTip,omitempty" json:"servedTip,omitempty"`
+
+	// ForwardBlockNumber sends eth_blockNumber to an upstream, as
+	// 0.3.0.5-valve did, instead of answering it from the served tip. An
+	// answer below the served tip is raised to it; a fresher answer passes
+	// through, so a client never sees a head behind the chain because the
+	// served tip trails it. Nil or false keeps the local answer pinned to the
+	// served tip. Valve fork; bug log 203.
+	ForwardBlockNumber         *bool `yaml:"forwardBlockNumber,omitempty" json:"forwardBlockNumber,omitempty"`
+	GetLogsMaxAllowedRange     int64 `yaml:"getLogsMaxAllowedRange,omitempty" json:"getLogsMaxAllowedRange"`
+	GetLogsMaxAllowedAddresses int64 `yaml:"getLogsMaxAllowedAddresses,omitempty" json:"getLogsMaxAllowedAddresses"`
+	GetLogsMaxAllowedTopics    int64 `yaml:"getLogsMaxAllowedTopics,omitempty" json:"getLogsMaxAllowedTopics"`
+	GetLogsSplitOnError        *bool `yaml:"getLogsSplitOnError,omitempty" json:"getLogsSplitOnError"`
+	GetLogsSplitConcurrency    int   `yaml:"getLogsSplitConcurrency,omitempty" json:"getLogsSplitConcurrency"`
 	// GetLogsMaxResponseBytes caps the total size of a MERGED eth_getLogs response —
 	// the sum of every sub-response a split assembles, not the size of any one piece.
 	// Splitting exists to get past an upstream's per-request limits, so once a request
@@ -4143,4 +4151,9 @@ func copyStringSliceMap(in map[string][]string) map[string][]string {
 		out[k] = append([]string(nil), v...)
 	}
 	return out
+}
+
+// ForwardsBlockNumber reports whether evm.forwardBlockNumber is on.
+func (c *EvmNetworkConfig) ForwardsBlockNumber() bool {
+	return c != nil && c.ForwardBlockNumber != nil && *c.ForwardBlockNumber
 }
