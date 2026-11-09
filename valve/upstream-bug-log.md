@@ -7840,6 +7840,13 @@ with `TestAdminApi_ReadOnlyMethods` from entry 196) so the job can block. They
 still run in local `make test-fast`. None is root-caused; take each name out of
 the quarantine when its cause is fixed.
 
+The `test` job also skips `TestEvaluate_ReusesVMBetweenCalls`
+(`internal/consensus/policy`, an upstream test). It failed once in pipeline
+4749 and passed 20 of 20 locally. `Evaluate` returns its VM to the pool after
+the evaluation goroutine ends, so a second call can arrive first, find no idle
+VM, build a new one and read "first". The pool behaves correctly; the test
+assumes an ordering the pool does not promise.
+
 ## 203. Production `eth_blockNumber` trails the chain on four tags in a row; `evm.forwardBlockNumber` is the escape hatch
 
 **Status:** open. `TestEthBlockNumber_ForwardBlockNumberForwardsAndFloors`
