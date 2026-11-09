@@ -7847,6 +7847,12 @@ the evaluation goroutine ends, so a second call can arrive first, find no idle
 VM, build a new one and read "first". The pool behaves correctly; the test
 assumes an ordering the pool does not promise.
 
+It also skips `TestResolvePolicy_TimeoutFailsClosed` (`consensus`, an upstream
+test). It failed once in pipeline 4761 and passed 30 of 30 locally, and 10 of 10
+under `-race -cpu 1`. It sets a 1 ms eval timeout, and `NewConsensus` evaluates
+the policy source once under that same timeout, so on a slow runner the setup
+fails before the step under test.
+
 ## 203. Production `eth_blockNumber` trails the chain on four tags in a row; `evm.forwardBlockNumber` is the escape hatch
 
 **Status:** open. `TestEthBlockNumber_ForwardBlockNumberForwardsAndFloors`
