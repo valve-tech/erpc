@@ -7866,3 +7866,25 @@ served tip to it and lets a fresher answer through. It gives up upstream #1256's
 exact pin for that method, so `eth_blockNumber` can again read one block ahead
 of "latest" interpolation, which is `0.3.0.5` behavior. Unset keeps the local
 answer.
+
+## 204. `networkDefaults.evm` does not reach a network with its own `evm` block for six fields
+
+**Status: FIXED in the fork.** `TestNetworkDefaults_EveryEvmFieldIsInheritedByANetworkWithItsOwnEvmBlock`
+(`common/evm_network_defaults_merge_test.go`) pins it for every field. Found by
+valve's 0.3.0.11 rollout: edge-a forwarded 0 `eth_blockNumber` although the config
+set `networkDefaults.evm.forwardBlockNumber: true`, and gate 12 failed again.
+
+`NetworkConfig.SetDefaults` copies `networkDefaults.evm` whole only into a network
+with no `evm` block. Every production network has one (at least `chainId`), so it
+inherits through a hand-kept list of fields. `forwardBlockNumber`,
+`enforceBlockAvailability`, `maxRetryableBlockDistance`, `markEmptyAsErrorMethods`
+and `idempotentTransactionBroadcast` were not on it, so a default for any of them
+was dropped without a warning. The new test fills every `EvmNetworkConfig` field
+in the defaults with a value no system default produces and requires it on the
+network, except the fields in `evmFieldsNotInherited` (`chainId`, and the
+deprecated `maxFutureBlockRetryDistance`), each with its reason.
+
+The local harness missed it twice over: `bn-lag.mts` set the option with a patch
+into the network's own `evm` block, and it rendered the config for erpcRef
+`0.3.0.7-valve`, so valve's `networkDefaults` rendering never ran. Harness runs
+must render for the tag under test, with no patches.

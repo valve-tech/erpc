@@ -2339,6 +2339,25 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			if n.Evm.StripSubscribeFromBlockZero == nil && defaults.Evm.StripSubscribeFromBlockZero != nil {
 				n.Evm.StripSubscribeFromBlockZero = defaults.Evm.StripSubscribeFromBlockZero
 			}
+			// Fields below were missing from this list until 0.3.0.12-valve, so a
+			// network with its own evm block silently dropped them (bug log 204).
+			// TestNetworkDefaults_EveryEvmFieldIsInheritedByANetworkWithItsOwnEvmBlock
+			// fails for any EvmNetworkConfig field this list does not cover.
+			if n.Evm.ForwardBlockNumber == nil && defaults.Evm.ForwardBlockNumber != nil {
+				n.Evm.ForwardBlockNumber = defaults.Evm.ForwardBlockNumber
+			}
+			if n.Evm.EnforceBlockAvailability == nil && defaults.Evm.EnforceBlockAvailability != nil {
+				n.Evm.EnforceBlockAvailability = defaults.Evm.EnforceBlockAvailability
+			}
+			if n.Evm.MaxRetryableBlockDistance == nil && defaults.Evm.MaxRetryableBlockDistance != nil {
+				n.Evm.MaxRetryableBlockDistance = defaults.Evm.MaxRetryableBlockDistance
+			}
+			if n.Evm.MarkEmptyAsErrorMethods == nil && defaults.Evm.MarkEmptyAsErrorMethods != nil {
+				n.Evm.MarkEmptyAsErrorMethods = append([]string(nil), defaults.Evm.MarkEmptyAsErrorMethods...)
+			}
+			if n.Evm.IdempotentTransactionBroadcast == nil && defaults.Evm.IdempotentTransactionBroadcast != nil {
+				n.Evm.IdempotentTransactionBroadcast = defaults.Evm.IdempotentTransactionBroadcast
+			}
 			for method, on := range defaults.Evm.LocalAnswers {
 				if _, set := n.Evm.LocalAnswers[method]; !set {
 					if n.Evm.LocalAnswers == nil {
