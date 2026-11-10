@@ -511,12 +511,25 @@ type forcedLatestPoll struct {
 	err  error
 }
 
+// networkHasBlock reports whether the network's heads are evidence that block
+// want exists: the corroborated head (second-highest) holds it, or it is the
+// very next block and at least one upstream already reports it. Replicas
+// import a block a moment apart, and a client that heard of it over newHeads
+// asks at once, while the corroborated head still waits for the second
+// replica (bug log 205). One upstream alone moves the bound only one block
+// past the corroborated head, so a forked or lying head cannot make requests
+// for later blocks poll.
+func networkHasBlock(want, corroborated, highest int64) bool {
+	return want <= corroborated || (want == corroborated+1 && want <= highest)
+}
+
 // PollLatestBlockNumberAtLeast returns the latest block like
 // PollLatestBlockNumber, for a request that needs block want. When the cached
 // head is below want and the network's corroborated head already holds want,
 // it polls once past the debounce: the block exists, and a poll that started
 // before it landed (a read-triggered or ticker poll) must not make the request
-// wait a full block time. It polls at most once per new want, so a lagging
+// wait a full block time. "Holds" includes the very next block once one
+// upstream reports it (networkHasBlock). It polls at most once per new want, so a lagging
 // upstream costs about one extra poll per block. Requests that arrive while
 // that poll runs share it.
 func (e *EvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
@@ -533,7 +546,7 @@ func (e *EvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want 
 		c := e.forcedInFlight
 		if c == nil {
 			networkHead := e.tracker.GetNetworkLatestBlock(e.upstream.NetworkId())
-			if want <= e.forcedFor || want > networkHead {
+			if want <= e.forcedFor || !networkHasBlock(want, networkHead, e.tracker.GetNetworkHighestLatestBlock(e.upstream.NetworkId())) {
 				e.forcedMu.Unlock()
 				return head, nil
 			}

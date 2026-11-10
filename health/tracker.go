@@ -55,7 +55,10 @@ type metadataKey struct {
 type NetworkMetadata struct {
 	evmLatestBlockNumber    atomic.Int64
 	evmLatestBlockTimestamp atomic.Int64
-	evmFinalizedBlockNumber atomic.Int64
+	// On the network entry only: the highest latest head any non-benched
+	// upstream reports (every upstream's, when all are benched).
+	evmHighestLatestBlockNumber atomic.Int64
+	evmFinalizedBlockNumber     atomic.Int64
 
 	// On the network entry only (nil upstream). headMu serializes every head
 	// publication for the network so a slow re-derivation can never overwrite a
@@ -1773,6 +1776,24 @@ func corroboratedNetworkHead(ntwMeta *NetworkMetadata, getVal func(*NetworkMetad
 	return secondHighestHead(ntwMeta, getVal, false)
 }
 
+// highestNetworkHead is the highest head across the network's non-benched
+// upstreams, or across all of them when every one is benched. Unlike
+// corroboratedNetworkHead, one upstream alone decides it.
+func highestNetworkHead(ntwMeta *NetworkMetadata, getVal func(*NetworkMetadata) int64) int64 {
+	var highest, any int64
+	for _, r := range ntwMeta.reporters {
+		v := getVal(r.meta)
+		any = max(any, v)
+		if !r.meta.headBenched.Load() {
+			highest = max(highest, v)
+		}
+	}
+	if highest > 0 {
+		return highest
+	}
+	return any
+}
+
 func secondHighestHead(ntwMeta *NetworkMetadata, getVal func(*NetworkMetadata) int64, skipBenched bool) (int64, common.Upstream) {
 	var first, second int64
 	var firstUps, secondUps common.Upstream
@@ -2127,9 +2148,9 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 	}
 
 	oldNtwVal := ntwMeta.evmLatestBlockNumber.Load()
-	ntwBn, headReporter := corroboratedNetworkHead(ntwMeta, func(meta *NetworkMetadata) int64 {
-		return meta.evmLatestBlockNumber.Load()
-	})
+	latestOf := func(meta *NetworkMetadata) int64 { return meta.evmLatestBlockNumber.Load() }
+	ntwBn, headReporter := corroboratedNetworkHead(ntwMeta, latestOf)
+	ntwMeta.evmHighestLatestBlockNumber.Store(highestNetworkHead(ntwMeta, latestOf))
 	if ntwBn <= 0 {
 		lg.Warn().Int64("value", ntwBn).Msg("ignoring block head lag tracking for non-positive block number in tracker")
 		return
@@ -2379,6 +2400,14 @@ func (t *Tracker) notifyHeadAdvance(networkId string, head int64) {
 // upstreams, or the only one. 0 until reported.
 func (t *Tracker) GetNetworkLatestBlock(networkId string) int64 {
 	return t.getMetadata(metadataKey{nil, networkId}).evmLatestBlockNumber.Load()
+}
+
+// GetNetworkHighestLatestBlock returns the highest latest block any
+// non-benched upstream of the network reports (see highestNetworkHead). One
+// upstream alone sets it, so it is evidence that a block exists, not a
+// corroborated head. 0 until reported.
+func (t *Tracker) GetNetworkHighestLatestBlock(networkId string) int64 {
+	return t.getMetadata(metadataKey{nil, networkId}).evmHighestLatestBlockNumber.Load()
 }
 
 // GetNetworkFinalizedBlock returns the network's corroborated finalized block

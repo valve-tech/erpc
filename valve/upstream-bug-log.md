@@ -7909,38 +7909,49 @@ must render for the tag under test, with no patches.
 Upstream: issue erpc/erpc#1424 and PR erpc/erpc#1425 cover the four upstream
 fields; `forwardBlockNumber` is fork-only. Released in `0.3.0.12-valve`.
 
-## 205. Near-tip `eth_getLogs` waits a block time when option (b) leaves only polled heads to vote
+## 205. Near-tip `eth_getLogs` waits a block time while the second replica imports the block
 
-**Status:** open in eRPC. A config workaround is deployed with
-`0.3.0.12-valve`: valve's generator sets `evm.headLagToleranceBlocks: 1` (upstream
-#1099) on each direct-* HTTP upstream when option (b) is on.
+**Status: FIXED in the fork.** `TestPollLatestBlockNumberAtLeast_PollsForTheNextBlockWhenOneUpstreamHasIt`
+and `TestPollLatestBlockNumberAtLeast_OneUpstreamAloneCannotPullTheBypassPastTheNextBlock`
+(`architecture/evm/evm_state_poller_at_least_test.go`) pin it. `0.3.0.12-valve`
+also carries a config workaround: valve's generator sets
+`evm.headLagToleranceBlocks: 1` (upstream #1099) on each direct-* HTTP upstream
+when option (b) is on.
 
 Valve rolled back `0.3.0.11-valve` on edge-a at 04:41Z on 2026-11-09. Near-tip
 `eth_getLogs` on chain 369 had 15 requests over 5 s on edge-a against 0 on
-edge-b, with p99 10.37 s against 0.050 s. Option (b) makes each `-ws` sibling
-serve subscriptions only, so it no longer serves unary requests or votes. Every
-voter is then an HTTP upstream with a polled head. When block N lands, the
-availability gate sees head N−1 and refuses the read. Entry 199's bypass poll
-(`PollLatestBlockNumberAtLeast`) runs only when the corroborated network head
-already holds N, and no voter has seen N yet. So no poll runs, and the read
-waits for the next debounced poll, about one block time.
+edge-b, with p99 10.37 s against 0.050 s.
 
-Harness (`tip-run.mts`, 369, rendered for each tag, 10 s blocks, 60 blocks;
-`--http-head-lag-ms 300` stands in for the missing head update):
+The cause is skew between the replicas, not a lag inside one node. On
+direct-b-evm-369, reth answers `eth_blockNumber`, `eth_getBlockByNumber("latest")`
+and `eth_getLogs` for N over HTTP the moment it emits `newHeads` N (valve,
+2026-11-09). But direct-a and direct-b import each block a moment apart. A
+client hears of N from the first one over newHeads and asks at once. Entry 199's
+bypass poll (`PollLatestBlockNumberAtLeast`) ran only when the corroborated
+head (second-highest) held N, and that waits for the second replica. So both
+HTTP replicas refused N, and the request slept the block-unavailable delay, one
+block time. The bypass polls fired about 150 ms later, too late. Option (b)
+exposed it: on `0.3.0.5` the `-ws` siblings served the read with their
+newHeads-fed heads.
+
+The fix: the bypass also runs for the very next block (the corroborated head
+plus one) when at least one non-benched upstream reports it
+(`Tracker.GetNetworkHighestLatestBlock`). One upstream alone moves the bound
+one block only, so a forked or lying head cannot make requests for later
+blocks poll; it is still at most one poll per new block per upstream.
+
+Harness (`tip-run.mts`, 369, rendered for `0.3.0.12-valve`, option (b), 10 s
+blocks, 60 blocks, 30 ms node delay; replica b reads a fake-node mirror that
+imports each block 150 ms later):
 
 | build and config | newHeads client p99 |
 |---|---|
+| `0.3.0.12`, no tolerance | 10.05 s |
+| `0.3.0.12` with `headLagToleranceBlocks: 1` | 0.043 s |
+| this fix, no tolerance | 0.077 s |
 | `0.3.0.5`, production shape (WS siblings serve unary) | 0.071 s |
-| `0.3.0.11`/`0.3.0.12`, option (b) | 10.07 s |
-| the same plus `headLagToleranceBlocks: 1` on direct-* HTTP | 0.57 s |
-| the same, the `-ws` siblings also serve `eth_getLogs`, no tolerance | 0.005 s |
 
-With the tolerance, an early read reaches reth. Reth refuses a block past its
-head with `-32602 "block range extends beyond current head block"`, never `[]`.
-eRPC fails over, and the second node answers. Because reth answers N the moment
-it announces N, production should rarely see that refusal. Valve's soak gate 14
-counts it.
-
-The eRPC fix is open: let each `-ws` sibling's `newHeads` raise its HTTP twin's
-head, or let the siblings vote on the corroborated head without serving unary.
-Its harness needs no fake node lag, so it must fail on the gate itself first.
+The earlier harness model, `--http-head-lag-ms 300`, reproduced the stall
+without its real cause. With it, the tolerance gave 0.57 s, because each early
+read got reth's `-32602` and failed over. Reth refuses a block past its head
+with `-32602 "block range extends beyond current head block"`, never `[]`.

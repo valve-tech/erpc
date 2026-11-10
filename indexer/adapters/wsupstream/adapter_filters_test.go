@@ -22,11 +22,12 @@ func newHandleFilterAdapter(t *testing.T) (*Adapter, *fakeSink) {
 	logger := zerolog.New(zerolog.NewTestWriter(t)).Level(zerolog.ErrorLevel)
 	sink := &fakeSink{events: make(chan indexer.StreamEvent, 8)}
 	return &Adapter{
-		upstreamID: "test-ws-upstream",
-		networkID:  "evm:1",
-		logger:     &logger,
-		filters:    make(map[string]*filterSub),
-		sink:       sink,
+		upstreamID:   "test-ws-upstream",
+		networkID:    "evm:1",
+		networkLabel: func() string { return "evm:1" },
+		logger:       &logger,
+		filters:      make(map[string]*filterSub),
+		sink:         sink,
 	}, sink
 }
 

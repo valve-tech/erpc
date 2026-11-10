@@ -196,3 +196,41 @@ func TestPollLatestBlockNumberAtLeast_ABlockThatArrivesDuringAPollGetsItsOwnPoll
 	assert.Equal(t, int64(102), got, "the request for 102 must poll again after joining the poll for 101")
 	assert.Equal(t, int64(101), <-first)
 }
+
+// The two replicas import each block a moment apart. While only the first
+// has block N, the corroborated head (second-highest) is still N-1, yet a
+// client that heard of N over newHeads asks for it at once. A request for
+// that next block polls past the debounce when one upstream already reports
+// it, so the request does not sleep a block time while the other replica
+// catches up (bug log 205).
+func TestPollLatestBlockNumberAtLeast_PollsForTheNextBlockWhenOneUpstreamHasIt(t *testing.T) {
+	poller, up, tracker, ctx := newAtLeastPoller(t, 100, 0)
+	up.head.Store(101)
+	before := up.forwards.Load()
+	tracker.SetLatestBlockNumber(atLeastPeers[0], 101, time.Now().Unix())
+	tracker.SetLatestBlockNumber(atLeastPeers[1], 100, time.Now().Unix())
+	require.Equal(t, int64(100), tracker.GetNetworkLatestBlock(poller.upstream.NetworkId()), "corroborated head still at 100")
+
+	got, err := poller.PollLatestBlockNumberAtLeast(ctx, 101)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(101), got)
+	assert.Equal(t, before+1, up.forwards.Load(), "one poll past the debounce")
+}
+
+// One upstream alone can move the bypass only to the block right after the
+// corroborated head: an upstream that reports a head far ahead (forked or
+// lying) cannot make requests for later blocks poll.
+func TestPollLatestBlockNumberAtLeast_OneUpstreamAloneCannotPullTheBypassPastTheNextBlock(t *testing.T) {
+	poller, up, tracker, ctx := newAtLeastPoller(t, 100, 0)
+	up.head.Store(105)
+	before := up.forwards.Load()
+	tracker.SetLatestBlockNumber(atLeastPeers[0], 105, time.Now().Unix())
+	tracker.SetLatestBlockNumber(atLeastPeers[1], 100, time.Now().Unix())
+
+	got, err := poller.PollLatestBlockNumberAtLeast(ctx, 102)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), got)
+	assert.Equal(t, before, up.forwards.Load(), "no poll for a block two past the corroborated head")
+}
