@@ -22,11 +22,13 @@ import (
 // whose config forbids the method — 82% of all probe traffic.
 func TestProber_SkipsAMethodTheUpstreamIgnores(t *testing.T) {
 	deps := &stubEngine{}
-	// This upstream's own config ignores txpool_*; it serves eth_* normally.
+	// This upstream's own config ignores trace_*; it serves eth_* normally.
+	// The ignored method must be a classified read, or the read gate stops
+	// it before this gate runs.
 	dead := &stubProbeUpstream{
 		id: "public",
 		handleMethod: func(method string) (bool, error) {
-			return method != "txpool_content", nil
+			return method != "trace_block", nil
 		},
 	}
 	deps.setExcluded("evm:1", []common.Upstream{dead})
@@ -41,7 +43,7 @@ func TestProber_SkipsAMethodTheUpstreamIgnores(t *testing.T) {
 	skipped := telemetry.MetricSelectionProbeSkipped.WithLabelValues("evm:1", "method_ignored")
 	before := testutil.ToFloat64(skipped)
 
-	p.Publish(makeProbeReq(t, "txpool_content"))
+	p.Publish(makeProbeReq(t, "trace_block"))
 	time.Sleep(150 * time.Millisecond)
 
 	assert.Equal(t, int64(0), dead.calls.Load(),

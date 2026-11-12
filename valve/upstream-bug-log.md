@@ -7343,8 +7343,11 @@ there only as the deeper fix.
 
 ## 189. The prober's write gate enumerates known writes, so it mirrors a custom namespace's write
 
-**Status:** open. No fork fix yet — the change is to the production request path
-and is not made here. Measured on the fleet 2026-09-16.
+**Status: FIXED in the fork** by entry 206's read gate (2026-11-11). An
+unclassified method such as `msgboard_addMessage` is no longer mirrored.
+`TestProber_NeverMirrorsAMethodThatIsNotAClassifiedRead/msgboard_addMessage`
+(`internal/policy/prober_stateful_test.go`) pins it. Measured on the fleet
+2026-09-16.
 
 `isProbeUnsafeMethod` (`internal/policy/prober.go`) decides what the selection
 prober must never mirror, and it decides it by NAME:
@@ -7955,3 +7958,49 @@ The earlier harness model, `--http-head-lag-ms 300`, reproduced the stall
 without its real cause. With it, the tolerance gave 0.57 s, because each early
 read got reth's `-32602` and failed over. Reth refuses a block past its head
 with `-32602 "block range extends beyond current head block"`, never `[]`.
+
+## 206. The prober mirrors filter polls, and the mirror ignores the upstream pin
+
+**Status: FIXED in the fork.** `TestNetworkProbe_NeverMirrorsAFilterPollToAnotherUpstream`
+(`erpc/networks_probe_stateful_test.go`) and the tests in
+`internal/policy/prober_stateful_test.go` pin it.
+
+Valve saw it on 2026-11-11: 42 `eth_getFilterChanges` probes went to an
+external upstream on chain 369 (each one `ErrEndpointUnsupported`), and 13 went
+to the node that held the filter on chain 1.
+
+On reth and geth `eth_getFilterChanges` is not a read. It returns the changes
+since the last poll and moves the filter's cursor. A mirrored poll to the node
+that holds the filter takes the events, and the client's next real poll does
+not get them. A mirrored poll to any other node fails, and the tracker counts
+the failure against that node.
+
+Three defects meet:
+
+1. `Network.Forward` publishes to the probe bus before `shouldHandleMethod`
+   applies the stateful-method gate (`erpc/networks.go`). A filter poll reaches
+   the prober even when the network then refuses it.
+2. The prober's only method gate was the write-prefix list (entry 189). It does
+   not know the filter or subscription methods.
+3. `mirror()` calls `Forward` with `byPassMethodExclusion=true`, and that flag
+   also skips the `X-ERPC-Use-Upstream` check in `Upstream.shouldSkip`
+   (`upstream/upstream.go`). A pinned request reached other upstreams.
+
+The fix is in `internal/policy/prober.go`, and it turns the method gate the
+right way round, as entry 189 proposed. `isProbeEligibleMethod` mirrors a method
+only when the network's method table (`methods.definitions`, the table that the
+cache and the stateful gate already read) has an entry for it and the entry is
+not `stateful`. `SetDefaults` marks every filter method stateful. The
+subscription methods, custom-namespace writes and unknown methods have no
+entry, so they are not mirrored. The skip counts as
+`erpc_selection_probe_skipped_total{reason="not_probe_eligible"}`. A pinned
+request goes only to excluded upstreams that match its selector; other skips
+count as `reason="pinned_elsewhere"`.
+
+The cost: a read that the table does not list (`txpool_*`, `web3_clientVersion`,
+`eth_accounts`) gets no probe samples. The operator adds it to
+`methods.definitions`. A network that sets `methods.definitions` without
+`preserveDefaultMethods: true` mirrors only the methods it lists. Valve's
+generator sets `preserveDefaultMethods: true`.
+
+Not reported upstream yet. The same code is in upstream.

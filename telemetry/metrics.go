@@ -483,7 +483,7 @@ var (
 	MetricSelectionProbeSkipped = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "selection_probe_skipped_total",
-		Help:      "Probe candidates that were skipped before firing. reason ∈ {write_method, method_ignored, opt_out, sampled_out, max_concurrent, no_method, request_copy_failed}. `write_method`, `method_ignored` and `opt_out` are safety/policy gates — `method_ignored` means the upstream's own `ignoreMethods`/`allowMethods` config forbids the method; `sampled_out` and `max_concurrent` are throughput controls; `request_copy_failed` means the probe could not be given its own request object and was dropped rather than sharing the caller's.",
+		Help:      "Probe candidates that were skipped before firing. reason ∈ {write_method, not_probe_eligible, method_ignored, pinned_elsewhere, opt_out, sampled_out, max_concurrent, no_method, request_copy_failed}. `write_method`, `not_probe_eligible`, `method_ignored`, `pinned_elsewhere` and `opt_out` are safety/policy gates — `not_probe_eligible` means the network's method table does not classify the method as a stateless read (filter, subscription and unknown methods); `method_ignored` means the upstream's own `ignoreMethods`/`allowMethods` config forbids the method; `pinned_elsewhere` means the request's Use-Upstream directive does not match the excluded upstream; `sampled_out` and `max_concurrent` are throughput controls; `request_copy_failed` means the probe could not be given its own request object and was dropped rather than sharing the caller's.",
 	}, []string{"network", "reason"})
 
 	MetricSelectionProbeDropped = DefineCounter(prometheus.CounterOpts{

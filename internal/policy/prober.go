@@ -211,6 +211,18 @@ func (p *Prober) onRequest(ctx context.Context, req *common.NormalizedRequest) {
 		return
 	}
 
+	// Read gate — mirror only a method that the network's method table
+	// classifies as a stateless read. The write gate above names the writes
+	// it knows; it fails open for every method nobody named (bug-log entry
+	// 189: msgboard_addMessage). The filter methods are worse: on reth and
+	// geth eth_getFilterChanges moves the filter's cursor, so a mirror to
+	// the node that holds the filter takes the client's events. An
+	// unclassified method therefore does not get mirrored.
+	if !isProbeEligibleMethod(req.Network(), method) {
+		telemetry.MetricSelectionProbeSkipped.WithLabelValues(p.networkID, "not_probe_eligible").Inc()
+		return
+	}
+
 	finality := req.Finality(ctx).String()
 	excluded := p.engine.GetExcluded(p.networkID, method, finality)
 	if len(excluded) == 0 {
@@ -236,6 +248,18 @@ func (p *Prober) onRequest(ctx context.Context, req *common.NormalizedRequest) {
 		if handle, herr := u.ShouldHandleMethod(method); herr == nil && !handle {
 			telemetry.MetricSelectionProbeSkipped.WithLabelValues(p.networkID, "method_ignored").Inc()
 			continue
+		}
+		// The upstream pin gets a vote too. Forward with
+		// byPassMethodExclusion=true also skips the X-ERPC-Use-Upstream
+		// check in Upstream.shouldSkip, so without this gate a request
+		// that its client pinned to one upstream reaches the others. A
+		// selector that does not parse is no match, because the pin is
+		// the client's limit and the probe is optional.
+		if pin := req.Directives(); pin != nil && pin.UseUpstream != "" {
+			if match, merr := common.UpstreamMatchesSelector(pin.UseUpstream, u); merr != nil || !match {
+				telemetry.MetricSelectionProbeSkipped.WithLabelValues(p.networkID, "pinned_elsewhere").Inc()
+				continue
+			}
 		}
 		if !p.tryReserveProbe(u, cfg) {
 			continue
@@ -497,6 +521,42 @@ func probeRequestFrom(ctx context.Context, src *common.NormalizedRequest) (*comm
 	preq.SetNetwork(src.Network())
 	return preq, nil
 }
+
+// isProbeEligibleMethod reports whether the prober may mirror `method`. The
+// answer comes from the network's method table (`methods.definitions`), the
+// table that already tells the cache and the stateful-method gate which
+// methods are reads. A method is eligible only when the table has an entry for
+// it and the entry is not stateful. SetDefaults marks every filter method
+// stateful, whatever the operator configured.
+//
+// An unknown method is NOT eligible. That costs probe samples for reads nobody
+// classified; the operator adds such a read to methods.definitions. The other
+// default, "mirror what is not known to be unsafe", sends every unknown write
+// and every stateful call to upstreams nobody chose.
+//
+// A request without a network config (the prober's own unit tests) uses the
+// default table, so the answer never depends on whether a test wired a network.
+func isProbeEligibleMethod(network common.Network, method string) bool {
+	var methods *common.MethodsConfig
+	if network != nil {
+		if cfg := network.Config(); cfg != nil {
+			methods = cfg.Methods
+		}
+	}
+	if methods == nil || len(methods.Definitions) == 0 {
+		methods = defaultProbeMethods()
+	}
+	mc := methods.FindMethodConfig(method)
+	return mc != nil && !mc.Stateful
+}
+
+// defaultProbeMethods is the method table that a network gets from
+// MethodsConfig.SetDefaults when it configures none.
+var defaultProbeMethods = sync.OnceValue(func() *common.MethodsConfig {
+	m := &common.MethodsConfig{}
+	_ = m.SetDefaults() // never fails for an empty config
+	return m
+})
 
 // isProbeUnsafeMethod returns true for any method whose execution may
 // mutate chain state. Mirroring these to an excluded upstream would
