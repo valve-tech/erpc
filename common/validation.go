@@ -623,7 +623,7 @@ func validateGrpcHealthCheckMount(scope, endpoint, healthCheckService string) er
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
-		return fmt.Errorf("%s: invalid gRPC endpoint %s: %w", scope, util.RedactEndpoint(endpoint), err)
+		return fmt.Errorf("%s: invalid gRPC endpoint %s: %w", scope, util.RedactEndpoint(endpoint), util.RedactURLError(err))
 	}
 	if strings.TrimRight(parsed.Path, "/") != "" {
 		return fmt.Errorf("%s.healthCheckService cannot be used with %s: the URL path mounts every call, but the gRPC health check always calls the root path", scope, util.RedactEndpoint(endpoint))

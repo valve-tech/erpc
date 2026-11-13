@@ -20,6 +20,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // The upstream endpoint carries its API key in the path, as Infura does. Every
@@ -245,4 +247,116 @@ func TestHttpClient_RedactsEndpointKeyInBuildError(t *testing.T) {
 		assert.NotContains(t, s, redactSentinel, "%s leaks the endpoint key", name)
 	}
 	assert.True(t, strings.Contains(err.Error(), redactHost), "Error() must still name the host: %s", err.Error())
+}
+
+// TestHttpClient_RedactsCredentialHeadersInDebugLog covers the request debug
+// log, which prints the outgoing headers. Alchemy's key travels as
+// "Authorization: Bearer <key>"; other vendors use x-api-key and similar.
+func TestHttpClient_RedactsCredentialHeadersInDebugLog(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	headers := map[string]string{
+		"Authorization":       "Bearer " + redactSentinel,
+		"Proxy-Authorization": "Basic " + redactSentinel,
+		"Cookie":              "session=" + redactSentinel,
+		"X-Api-Key":           redactSentinel,
+		"X-Auth-Token":        redactSentinel,
+		"X-Client-Secret":     redactSentinel,
+		"X-Visible":           "VISIBLE_CONTROL",
+	}
+	for _, batch := range []bool{false, true} {
+		name := "single"
+		if batch {
+			name = "batch"
+		}
+		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			client := redactClient(t, srv.Listener.Addr().String(), false, 0, batch, logs)
+			client.headers = headers
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := client.SendRequest(ctx, newBlockNumberRequest())
+			require.NoError(t, err)
+
+			out := logs.String()
+			assert.NotContains(t, out, redactSentinel, "the debug log leaks a credential header")
+			// Controls: the log line printed the headers, and kept the names.
+			require.Contains(t, out, "sending json rpc POST request")
+			for k := range headers {
+				assert.Contains(t, out, k, "the header name %s must still appear", k)
+			}
+			assert.Contains(t, out, "VISIBLE_CONTROL", "a harmless header value must still appear")
+		})
+	}
+}
+
+// TestHttpClient_SpanErrorRedactsEndpoint checks the error a trace span
+// records for a failed request.
+func TestHttpClient_SpanErrorRedactsEndpoint(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp), sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	common.SetTracerProviderForTest(tp)
+	t.Cleanup(func() { common.IsTracingEnabled = false })
+
+	logs := &lockedBuffer{}
+	client := redactClient(t, closedAddr(t), false, 0, false, logs)
+	_, err := client.SendRequest(context.Background(), newBlockNumberRequest())
+	require.Error(t, err)
+	require.NoError(t, tp.ForceFlush(context.Background()))
+
+	var recorded []string
+	for _, s := range exp.GetSpans() {
+		recorded = append(recorded, s.Status.Description)
+		for _, ev := range s.Events {
+			for _, a := range ev.Attributes {
+				recorded = append(recorded, a.Value.String())
+			}
+		}
+		for _, a := range s.Attributes {
+			recorded = append(recorded, a.Value.String())
+		}
+	}
+	all := strings.Join(recorded, "\n")
+	assert.NotContains(t, all, redactSentinel, "a span leaks the endpoint key")
+	// Control: a span recorded this failure, and it names the host.
+	assert.Contains(t, all, "https://"+redactHost+"/"+util.RedactedURLPlaceholder)
+}
+
+// TestWsClient_DialFailureRedactsEndpoint covers the WebSocket dial. The
+// client logs the dial error on its first attempt.
+func TestWsClient_DialFailureRedactsEndpoint(t *testing.T) {
+	cases := map[string]*url.URL{
+		// A refused dial: the error itself names only the address.
+		"connection refused": {Scheme: "ws", Host: closedAddr(t), Path: "/v3/" + redactSentinel},
+		// A URL the dialer re-parses and rejects: url.Parse quotes it whole.
+		"unparseable url": {Scheme: "wss", Opaque: "//" + redactHost + "/v3/" + redactSentinel + "\x7f"},
+	}
+	for name, u := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			prevLevel := zerolog.GlobalLevel()
+			zerolog.SetGlobalLevel(zerolog.TraceLevel)
+			t.Cleanup(func() { zerolog.SetGlobalLevel(prevLevel) })
+			lg := zerolog.New(logs).Level(zerolog.TraceLevel)
+
+			ups := common.NewFakeUpstream("ws-redact")
+			ups.Config().Type = common.UpstreamTypeEvm
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			_, err := NewWsJsonRpcClient(ctx, &lg, "prj1", ups, u, nil, &noopErrorExtractor{})
+			require.NoError(t, err)
+			cancel()
+
+			out := logs.String()
+			assert.NotContains(t, out, redactSentinel, "the dial failure log leaks the endpoint key")
+			// Control: the first dial failed and was logged.
+			assert.Contains(t, out, "initial websocket connection failed")
+		})
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/util"
 )
 
 // maxProbeBody caps how much of a probe response is read.
@@ -76,13 +77,15 @@ func (h *HttpProbeCaller) CallJsonRpc(ctx context.Context, method string, params
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("btc probe: build request: %w", err)
+		return nil, fmt.Errorf("btc probe: build request: %w", util.RedactURLError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("btc probe: %s: %w", method, err)
+		// The *url.Error quotes the endpoint, which holds bitcoind's basic-auth
+		// credentials or a vendor key.
+		return nil, fmt.Errorf("btc probe: %s: %w", method, util.RedactURLError(err))
 	}
 	defer func() {
 		// Drain before closing so the connection can be reused; a probe runs

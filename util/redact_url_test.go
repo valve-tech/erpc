@@ -100,3 +100,31 @@ func parseErr(raw string) error {
 	_, err := url.Parse(raw)
 	return err
 }
+
+func TestRedactHeaders(t *testing.T) {
+	in := map[string][]string{
+		"Authorization":       {"Bearer " + urlTestSecret},
+		"Proxy-Authorization": {"Basic " + urlTestSecret},
+		"Cookie":              {"a=" + urlTestSecret},
+		"X-Api-Key":           {urlTestSecret},
+		"X-Goog-Api-Key":      {urlTestSecret},
+		"X-Session-Token":     {urlTestSecret, urlTestSecret},
+		"X-Client-Secret":     {urlTestSecret},
+		"X-Auth":              {urlTestSecret},
+		"Content-Type":        {"application/json"},
+		"User-Agent":          {"erpc"},
+	}
+	out := RedactHeaders(in)
+	for k, vs := range out {
+		for _, v := range vs {
+			assert.NotContains(t, v, urlTestSecret, "header %s", k)
+		}
+	}
+	assert.Equal(t, []string{RedactedURLPlaceholder, RedactedURLPlaceholder}, out["X-Session-Token"])
+	// Controls: harmless headers pass, every name survives, the input is untouched.
+	assert.Equal(t, []string{"application/json"}, out["Content-Type"])
+	assert.Equal(t, []string{"erpc"}, out["User-Agent"])
+	assert.Len(t, out, len(in))
+	assert.Equal(t, "Bearer "+urlTestSecret, in["Authorization"][0])
+	assert.Nil(t, RedactHeaders(nil))
+}

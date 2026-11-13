@@ -176,3 +176,46 @@ func RedactURLError(err error, known ...*url.URL) error {
 	}
 	return &redactedURLError{cause: err, message: out}
 }
+
+// sensitiveHeaderNames are the headers that carry credentials by definition.
+var sensitiveHeaderNames = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"set-cookie":          true,
+}
+
+// IsSensitiveHeader reports whether a header may carry a credential: the
+// standard credential headers, and any header whose name mentions a key, a
+// token, a secret or auth (x-api-key, x-auth-token, x-goog-api-key, ...).
+// Vendors invent header names, so the name test is deliberately broad.
+func IsSensitiveHeader(name string) bool {
+	n := strings.ToLower(name)
+	if sensitiveHeaderNames[n] {
+		return true
+	}
+	return strings.Contains(n, "key") || strings.Contains(n, "token") ||
+		strings.Contains(n, "secret") || strings.Contains(n, "auth")
+}
+
+// RedactHeaders returns a copy of h that is safe to log. Every value of a
+// sensitive header becomes the placeholder; the header name stays, so a
+// reader can still see the header was sent. h itself is not changed.
+func RedactHeaders(h map[string][]string) map[string][]string {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(h))
+	for k, vs := range h {
+		if IsSensitiveHeader(k) {
+			red := make([]string, len(vs))
+			for i := range red {
+				red[i] = RedactedURLPlaceholder
+			}
+			out[k] = red
+			continue
+		}
+		out[k] = vs
+	}
+	return out
+}

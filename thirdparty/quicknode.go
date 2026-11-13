@@ -637,7 +637,7 @@ func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Log
 			req, err := http.NewRequestWithContext(ctx, "POST", e.HttpUrl, bytes.NewReader(reqBody))
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to create request for endpoint %s: %w", e.ID, err))
+				errors = append(errors, fmt.Errorf("failed to create request for endpoint %s: %w", e.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}

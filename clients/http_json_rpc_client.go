@@ -462,7 +462,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", fmt.Sprintf("erpc (%s/%s; Project/%s)", common.ErpcVersion, common.ErpcCommitSha, c.projectId))
 
-	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msgf("sending json rpc POST request (batch)")
+	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msgf("sending json rpc POST request (batch)")
 
 	// pick the client from the proxy pool registry (if configured) or fallback
 	resp, err := c.getHttpClient().Do(httpReq)
@@ -766,7 +766,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 		}
 	}
 
-	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msg("sending json rpc POST request (single)")
+	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msg("sending json rpc POST request (single)")
 
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {

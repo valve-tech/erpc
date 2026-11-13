@@ -1088,7 +1088,7 @@ func validateUpstreamEndpoints(ctx context.Context, cfg *common.Config, logger z
 				// Skip local endpoints using proper URL parsing
 				isLocal, err := isLocalEndpoint(upsCfg.Endpoint)
 				if err != nil {
-					return fmt.Errorf("invalid endpoint URL for project \"%s\" upstream \"%s\": %w", project.Id, upsCfg.Id, err)
+					return fmt.Errorf("invalid endpoint URL for project \"%s\" upstream \"%s\": %w", project.Id, upsCfg.Id, util.RedactURLError(err))
 				}
 				if isLocal {
 					continue

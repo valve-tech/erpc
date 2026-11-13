@@ -362,7 +362,7 @@ func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Lo
 			req, err := http.NewRequestWithContext(ctx, "POST", n.Details.HTTPSEndpoint+"/"+n.Details.AuthKey, bytes.NewReader(reqBody))
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to create request for node %s: %w", n.ID, err))
+				errors = append(errors, fmt.Errorf("failed to create request for node %s: %w", n.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}
