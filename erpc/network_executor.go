@@ -591,7 +591,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			}
 			// An empty answer from an upstream that is authoritative for the
 			// method is valid, the same as a method in the accept list.
-			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method, resp) {
+			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method, req, resp) {
 				return ""
 			}
 			if e.acceptsEmptyResult(method, resp) {

@@ -2638,7 +2638,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					acceptEmpty := !emptyish ||
 						(!failsafeExecutor.HasConsensus() &&
 							(failsafeExecutor.acceptsEmptyResult(method, r) ||
-								common.UpstreamEmptyIsAuthoritative(u, method, r)))
+								common.UpstreamEmptyIsAuthoritative(u, method, effectiveReq, r)))
 					if acceptEmpty {
 						st := effectiveReq.ExecState()
 						st.MarkUpstreamAttemptWon(r.UpstreamId())

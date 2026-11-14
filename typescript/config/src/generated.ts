@@ -1158,13 +1158,17 @@ export interface EvmUpstreamConfig {
   integrity?: UpstreamIntegrityConfig;
   /**
    * EmptyResultAuthoritativeMethods lists methods whose empty result from
-   * this upstream is the truth, not missing data. The network's
-   * markEmptyAsErrorMethods retry is skipped for them, so the empty result
-   * returns at once. Only a non-null empty value such as [] counts: a null
-   * result still means missing data and fails over. Use it for nodes you run, which report a block they
-   * lack as unavailable rather than as empty. Other upstreams keep the
-   * retry. Errors from this upstream, block unavailable included, retry as
-   * before.
+   * this upstream is the truth, not missing data. The empty result returns
+   * at once: no markEmptyAsErrorMethods retry, no sweep to other upstreams
+   * and no fallback-tier escape. Only a non-null empty value such as [] or
+   * 0x0 counts: a null result still means missing data and fails over. The
+   * requested block must also be at or below this upstream's known head
+   * (its finalized head under emptyResultConfidence: finalizedBlock, and no
+   * higher than a blockAvailability upper bound). A node at the tip can
+   * answer empty for a block it has not imported yet, so an empty answer
+   * above its head, or with the head or block unknown, still fails over.
+   * Use it for nodes you run. Other upstreams keep the retry. Errors from
+   * this upstream, block unavailable included, retry as before.
    */
   emptyResultAuthoritativeMethods?: string[];
   /**
