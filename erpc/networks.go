@@ -2609,6 +2609,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					ulg.Error().Err(e).Msgf("failed to normalize response")
 					err = e
 				}
+				// An empty range answer is judged against the upstream's known
+				// head; refresh a lagging head once before any gate reads it.
+				if err == nil {
+					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
+				}
 				effectiveReq.MarkUpstreamCompleted(loopCtx, u, r, err)
 
 				// Hedge cancelled → this execution lost the race, bail out

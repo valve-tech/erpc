@@ -112,7 +112,7 @@ func TestAcceptedEmptyIsFinal_HeadCheck(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			u := authoritativeFake(c.latest, 0, nil)
 			req, _ := emptyLogsAt(t, c.block, AvailbilityConfidenceBlockHead)
-			assert.Equal(t, c.want, AcceptedEmptyIsFinal(u, req))
+			assert.Equal(t, c.want, AcceptedEmptyIsFinal(u, "eth_getLogs", req))
 		})
 	}
 }
@@ -121,5 +121,35 @@ func TestAcceptedEmptyIsFinal_HeadCheck(t *testing.T) {
 // accept-list behaviour.
 func TestAcceptedEmptyIsFinal_NonEvmUnaffected(t *testing.T) {
 	req, _ := emptyLogsAt(t, 50, AvailbilityConfidenceBlockHead)
-	assert.True(t, AcceptedEmptyIsFinal(nil, req))
+	assert.True(t, AcceptedEmptyIsFinal(nil, "eth_getLogs", req))
+}
+
+// Only methods in evm.emptyResultHeadCheckMethods are checked. A value read,
+// or trace_block on the authoritative path, keeps today's final answer even
+// above the upstream's head.
+func TestEmptyResultHeadCheck_OnlyListedMethods(t *testing.T) {
+	u := NewFakeUpstream("own-node", WithEvmStatePoller(NewFakeEvmStatePoller(100, 90)))
+	u.Config().Evm = &EvmUpstreamConfig{EmptyResultAuthoritativeMethods: []string{"trace_block", "eth_getLogs"}}
+	req, resp := emptyLogsAt(t, 101, AvailbilityConfidenceBlockHead)
+
+	assert.True(t, AcceptedEmptyIsFinal(u, "eth_call", req))
+	assert.True(t, AcceptedEmptyIsFinal(u, "eth_getBalance", req))
+	assert.True(t, UpstreamEmptyIsAuthoritative(u, "trace_block", req, resp))
+	assert.False(t, AcceptedEmptyIsFinal(u, "eth_getLogs", req))
+	assert.False(t, AcceptedEmptyIsFinal(u, "trace_filter", req))
+	assert.False(t, UpstreamEmptyIsAuthoritative(u, "eth_getLogs", req, resp))
+}
+
+// An explicit empty list turns the check off; a configured list replaces the
+// default.
+func TestEmptyResultHeadCheck_ConfiguredList(t *testing.T) {
+	u := authoritativeFake(100, 90, nil)
+	req, _ := emptyLogsAt(t, 101, AvailbilityConfidenceBlockHead)
+
+	req.Network().Config().Evm.EmptyResultHeadCheckMethods = []string{}
+	assert.True(t, AcceptedEmptyIsFinal(u, "eth_getLogs", req))
+
+	req.Network().Config().Evm.EmptyResultHeadCheckMethods = []string{"eth_call"}
+	assert.True(t, AcceptedEmptyIsFinal(u, "eth_getLogs", req))
+	assert.False(t, AcceptedEmptyIsFinal(u, "eth_call", req))
 }

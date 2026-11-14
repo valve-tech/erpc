@@ -154,16 +154,12 @@ func (e *networkExecutor) EmptyResultAccept() []string {
 }
 
 // acceptsEmptyResult reports whether an empty result for method is a final
-// answer under this executor's emptyResultAccept list. An accepted empty
-// result is final only when common.AcceptedEmptyIsFinal
-// holds for the upstream that produced it: on EVM, the requested block must
-// be at or below that upstream's known head.
+// answer under this executor's emptyResultAccept list. For a method in
+// evm.emptyResultHeadCheckMethods, common.AcceptedEmptyIsFinal must also
+// hold for the upstream that produced it.
 func (e *networkExecutor) acceptsEmptyResult(method string, resp *common.NormalizedResponse) bool {
-	if resp != nil && !common.AcceptedEmptyIsFinal(resp.Upstream(), resp.Request()) {
-		return false
-	}
 	if slices.Contains(e.EmptyResultAccept(), method) {
-		return true
+		return resp == nil || common.AcceptedEmptyIsFinal(resp.Upstream(), method, resp.Request())
 	}
 	if method != "debug_traceBlockByNumber" ||
 		(e != nil && e.cfg != nil && e.cfg.Retry != nil && e.cfg.Retry.EmptyResultAccept != nil) {

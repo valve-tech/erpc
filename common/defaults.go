@@ -2355,6 +2355,9 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			if n.Evm.MarkEmptyAsErrorMethods == nil && defaults.Evm.MarkEmptyAsErrorMethods != nil {
 				n.Evm.MarkEmptyAsErrorMethods = append([]string(nil), defaults.Evm.MarkEmptyAsErrorMethods...)
 			}
+			if n.Evm.EmptyResultHeadCheckMethods == nil && defaults.Evm.EmptyResultHeadCheckMethods != nil {
+				n.Evm.EmptyResultHeadCheckMethods = append([]string(nil), defaults.Evm.EmptyResultHeadCheckMethods...)
+			}
 			if n.Evm.IdempotentTransactionBroadcast == nil && defaults.Evm.IdempotentTransactionBroadcast != nil {
 				n.Evm.IdempotentTransactionBroadcast = defaults.Evm.IdempotentTransactionBroadcast
 			}
@@ -2597,6 +2600,16 @@ func DefaultEmptyResultAccept() []string {
 // on other upstreams. A new slice is returned on every call so callers cannot
 // mutate the shared default.
 //
+// DefaultEmptyResultHeadCheckMethods returns a fresh copy of the methods
+// whose empty result is final only when the answering upstream's known head
+// reaches the end of the requested range. A node at the tip can clamp a
+// range query to its own head and answer [] for blocks it has not imported
+// yet. Value reads are not listed: a node answers a block above its head
+// with an error, not with an empty value.
+func DefaultEmptyResultHeadCheckMethods() []string {
+	return []string{"eth_getLogs", "trace_filter"}
+}
+
 // Note: eth_getBlockByHash is intentionally excluded because subgraph-based
 // upstreams commonly return empty for this method, which is expected behavior.
 // Note: eth_getTransactionReceipt is excluded as a quick remedy. Ideally we'd

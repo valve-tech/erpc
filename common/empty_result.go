@@ -66,20 +66,18 @@ func emptyResultAcceptFor(cfg *NetworkConfig, method string) []string {
 }
 
 // UpstreamEmptyIsAuthoritative reports whether resp is an empty answer that
-// u is authoritative for. Three things must hold:
-//   - u's config lists method in evm.emptyResultAuthoritativeMethods;
-//   - the result is present and not JSON null. null, or no result, is how a
-//     node says it has not got the block yet (reth answers trace_block with
-//     null), so it stays missing data and fails over as before;
-//   - u has the requested block (see upstreamHasRequestedBlock). A node at
-//     the tip can answer [] or 0x0 for a block it has not imported yet, so an
-//     empty answer above its head still fails over.
+// u is authoritative for: u's config lists method in
+// evm.emptyResultAuthoritativeMethods, and the result is present and not
+// JSON null. An empty value such as [] is the answer. null, or no result,
+// is how a node says it has not got the block yet (reth answers trace_block
+// with null), so it stays missing data and fails over as before.
 //
-// req is the request resp answers; nil means resp.Request(). Every layer
-// that decides whether an empty answer is final asks this function: the
-// network loop (which returns a final answer before the fallback escape
-// can run), the retry policy, the upstream rotation and the
-// markEmptyAsErrorMethods hook.
+// For a method in the network's evm.emptyResultHeadCheckMethods (block-range
+// queries by default), u must also have the requested block: see
+// upstreamHasRequestedBlock. Other methods, trace_block included, skip that
+// check.
+//
+// req is the request resp answers; nil means resp.Request().
 func UpstreamEmptyIsAuthoritative(u Upstream, method string, req *NormalizedRequest, resp *NormalizedResponse) bool {
 	if u == nil || resp == nil {
 		return false
@@ -109,66 +107,100 @@ func UpstreamEmptyIsAuthoritative(u Upstream, method string, req *NormalizedRequ
 	if result == "" || result == "null" {
 		return false
 	}
+	if !EmptyResultHeadCheckApplies(req, method) {
+		return true
+	}
 	return upstreamHasRequestedBlock(u, req)
 }
 
 // AcceptedEmptyIsFinal reports whether an empty result that the network's
 // emptyResultAccept list accepts, from upstream u, may stand as the final
-// answer to req. On EVM it applies the same head check as
-// UpstreamEmptyIsAuthoritative: a node at the tip can answer [] or 0x for a
-// block it has not imported yet, so an empty answer for a block above u's
-// known head, or with u's head unknown, is not final and the request moves
-// on. When the request has no resolved block number (a pending tag, a block
-// hash, a method with no block) the check cannot run and the answer stays
-// final, as before. Non-EVM upstreams are not affected.
-func AcceptedEmptyIsFinal(u Upstream, req *NormalizedRequest) bool {
-	if _, ok := u.(EvmUpstream); !ok || req == nil {
+// answer to req. Only methods in evm.emptyResultHeadCheckMethods are
+// checked; every other method keeps today's behaviour and returns true.
+// For a checked method, a node at the tip can clamp the range to its head
+// and answer [] for blocks it has not imported yet, so the answer is final
+// only when the range end is at or below u's known head. A request with no
+// resolved block number (a blockHash filter, say) keeps today's behaviour.
+// Non-EVM upstreams are not affected.
+func AcceptedEmptyIsFinal(u Upstream, method string, req *NormalizedRequest) bool {
+	if !EmptyResultHeadCheckApplies(req, method) {
 		return true
 	}
-	if requestedBlockNumber(req) <= 0 {
+	if _, ok := u.(EvmUpstream); !ok {
+		return true
+	}
+	if bn, ok := req.EvmBlockNumber().(int64); !ok || bn <= 0 {
 		return true
 	}
 	return upstreamHasRequestedBlock(u, req)
 }
 
-// requestedBlockNumber returns the block req targets, or 0 when it cannot be
-// resolved. A literal number, or a tag that normalization already turned
-// into one, comes from req.EvmBlockNumber (toBlock for eth_getLogs). Some
-// methods, eth_call and the value reads among them, keep their latest or
-// finalized tag on the wire. Those tags resolve here to the network's
-// served latest or finalized head, the block the client expects the answer
-// for. safe, pending, earliest and block hashes do not resolve.
-func requestedBlockNumber(req *NormalizedRequest) int64 {
-	if bn, ok := req.EvmBlockNumber().(int64); ok && bn > 0 {
-		return bn
+// EmptyResultHeadCheckApplies reports whether method is in the network's
+// evm.emptyResultHeadCheckMethods list (DefaultEmptyResultHeadCheckMethods
+// when unset). An empty list turns the check off.
+func EmptyResultHeadCheckApplies(req *NormalizedRequest, method string) bool {
+	if req == nil || method == "" {
+		return false
 	}
-	nw := req.Network()
-	if nw == nil {
-		return 0
+	list := DefaultEmptyResultHeadCheckMethods()
+	if nw := req.Network(); nw != nil {
+		if cfg := nw.Config(); cfg != nil && cfg.Evm != nil && cfg.Evm.EmptyResultHeadCheckMethods != nil {
+			list = cfg.Evm.EmptyResultHeadCheckMethods
+		}
 	}
-	switch req.EvmBlockRef() {
-	case "latest":
-		return EvmHighestLatestBlockNumber(nw, context.Background())
-	case "finalized":
-		return EvmHighestFinalizedBlockNumber(nw, context.Background())
+	for _, m := range list {
+		if strings.EqualFold(m, method) {
+			return true
+		}
 	}
-	return 0
+	return false
+}
+
+// RefreshHeadForEmptyResult runs before the gates judge an empty answer. When
+// the head check applies to method and u's known head is below the range end
+// (or unknown), it asks u's state poller for a fresh head once, through
+// PollLatestBlockNumberAtLeast. The poller's known head lags the node's real
+// head by up to a poll interval, and without the refresh a node that has the
+// block would see its true [] treated as not final (erpc/erpc#934 is the same
+// race on the pre-forward side). The poller decides whether a poll is due
+// and polls at most once per new block. Errors are ignored: the gates then
+// read the head as it stands.
+func RefreshHeadForEmptyResult(ctx context.Context, u Upstream, method string, req *NormalizedRequest, resp *NormalizedResponse) {
+	if resp == nil || resp.IsObjectNull() || !resp.IsResultEmptyish(ctx) {
+		return
+	}
+	if !EmptyResultHeadCheckApplies(req, method) {
+		return
+	}
+	bn, ok := req.EvmBlockNumber().(int64)
+	if !ok || bn <= 0 {
+		return
+	}
+	eu, ok := u.(EvmUpstream)
+	if !ok {
+		return
+	}
+	sp := eu.EvmStatePoller()
+	if sp == nil || sp.IsObjectNull() || sp.LatestBlock() >= bn {
+		return
+	}
+	_, _ = sp.PollLatestBlockNumberAtLeast(ctx, bn)
 }
 
 // upstreamHasRequestedBlock reports whether the block req targets is at or
-// below u's known head. The block is requestedBlockNumber(req): toBlock for
-// eth_getLogs, the number a latest or finalized tag resolves to, or the
-// literal number. The head is u's own state-poller head: the latest block, or
-// the finalized block when the network sets evm.emptyResultConfidence to
-// finalizedBlock. A configured blockAvailability upper bound (for example
-// latestBlockMinus) lowers it further. It returns false when either the block
-// or the head is unknown, so the empty answer keeps failing over.
+// below u's known head. The block is req.EvmBlockNumber: toBlock for
+// eth_getLogs and trace_filter, after normalization turned a latest or
+// finalized tag into a number. The head is u's own state-poller head: the
+// latest block, or the finalized block when the network sets
+// evm.emptyResultConfidence to finalizedBlock. A configured
+// blockAvailability upper bound (for example latestBlockMinus) lowers it
+// further. It returns false when either the block or the head is unknown.
 func upstreamHasRequestedBlock(u Upstream, req *NormalizedRequest) bool {
 	if req == nil {
 		return false
 	}
-	bn := requestedBlockNumber(req)
-	if bn <= 0 {
+	bn, ok := req.EvmBlockNumber().(int64)
+	if !ok || bn <= 0 {
 		return false
 	}
 	eu, ok := u.(EvmUpstream)

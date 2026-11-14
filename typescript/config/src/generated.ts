@@ -1161,14 +1161,12 @@ export interface EvmUpstreamConfig {
    * this upstream is the truth, not missing data. The empty result returns
    * at once: no markEmptyAsErrorMethods retry, no sweep to other upstreams
    * and no fallback-tier escape. Only a non-null empty value such as [] or
-   * 0x0 counts: a null result still means missing data and fails over. The
-   * requested block must also be at or below this upstream's known head
-   * (its finalized head under emptyResultConfidence: finalizedBlock, and no
-   * higher than a blockAvailability upper bound). A node at the tip can
-   * answer empty for a block it has not imported yet, so an empty answer
-   * above its head, or with the head or block unknown, still fails over.
-   * Use it for nodes you run. Other upstreams keep the retry. Errors from
-   * this upstream, block unavailable included, retry as before.
+   * 0x0 counts: a null result still means missing data and fails over. For
+   * a method in the network's evm.emptyResultHeadCheckMethods, the
+   * requested block must also be at or below this upstream's known head;
+   * otherwise the empty result is not final. Use it for nodes you run.
+   * Other upstreams keep the retry. Errors from this upstream, block
+   * unavailable included, retry as before.
    */
   emptyResultAuthoritativeMethods?: string[];
   /**
@@ -1311,11 +1309,9 @@ export interface RetryPolicyConfig {
   /**
    * EmptyResultAccept lists methods for which an empty/null result is considered valid
    * and should NOT be retried (e.g. eth_getLogs, eth_call where empty is a legitimate response).
-   * On EVM an accepted empty result is final only when the requested block (toBlock for
-   * eth_getLogs; a latest or finalized tag resolves to the network's served head) is at or
-   * below the answering upstream's known head. Above it, or with the head unknown, the
-   * request moves on to other upstreams. A request with no resolvable block keeps the
-   * empty result as final.
+   * For a method in the network's evm.emptyResultHeadCheckMethods, an accepted empty
+   * result is final only when the answering upstream's known head reaches the requested
+   * block.
    */
   emptyResultAccept?: string[];
   /**
@@ -2016,6 +2012,17 @@ export interface EvmNetworkConfig {
    *     finalized head; an unfinalized block's empty is treated as not-yet-confirmed.
    */
   emptyResultConfidence?: AvailbilityConfidence;
+  /**
+   * EmptyResultHeadCheckMethods lists methods whose empty result is final
+   * only when the requested block (toBlock for a range) is at or below the
+   * answering upstream's known head. Before judging, eRPC refreshes that
+   * upstream's head once through its state poller. An empty answer above
+   * the head, or with the head unknown, is not final: the request moves on
+   * to other upstreams. It covers both the emptyResultAccept list and an
+   * upstream's emptyResultAuthoritativeMethods. Unset means
+   * ["eth_getLogs", "trace_filter"]; an empty list turns the check off.
+   */
+  emptyResultHeadCheckMethods?: string[];
   /**
    * ShortCircuitFutureBlocks returns null for a numbered eth_getBlockByNumber
    * above the highest latest head across every upstream of the network

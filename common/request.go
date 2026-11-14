@@ -1653,7 +1653,7 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 		if nw := r.Network(); nw != nil {
 			netCfg = nw.Config()
 		}
-		acceptsEmpty = (IsEmptyResultAccepted(netCfg, method) && AcceptedEmptyIsFinal(upstream, r)) ||
+		acceptsEmpty = (IsEmptyResultAccepted(netCfg, method) && AcceptedEmptyIsFinal(upstream, method, r)) ||
 			UpstreamEmptyIsAuthoritative(upstream, method, r, resp)
 	}
 
