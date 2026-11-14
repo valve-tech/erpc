@@ -153,7 +153,15 @@ func (e *networkExecutor) EmptyResultAccept() []string {
 	return e.emptyResultAccept
 }
 
+// acceptsEmptyResult reports whether an empty result for method is a final
+// answer under this executor's emptyResultAccept list. An accepted empty
+// result is final only when common.AcceptedEmptyIsFinal
+// holds for the upstream that produced it: on EVM, the requested block must
+// be at or below that upstream's known head.
 func (e *networkExecutor) acceptsEmptyResult(method string, resp *common.NormalizedResponse) bool {
+	if resp != nil && !common.AcceptedEmptyIsFinal(resp.Upstream(), resp.Request()) {
+		return false
+	}
 	if slices.Contains(e.EmptyResultAccept(), method) {
 		return true
 	}

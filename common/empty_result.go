@@ -1,6 +1,9 @@
 package common
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // ResolveEmptyResultAccept returns the method list for which an emptyish
 // result is the canonical final answer rather than a "data is missing, retry
@@ -109,9 +112,52 @@ func UpstreamEmptyIsAuthoritative(u Upstream, method string, req *NormalizedRequ
 	return upstreamHasRequestedBlock(u, req)
 }
 
+// AcceptedEmptyIsFinal reports whether an empty result that the network's
+// emptyResultAccept list accepts, from upstream u, may stand as the final
+// answer to req. On EVM it applies the same head check as
+// UpstreamEmptyIsAuthoritative: a node at the tip can answer [] or 0x for a
+// block it has not imported yet, so an empty answer for a block above u's
+// known head, or with u's head unknown, is not final and the request moves
+// on. When the request has no resolved block number (a pending tag, a block
+// hash, a method with no block) the check cannot run and the answer stays
+// final, as before. Non-EVM upstreams are not affected.
+func AcceptedEmptyIsFinal(u Upstream, req *NormalizedRequest) bool {
+	if _, ok := u.(EvmUpstream); !ok || req == nil {
+		return true
+	}
+	if requestedBlockNumber(req) <= 0 {
+		return true
+	}
+	return upstreamHasRequestedBlock(u, req)
+}
+
+// requestedBlockNumber returns the block req targets, or 0 when it cannot be
+// resolved. A literal number, or a tag that normalization already turned
+// into one, comes from req.EvmBlockNumber (toBlock for eth_getLogs). Some
+// methods, eth_call and the value reads among them, keep their latest or
+// finalized tag on the wire. Those tags resolve here to the network's
+// served latest or finalized head, the block the client expects the answer
+// for. safe, pending, earliest and block hashes do not resolve.
+func requestedBlockNumber(req *NormalizedRequest) int64 {
+	if bn, ok := req.EvmBlockNumber().(int64); ok && bn > 0 {
+		return bn
+	}
+	nw := req.Network()
+	if nw == nil {
+		return 0
+	}
+	switch req.EvmBlockRef() {
+	case "latest":
+		return EvmHighestLatestBlockNumber(nw, context.Background())
+	case "finalized":
+		return EvmHighestFinalizedBlockNumber(nw, context.Background())
+	}
+	return 0
+}
+
 // upstreamHasRequestedBlock reports whether the block req targets is at or
-// below u's known head. The block is the request's resolved block number:
-// toBlock for eth_getLogs, the number a tag such as latest resolved to, or the
+// below u's known head. The block is requestedBlockNumber(req): toBlock for
+// eth_getLogs, the number a latest or finalized tag resolves to, or the
 // literal number. The head is u's own state-poller head: the latest block, or
 // the finalized block when the network sets evm.emptyResultConfidence to
 // finalizedBlock. A configured blockAvailability upper bound (for example
@@ -121,8 +167,8 @@ func upstreamHasRequestedBlock(u Upstream, req *NormalizedRequest) bool {
 	if req == nil {
 		return false
 	}
-	bn, ok := req.EvmBlockNumber().(int64)
-	if !ok || bn <= 0 {
+	bn := requestedBlockNumber(req)
+	if bn <= 0 {
 		return false
 	}
 	eu, ok := u.(EvmUpstream)

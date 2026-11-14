@@ -62,6 +62,9 @@ type emptyFinalCase struct {
 	// when set. primary-1 is always asked first.
 	primary2Latest string
 	primary2Body   string
+	// defaultAccept keeps eRPC's default emptyResultAccept list instead of
+	// emptying it.
+	defaultAccept bool
 }
 
 type emptyFinalResult struct {
@@ -85,6 +88,10 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 	t.Cleanup(util.ResetGock)
 
 	var p1, p2, f1, f2 *atomic.Int32
+	acceptList := []string{}
+	if c.defaultAccept {
+		acceptList = nil
+	}
 	network, _, _ := setupFailoverFixture(t, ctx, failoverFixtureOpts{
 		primaryLatest:  c.primaryLatest,
 		fallbackLatest: "0x3ea", // 1002
@@ -95,7 +102,7 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 				MaxAttempts:       3,
 				Delay:             common.Duration(5 * time.Millisecond),
 				EmptyResultDelay:  common.Duration(5 * time.Millisecond),
-				EmptyResultAccept: []string{},
+				EmptyResultAccept: acceptList,
 			},
 		}},
 		mocks: func() {
@@ -301,4 +308,101 @@ func TestEmptyFinal_ErrorStillEscalates(t *testing.T) {
 	require.NoError(t, r.err)
 	assert.Equal(t, `"0x64"`, resultString(t, r.resp))
 	assert.Equal(t, float64(1), r.escapes)
+}
+
+const (
+	callTarget = "00000000000000000000000000000000000000cc"
+	emptyCall  = `{"jsonrpc":"2.0","id":1,"result":"0x"}`
+	someCall   = `{"jsonrpc":"2.0","id":1,"result":"0x2a"}`
+)
+
+func ethCallParams(block string) string {
+	return `[{"to":"0x` + callTarget + `","data":"0x"},"` + block + `"]`
+}
+
+// The default emptyResultAccept list (eth_getLogs, eth_call, eth_getBalance
+// and the other value reads) gets the same head check. An empty answer from
+// an upstream whose head is below the requested block is not final: the
+// request moves on to an upstream that has the block. No upstream lists the
+// method in emptyResultAuthoritativeMethods here.
+func TestEmptyFinal_AcceptListAboveHeadIsNotFinal(t *testing.T) {
+	t.Run("EthGetLogs", func(t *testing.T) {
+		r := runEmptyFinalCase(t, emptyFinalCase{
+			method: "eth_getLogs", params: logsAt1002, marker: logAddress,
+			primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
+			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneLog,
+		})
+		require.NoError(t, r.err)
+		assert.Contains(t, resultString(t, r.resp), `"logIndex"`)
+		assert.Equal(t, "primary-2", r.resp.UpstreamId())
+		assert.GreaterOrEqual(t, r.primary1Calls, int32(1), "primary-1 must be asked first")
+	})
+
+	t.Run("EthCall", func(t *testing.T) {
+		r := runEmptyFinalCase(t, emptyFinalCase{
+			method: "eth_call", params: ethCallParams("0x3ea"), marker: callTarget,
+			primaryBody: emptyCall, fallbackBody: someCall, defaultAccept: true,
+			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: someCall,
+		})
+		require.NoError(t, r.err)
+		assert.Equal(t, `"0x2a"`, resultString(t, r.resp))
+		assert.Equal(t, "primary-2", r.resp.UpstreamId())
+		assert.GreaterOrEqual(t, r.primary1Calls, int32(1))
+	})
+
+	// latest resolves to the network's served tip (1002) before the check,
+	// so primary-1 at 1000 is behind it.
+	t.Run("EthCallLatestTag", func(t *testing.T) {
+		r := runEmptyFinalCase(t, emptyFinalCase{
+			method: "eth_call", params: ethCallParams("latest"), marker: callTarget,
+			primaryBody: emptyCall, fallbackBody: someCall, defaultAccept: true,
+			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: someCall,
+		})
+		require.NoError(t, r.err)
+		assert.Equal(t, `"0x2a"`, resultString(t, r.resp))
+		assert.Equal(t, "primary-2", r.resp.UpstreamId())
+		assert.GreaterOrEqual(t, r.primary1Calls, int32(1))
+	})
+}
+
+// At or below the answering upstream's head, an accepted empty answer stays
+// final: one call, no sweep, no escape.
+func TestEmptyFinal_AcceptListAtOrBelowHeadIsFinal(t *testing.T) {
+	cases := map[string]emptyFinalCase{
+		"EthGetLogs": {method: "eth_getLogs", params: logsAt1001, marker: logAddress,
+			primaryBody: emptyLogs, fallbackBody: oneLog},
+		"EthCall": {method: "eth_call", params: ethCallParams("0x3ea"), marker: callTarget,
+			primaryBody: emptyCall, fallbackBody: someCall},
+		"EthCallLatestTag": {method: "eth_call", params: ethCallParams("latest"), marker: callTarget,
+			primaryBody: emptyCall, fallbackBody: someCall},
+	}
+	for name, c := range cases {
+		c.defaultAccept = true
+		c.primaryLatest = "0x3ea" // 1002
+		c.primary2Body = someCall
+		if c.method == "eth_getLogs" {
+			c.primary2Body = oneLog
+		}
+		t.Run(name, func(t *testing.T) {
+			r := runEmptyFinalCase(t, c)
+			require.NoError(t, r.err)
+			assert.Equal(t, "primary-1", r.resp.UpstreamId())
+			assert.Equal(t, int32(1), r.primaryCalls, "no sweep to primary-2")
+			assert.Equal(t, int32(0), r.fallbackCalls)
+			assert.Equal(t, float64(0), r.escapes)
+		})
+	}
+}
+
+// pending does not resolve to a block number, so the head check cannot
+// run and today's behaviour stays: the accepted empty answer is final.
+func TestEmptyFinal_AcceptListUnresolvedTagKeepsTodaysBehaviour(t *testing.T) {
+	r := runEmptyFinalCase(t, emptyFinalCase{
+		method: "eth_call", params: ethCallParams("pending"), marker: callTarget,
+		primaryBody: emptyCall, fallbackBody: someCall, defaultAccept: true,
+		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: someCall,
+	})
+	require.NoError(t, r.err)
+	assert.Equal(t, "primary-1", r.resp.UpstreamId())
+	assert.Equal(t, int32(1), r.primaryCalls)
 }

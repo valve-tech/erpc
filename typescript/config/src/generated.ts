@@ -1311,6 +1311,11 @@ export interface RetryPolicyConfig {
   /**
    * EmptyResultAccept lists methods for which an empty/null result is considered valid
    * and should NOT be retried (e.g. eth_getLogs, eth_call where empty is a legitimate response).
+   * On EVM an accepted empty result is final only when the requested block (toBlock for
+   * eth_getLogs; a latest or finalized tag resolves to the network's served head) is at or
+   * below the answering upstream's known head. Above it, or with the head unknown, the
+   * request moves on to other upstreams. A request with no resolvable block keeps the
+   * empty result as final.
    */
   emptyResultAccept?: string[];
   /**

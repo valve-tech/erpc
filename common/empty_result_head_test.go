@@ -93,3 +93,33 @@ func TestUpstreamEmptyIsAuthoritative_UnlistedMethod(t *testing.T) {
 }
 
 func ptrInt64(v int64) *int64 { return &v }
+
+func TestAcceptedEmptyIsFinal_HeadCheck(t *testing.T) {
+	cases := []struct {
+		name   string
+		latest int64 // -1: no poller
+		block  int64
+		want   bool
+	}{
+		{name: "at head", latest: 100, block: 100, want: true},
+		{name: "above head (the tip case)", latest: 100, block: 101, want: false},
+		{name: "head unknown", latest: 0, block: 50, want: false},
+		{name: "no state poller", latest: -1, block: 50, want: false},
+		// No resolved block: the check cannot run, so today's final answer stays.
+		{name: "block unresolved", latest: 100, block: 0, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u := authoritativeFake(c.latest, 0, nil)
+			req, _ := emptyLogsAt(t, c.block, AvailbilityConfidenceBlockHead)
+			assert.Equal(t, c.want, AcceptedEmptyIsFinal(u, req))
+		})
+	}
+}
+
+// A non-EVM upstream (Solana's getFirstAvailableBlock, say) keeps today's
+// accept-list behaviour.
+func TestAcceptedEmptyIsFinal_NonEvmUnaffected(t *testing.T) {
+	req, _ := emptyLogsAt(t, 50, AvailbilityConfidenceBlockHead)
+	assert.True(t, AcceptedEmptyIsFinal(nil, req))
+}
