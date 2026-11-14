@@ -25,6 +25,11 @@ import (
 // must be registered before the fixture's catch-all mocks. gock runs a
 // filter before it matches the host, so the filter checks the host itself.
 func mockCountedMethod(host, method, marker, body string) *atomic.Int32 {
+	return mockCountedMethodDelayed(host, method, marker, body, 0)
+}
+
+// mockCountedMethodDelayed is mockCountedMethod with a reply delay.
+func mockCountedMethodDelayed(host, method, marker, body string, delay time.Duration) *atomic.Int32 {
 	var calls atomic.Int32
 	gock.New("http://" + host).
 		Post("").
@@ -41,6 +46,7 @@ func mockCountedMethod(host, method, marker, body string) *atomic.Int32 {
 			return false
 		}).
 		Reply(200).
+		Delay(delay).
 		JSON([]byte(body))
 	return &calls
 }
@@ -74,6 +80,11 @@ type emptyFinalCase struct {
 	headCheckMethods []string
 	// beforeForward runs after the network is ready, just before the request.
 	beforeForward func()
+	// hedge adds a hedge policy to the network's failsafe.
+	hedge *common.HedgePolicyConfig
+	// primaryDelay and primary2Delay delay primary-1's and primary-2's
+	// answers to the method.
+	primaryDelay, primary2Delay time.Duration
 }
 
 type emptyFinalResult struct {
@@ -93,8 +104,11 @@ type emptyFinalResult struct {
 func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	// Cleanups run last-in first-out: cancel the network (and so its
+	// pollers) first, then reset gock. Resetting gock while a poller is
+	// still inside a mocked call is a data race in gock.
 	t.Cleanup(util.ResetGock)
+	t.Cleanup(cancel)
 
 	var p1, p2, f1, f2 *atomic.Int32
 	acceptList := []string{}
@@ -113,6 +127,7 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 				EmptyResultDelay:  common.Duration(5 * time.Millisecond),
 				EmptyResultAccept: acceptList,
 			},
+			Hedge: c.hedge,
 		}},
 		mocks: func() {
 			if c.primary1Mocks != nil {
@@ -125,13 +140,18 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 			if c.primary2Body != "" {
 				p2Body = c.primary2Body
 			}
-			p1 = mockCountedMethod("rpc1.localhost", c.method, c.marker, c.primaryBody)
-			p2 = mockCountedMethod("rpc2.localhost", c.method, c.marker, p2Body)
+			p1 = mockCountedMethodDelayed("rpc1.localhost", c.method, c.marker, c.primaryBody, c.primaryDelay)
+			p2 = mockCountedMethodDelayed("rpc2.localhost", c.method, c.marker, p2Body, c.primary2Delay)
 			f1 = mockCountedMethod("rpc3.localhost", c.method, c.marker, c.fallbackBody)
 			f2 = mockCountedMethod("rpc4.localhost", c.method, c.marker, c.fallbackBody)
 		},
 		configure: func(cfgs []*common.UpstreamConfig) {
 			for _, cfg := range cfgs {
+				// Heads come from each poller's bootstrap poll. No ticker
+				// poll runs during the test, so no poller is left inside a
+				// mocked call when the next subtest resets gock, and no
+				// tick can move a head the test controls.
+				cfg.Evm.StatePollerInterval = common.Duration(time.Hour)
 				if strings.HasPrefix(cfg.Id, "fallback") {
 					// The selection policy's prober mirrors sampled
 					// requests to cordoned upstreams. Those mirrors are not
@@ -516,4 +536,56 @@ func TestEmptyFinal_HeadCheckOffByConfig(t *testing.T) {
 	assert.Equal(t, "[]", resultString(t, r.resp))
 	assert.Equal(t, "primary-1", r.resp.UpstreamId())
 	assert.Equal(t, int32(1), r.primaryCalls)
+}
+
+// eth_getLogs with no toBlock runs to latest. primary-1's head (1000)
+// reaches fromBlock but not the served tip (1002), so its [] is not final:
+// the range end is the tip, not fromBlock.
+func TestEmptyFinal_GetLogsWithoutToBlockChecksTheTip(t *testing.T) {
+	r := runEmptyFinalCase(t, emptyFinalCase{
+		method: "eth_getLogs", marker: logAddress,
+		params:      `[{"fromBlock":"0x3e8","address":"0x00000000000000000000000000000000000000aa"}]`,
+		primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
+		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneLog,
+	})
+	require.NoError(t, r.err)
+	assert.Contains(t, resultString(t, r.resp), `"logIndex"`)
+	assert.Equal(t, "primary-2", r.resp.UpstreamId())
+	assert.GreaterOrEqual(t, r.primary1Calls, int32(1), "primary-1 must be asked first")
+}
+
+// With no toBlock and primary-1 at the tip, its [] stays final.
+func TestEmptyFinal_GetLogsWithoutToBlockAtTipIsFinal(t *testing.T) {
+	r := runEmptyFinalCase(t, emptyFinalCase{
+		method: "eth_getLogs", marker: logAddress,
+		params:      `[{"fromBlock":"0x3e8","address":"0x00000000000000000000000000000000000000aa"}]`,
+		primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
+		primaryLatest: "0x3ea", primary2Latest: "0x3ea", primary2Body: oneLog,
+	})
+	require.NoError(t, r.err)
+	assert.Equal(t, "[]", resultString(t, r.resp))
+	assert.Equal(t, "primary-1", r.resp.UpstreamId())
+	assert.Equal(t, int32(1), r.primaryCalls)
+}
+
+// With a hedge, an authoritative empty answer wins as soon as it lands.
+// primary-1 lists eth_getLogs, has the block, and answers [] after 40 ms.
+// The hedge has already asked primary-2, which answers data after 300 ms.
+// The hedge must keep primary-1's final [] instead of waiting for
+// primary-2.
+func TestEmptyFinal_HedgeKeepsAnAuthoritativeEmpty(t *testing.T) {
+	r := runEmptyFinalCase(t, emptyFinalCase{
+		method: "eth_getLogs", params: logsAt1001, marker: logAddress,
+		primaryBody: emptyLogs, fallbackBody: oneLog, primary2Body: oneLog,
+		authoritative: true, primaryLatest: "0x3ea",
+		hedge: &common.HedgePolicyConfig{
+			Delay:    common.NewStaticDuration(5 * time.Millisecond),
+			MaxCount: 1,
+		},
+		primaryDelay:  40 * time.Millisecond,
+		primary2Delay: 300 * time.Millisecond,
+	})
+	require.NoError(t, r.err)
+	assert.Equal(t, "[]", resultString(t, r.resp))
+	assert.Equal(t, "primary-1", r.resp.UpstreamId())
 }

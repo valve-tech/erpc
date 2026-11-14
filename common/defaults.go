@@ -2353,10 +2353,10 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 				n.Evm.MaxRetryableBlockDistance = defaults.Evm.MaxRetryableBlockDistance
 			}
 			if n.Evm.MarkEmptyAsErrorMethods == nil && defaults.Evm.MarkEmptyAsErrorMethods != nil {
-				n.Evm.MarkEmptyAsErrorMethods = append([]string(nil), defaults.Evm.MarkEmptyAsErrorMethods...)
+				n.Evm.MarkEmptyAsErrorMethods = slices.Clone(defaults.Evm.MarkEmptyAsErrorMethods) // keeps [] non-nil: an explicit empty list is an off switch
 			}
 			if n.Evm.EmptyResultHeadCheckMethods == nil && defaults.Evm.EmptyResultHeadCheckMethods != nil {
-				n.Evm.EmptyResultHeadCheckMethods = append([]string(nil), defaults.Evm.EmptyResultHeadCheckMethods...)
+				n.Evm.EmptyResultHeadCheckMethods = slices.Clone(defaults.Evm.EmptyResultHeadCheckMethods) // keeps [] non-nil: an explicit empty list is an off switch
 			}
 			if n.Evm.IdempotentTransactionBroadcast == nil && defaults.Evm.IdempotentTransactionBroadcast != nil {
 				n.Evm.IdempotentTransactionBroadcast = defaults.Evm.IdempotentTransactionBroadcast
@@ -2595,11 +2595,10 @@ func DefaultEmptyResultAccept() []string {
 	}
 }
 
-// DefaultMarkEmptyAsErrorMethods returns a fresh copy of the methods for which
-// empty/null results should be treated as "missing data" errors, triggering retry
-// on other upstreams. A new slice is returned on every call so callers cannot
-// mutate the shared default.
-//
+// defaultEmptyResultHeadCheckMethods is the read-only default behind
+// DefaultEmptyResultHeadCheckMethods. Hot paths read it without a copy.
+var defaultEmptyResultHeadCheckMethods = []string{"eth_getLogs", "trace_filter"}
+
 // DefaultEmptyResultHeadCheckMethods returns a fresh copy of the methods
 // whose empty result is final only when the answering upstream's known head
 // reaches the end of the requested range. A node at the tip can clamp a
@@ -2607,9 +2606,14 @@ func DefaultEmptyResultAccept() []string {
 // yet. Value reads are not listed: a node answers a block above its head
 // with an error, not with an empty value.
 func DefaultEmptyResultHeadCheckMethods() []string {
-	return []string{"eth_getLogs", "trace_filter"}
+	return slices.Clone(defaultEmptyResultHeadCheckMethods)
 }
 
+// DefaultMarkEmptyAsErrorMethods returns a fresh copy of the methods for which
+// empty/null results should be treated as "missing data" errors, triggering retry
+// on other upstreams. A new slice is returned on every call so callers cannot
+// mutate the shared default.
+//
 // Note: eth_getBlockByHash is intentionally excluded because subgraph-based
 // upstreams commonly return empty for this method, which is expected behavior.
 // Note: eth_getTransactionReceipt is excluded as a quick remedy. Ideally we'd

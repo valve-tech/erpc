@@ -2019,8 +2019,10 @@ export interface EvmNetworkConfig {
    * upstream's head once through its state poller. An empty answer above
    * the head, or with the head unknown, is not final: the request moves on
    * to other upstreams. It covers both the emptyResultAccept list and an
-   * upstream's emptyResultAuthoritativeMethods. Unset means
-   * ["eth_getLogs", "trace_filter"]; an empty list turns the check off.
+   * upstream's emptyResultAuthoritativeMethods. An omitted toBlock, or one
+   * left as latest, safe or pending, resolves to the served latest head.
+   * Unset means ["eth_getLogs", "trace_filter"]; an empty list turns the
+   * check off.
    */
   emptyResultHeadCheckMethods?: string[];
   /**

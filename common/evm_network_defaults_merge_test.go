@@ -91,3 +91,24 @@ func fillSentinel(v reflect.Value) {
 		v.Set(m)
 	}
 }
+
+// An explicit empty list in networkDefaults is an off switch, not "unset".
+// It must survive the merge into a network that has its own evm block.
+func TestNetworkDefaults_EmptyListsSurviveTheMerge(t *testing.T) {
+	defaults := &EvmNetworkConfig{
+		EmptyResultHeadCheckMethods: []string{},
+		MarkEmptyAsErrorMethods:     []string{},
+	}
+	n := &NetworkConfig{Architecture: ArchitectureEvm, Evm: &EvmNetworkConfig{ChainId: 369}}
+	require.NoError(t, n.SetDefaults(nil, &NetworkDefaults{Evm: defaults}))
+
+	require.NotNil(t, n.Evm.EmptyResultHeadCheckMethods, "[] must stay non-nil, or it reads as unset")
+	assert.Empty(t, n.Evm.EmptyResultHeadCheckMethods)
+	require.NotNil(t, n.Evm.MarkEmptyAsErrorMethods, "[] must stay non-nil, or the default list comes back")
+	assert.Empty(t, n.Evm.MarkEmptyAsErrorMethods)
+
+	// And the head check is off for the range methods.
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{}]}`))
+	req.SetNetwork(&covMiscNetwork{id: "evm:369", cfg: n})
+	assert.False(t, EmptyResultHeadCheckApplies(req, "eth_getLogs"))
+}

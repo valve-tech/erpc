@@ -2610,7 +2610,10 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					err = e
 				}
 				// An empty range answer is judged against the upstream's known
-				// head; refresh a lagging head once before any gate reads it.
+				// head; refresh a lagging head once before the loop, rotation,
+				// retry and hedge gates read it. The upstream post-forward hook
+				// (markEmptyAsErrorMethods) has already run inside tryForward and
+				// sees the head unrefreshed; no default lists a range method there.
 				if err == nil {
 					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
 				}

@@ -784,7 +784,11 @@ func (e *networkExecutor) runHedge(
 				kept = true
 				return true
 			}
-			if !e.acceptsEmptyResult(method, r) {
+			// An empty answer is usable when the accept list takes it, or
+			// when the upstream that gave it is authoritative for the method,
+			// the same two tests the network loop and the retry policy use.
+			if !e.acceptsEmptyResult(method, r) &&
+				!common.UpstreamEmptyIsAuthoritative(r.Upstream(), method, req, r) {
 				return false
 			}
 		}

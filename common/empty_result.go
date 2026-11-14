@@ -129,10 +129,74 @@ func AcceptedEmptyIsFinal(u Upstream, method string, req *NormalizedRequest) boo
 	if _, ok := u.(EvmUpstream); !ok {
 		return true
 	}
-	if bn, ok := req.EvmBlockNumber().(int64); !ok || bn <= 0 {
+	if emptyCheckBlock(req) <= 0 {
 		return true
 	}
 	return upstreamHasRequestedBlock(u, req)
+}
+
+// emptyCheckBlock is the block the head check compares against: the range
+// end RefreshHeadForEmptyResult resolved, else req.EvmBlockNumber (toBlock
+// once normalization turned it into a number). 0 means unknown.
+func emptyCheckBlock(req *NormalizedRequest) int64 {
+	if req == nil {
+		return 0
+	}
+	if end := req.EmptyResultRangeEnd(); end > 0 {
+		return end
+	}
+	if bn, ok := req.EvmBlockNumber().(int64); ok && bn > 0 {
+		return bn
+	}
+	return 0
+}
+
+// resolveRangeEnd returns the last block a range filter (params[0] of
+// eth_getLogs or trace_filter) covers, or 0 when it cannot tell. A literal
+// toBlock is used as is. An omitted toBlock, or one left as latest, safe or
+// pending, runs to the chain head, so it resolves to the request's served
+// latest head; finalized resolves to the served finalized head. ctx must be
+// the request's context, so the served head is the request's own lane. A
+// blockHash filter names no number and resolves to 0.
+func resolveRangeEnd(ctx context.Context, req *NormalizedRequest) int64 {
+	jrq, err := req.JsonRpcRequest(ctx)
+	if err != nil || jrq == nil {
+		return 0
+	}
+	jrq.RLock()
+	var filter map[string]interface{}
+	if len(jrq.Params) > 0 {
+		filter, _ = jrq.Params[0].(map[string]interface{})
+	}
+	var to interface{}
+	present, byHash := false, false
+	if filter != nil {
+		_, byHash = filter["blockHash"]
+		to, present = filter["toBlock"]
+	}
+	jrq.RUnlock()
+	if filter == nil || byHash {
+		return 0
+	}
+	tag, _ := to.(string)
+	if present && strings.HasPrefix(tag, "0x") {
+		n, err := HexToInt64(tag)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	nw := req.Network()
+	if nw == nil {
+		return 0
+	}
+	switch {
+	case !present || tag == "" || tag == "latest" || tag == "safe" || tag == "pending":
+		return EvmHighestLatestBlockNumber(nw, ctx)
+	case tag == "finalized":
+		return EvmHighestFinalizedBlockNumber(nw, ctx)
+	}
+	return 0
 }
 
 // EmptyResultHeadCheckApplies reports whether method is in the network's
@@ -142,7 +206,7 @@ func EmptyResultHeadCheckApplies(req *NormalizedRequest, method string) bool {
 	if req == nil || method == "" {
 		return false
 	}
-	list := DefaultEmptyResultHeadCheckMethods()
+	list := defaultEmptyResultHeadCheckMethods
 	if nw := req.Network(); nw != nil {
 		if cfg := nw.Config(); cfg != nil && cfg.Evm != nil && cfg.Evm.EmptyResultHeadCheckMethods != nil {
 			list = cfg.Evm.EmptyResultHeadCheckMethods
@@ -166,18 +230,21 @@ func EmptyResultHeadCheckApplies(req *NormalizedRequest, method string) bool {
 // and polls at most once per new block. Errors are ignored: the gates then
 // read the head as it stands.
 func RefreshHeadForEmptyResult(ctx context.Context, u Upstream, method string, req *NormalizedRequest, resp *NormalizedResponse) {
-	if resp == nil || resp.IsObjectNull() || !resp.IsResultEmptyish(ctx) {
-		return
-	}
 	if !EmptyResultHeadCheckApplies(req, method) {
 		return
 	}
-	bn, ok := req.EvmBlockNumber().(int64)
-	if !ok || bn <= 0 {
+	if resp == nil || resp.IsObjectNull() || !resp.IsResultEmptyish(ctx) {
 		return
 	}
 	eu, ok := u.(EvmUpstream)
 	if !ok {
+		return
+	}
+	if end := resolveRangeEnd(ctx, req); end > 0 {
+		req.emptyResultRangeEnd.Store(end)
+	}
+	bn := emptyCheckBlock(req)
+	if bn <= 0 {
 		return
 	}
 	sp := eu.EvmStatePoller()
@@ -188,9 +255,8 @@ func RefreshHeadForEmptyResult(ctx context.Context, u Upstream, method string, r
 }
 
 // upstreamHasRequestedBlock reports whether the block req targets is at or
-// below u's known head. The block is req.EvmBlockNumber: toBlock for
-// eth_getLogs and trace_filter, after normalization turned a latest or
-// finalized tag into a number. The head is u's own state-poller head: the
+// below u's known head. The block is emptyCheckBlock(req): the range end,
+// with an omitted or tag toBlock resolved to the served head. The head is u's own state-poller head: the
 // latest block, or the finalized block when the network sets
 // evm.emptyResultConfidence to finalizedBlock. A configured
 // blockAvailability upper bound (for example latestBlockMinus) lowers it
@@ -199,8 +265,8 @@ func upstreamHasRequestedBlock(u Upstream, req *NormalizedRequest) bool {
 	if req == nil {
 		return false
 	}
-	bn, ok := req.EvmBlockNumber().(int64)
-	if !ok || bn <= 0 {
+	bn := emptyCheckBlock(req)
+	if bn <= 0 {
 		return false
 	}
 	eu, ok := u.(EvmUpstream)
