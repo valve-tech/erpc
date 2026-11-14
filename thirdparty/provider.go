@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -48,7 +49,10 @@ func (p *Provider) SupportsNetwork(ctx context.Context, networkId string) (bool,
 		return false, nil
 	}
 
-	return p.vendor.SupportsNetwork(ctx, p.logger, p.config.Settings, networkId)
+	ok, err := p.vendor.SupportsNetwork(ctx, p.logger, p.config.Settings, networkId)
+	// Vendor discovery calls carry API keys in their URLs; a transport
+	// failure quotes the URL. Redact it here once for every vendor.
+	return ok, util.RedactURLError(err)
 }
 
 func (p *Provider) GenerateUpstreamConfigs(ctx context.Context, logger *zerolog.Logger, networkId string) ([]*common.UpstreamConfig, error) {

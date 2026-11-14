@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/semaphore"
 )
@@ -361,7 +362,7 @@ func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Lo
 			req, err := http.NewRequestWithContext(ctx, "POST", n.Details.HTTPSEndpoint+"/"+n.Details.AuthKey, bytes.NewReader(reqBody))
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to create request for node %s: %w", n.ID, err))
+				errors = append(errors, fmt.Errorf("failed to create request for node %s: %w", n.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}
@@ -371,7 +372,7 @@ func (v *ChainstackVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Lo
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to fetch chain ID for node %s: %w", n.ID, err))
+				errors = append(errors, fmt.Errorf("failed to fetch chain ID for node %s: %w", n.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}

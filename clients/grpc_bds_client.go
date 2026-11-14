@@ -894,7 +894,7 @@ func (c *GenericGrpcBdsClient) handleChainId(ctx context.Context, conn *bdsConn,
 	// state poller, its heads).
 	if expected := c.expectedChainId.Load(); expected > 0 && grpcResp.ChainId != expected {
 		mismatchErr := common.NewErrEndpointChainIdMismatch(grpcResp.ChainId, expected)
-		c.logger.Error().Err(mismatchErr).Str("target", c.Url.String()).Msg("chainId mismatch from BDS server")
+		c.logger.Error().Err(mismatchErr).Str("target", util.RedactURL(c.Url)).Msg("chainId mismatch from BDS server")
 		return nil, common.NewErrEndpointTransportFailure(c.Url, mismatchErr)
 	}
 

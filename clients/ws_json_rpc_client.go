@@ -455,7 +455,8 @@ func (c *WsJsonRpcClient) connect() error {
 
 	conn, _, err := dialer.DialContext(c.appCtx, c.Url.String(), c.headers)
 	if err != nil {
-		return err
+		// A dial or parse failure can print the URL, API key included.
+		return util.RedactURLError(err, c.Url)
 	}
 
 	// Every pong (here) and data frame (in readLoop) extends the liveness

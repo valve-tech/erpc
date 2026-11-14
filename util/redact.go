@@ -3,7 +3,10 @@ package util
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -33,4 +36,186 @@ func RedactEndpoint(endpoint string) string {
 	}
 
 	return redactedEndpoint
+}
+
+// RedactedURLPlaceholder stands in for the part of a URL that redaction
+// removes. It is visible on purpose: a reader (and a test) can tell a redacted
+// URL apart from one that never had a path.
+const RedactedURLPlaceholder = "***"
+
+// RedactURL renders an endpoint URL in a form that is safe to show anywhere:
+// an error message, a log line, a trace attribute, a metric label or a
+// JSON-RPC error returned to a client.
+//
+// Vendors put the credential in many places: the path (Infura /v3/<key>,
+// Alchemy /v2/<key>), the query (dRPC ?dkey=), the userinfo, or the host
+// itself for the vendor shorthands (infura://<key>). This function makes no
+// guess about which part holds it. It keeps the scheme, and the host only for
+// the network schemes that dial a host (http, https, ws, wss, grpc). It drops
+// everything else and appends the placeholder when it dropped anything.
+//
+// An unknown scheme is the safe fallthrough: its host is hidden too, because
+// a vendor shorthand carries its key there.
+func RedactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "" || !IsNativeProtocol(scheme+"://") {
+		if scheme == "" {
+			return RedactedURLPlaceholder
+		}
+		return scheme + "://" + RedactedURLPlaceholder
+	}
+	out := scheme + "://" + u.Host
+	if u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery ||
+		u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		out += "/" + RedactedURLPlaceholder
+	}
+	return out
+}
+
+// RedactURLString is RedactURL for a raw string. A string that does not parse
+// as an absolute URL gives no host to keep, so the whole value is hidden.
+func RedactURLString(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		if i := strings.Index(raw, "://"); i > 0 {
+			return strings.ToLower(raw[:i]) + "://" + RedactedURLPlaceholder
+		}
+		return RedactedURLPlaceholder
+	}
+	if u.Host == "" && IsNativeProtocol(strings.ToLower(u.Scheme)+"://") {
+		return strings.ToLower(u.Scheme) + "://" + RedactedURLPlaceholder
+	}
+	return RedactURL(u)
+}
+
+// urlInTextPattern finds anything shaped like "scheme://..." up to the first
+// character that cannot be part of an unquoted URL. net/http quotes the URL
+// with %q, so the closing quote ends the match.
+var urlInTextPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>` + "`" + `]+`)
+
+// RedactURLsInText redacts every URL inside free text, such as the message of
+// an error that a Go library built. It is meant for errors eRPC itself
+// produced (net/http, net, crypto/tls, url.Parse), not for a JSON-RPC error an
+// upstream returned.
+func RedactURLsInText(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	return urlInTextPattern.ReplaceAllStringFunc(s, func(m string) string {
+		// Prose often closes a URL with punctuation, as in "(via http://x)".
+		// Keep that punctuation out of the URL so the host still parses.
+		trimmed := strings.TrimRight(m, ").,;:]}")
+		return RedactURLString(trimmed) + m[len(trimmed):]
+	})
+}
+
+// redactedURLError hides every URL in an error message but keeps the original
+// error reachable through Unwrap, so errors.Is and errors.As still reach
+// sentinels such as context.DeadlineExceeded and concrete types such as
+// *url.Error.
+type redactedURLError struct {
+	cause   error
+	message string
+}
+
+func (e *redactedURLError) Error() string { return e.message }
+
+func (e *redactedURLError) Unwrap() error { return e.cause }
+
+// RedactURLError returns err with every URL in its message redacted by
+// RedactURL. It returns nil for nil, and err itself when the message holds no
+// URL.
+//
+// A *url.Error anywhere in the chain gets special care. Its Error() quotes the
+// URL with %q, and url.Parse puts the unparsed input there, which may hold
+// spaces or other characters that end a text match early. Its URL field is
+// therefore replaced whole before the text scan runs. Each URL in known is
+// replaced whole as well, in case a library printed it without a scheme
+// boundary the scan can see.
+func RedactURLError(err error, known ...*url.URL) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(*redactedURLError); ok {
+		return err
+	}
+	msg := err.Error()
+	out := msg
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		red := RedactURLString(ue.URL)
+		out = strings.ReplaceAll(out, strconv.Quote(ue.URL), strconv.Quote(red))
+		out = strings.ReplaceAll(out, ue.URL, red)
+	}
+	for _, u := range known {
+		if u == nil {
+			continue
+		}
+		raw := u.String()
+		if raw == "" {
+			continue
+		}
+		red := RedactURL(u)
+		out = strings.ReplaceAll(out, raw, red)
+		if u.User != nil {
+			// net/http prints the request URL with the password masked, so the
+			// raw form above does not match it.
+			if _, has := u.User.Password(); has {
+				masked := *u
+				masked.User = url.UserPassword(u.User.Username(), "***")
+				out = strings.ReplaceAll(out, masked.String(), red)
+			}
+		}
+	}
+	out = RedactURLsInText(out)
+	if out == msg {
+		return err
+	}
+	return &redactedURLError{cause: err, message: out}
+}
+
+// sensitiveHeaderNames are the headers that carry credentials by definition.
+var sensitiveHeaderNames = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"set-cookie":          true,
+}
+
+// IsSensitiveHeader reports whether a header may carry a credential: the
+// standard credential headers, and any header whose name mentions a key, a
+// token, a secret or auth (x-api-key, x-auth-token, x-goog-api-key, ...).
+// Vendors invent header names, so the name test is deliberately broad.
+func IsSensitiveHeader(name string) bool {
+	n := strings.ToLower(name)
+	if sensitiveHeaderNames[n] {
+		return true
+	}
+	return strings.Contains(n, "key") || strings.Contains(n, "token") ||
+		strings.Contains(n, "secret") || strings.Contains(n, "auth")
+}
+
+// RedactHeaders returns a copy of h that is safe to log. Every value of a
+// sensitive header becomes the placeholder; the header name stays, so a
+// reader can still see the header was sent. h itself is not changed.
+func RedactHeaders(h map[string][]string) map[string][]string {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(h))
+	for k, vs := range h {
+		if IsSensitiveHeader(k) {
+			red := make([]string, len(vs))
+			for i := range red {
+				red[i] = RedactedURLPlaceholder
+			}
+			out[k] = red
+			continue
+		}
+		out[k] = vs
+	}
+	return out
 }

@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -145,5 +146,8 @@ func GenerateVendorConfigs(
 		}
 	}()
 	name = vendor.Name()
-	return vendor.GenerateConfigs(ctx, logger, upstream, settings)
+	cfgs, err = vendor.GenerateConfigs(ctx, logger, upstream, settings)
+	// A vendor builds the endpoint from its API key; a url.Parse failure on
+	// it quotes the key. Redact here once instead of in every vendor.
+	return cfgs, util.RedactURLError(err)
 }

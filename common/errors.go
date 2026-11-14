@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
@@ -2211,51 +2212,35 @@ type ErrEndpointTransportFailure struct{ BaseError }
 
 const ErrCodeEndpointTransportFailure = "ErrEndpointTransportFailure"
 
-// RedactedEndpointPlaceholder replaces the endpoint URL in a transport failure
-// message. Endpoint URLs carry API keys, so no rendered message may contain one.
-// The placeholder is visible on purpose: a reader (and a test) can tell a
-// redaction apart from an empty message.
-const RedactedEndpointPlaceholder = "<redacted-endpoint>"
+// RedactedEndpointPlaceholder replaces the path, query and userinfo of an
+// endpoint URL in a rendered error. Endpoint URLs carry API keys, so no
+// rendered message may contain one. The placeholder is visible on purpose: a
+// reader (and a test) can tell a redaction apart from an empty message.
+const RedactedEndpointPlaceholder = util.RedactedURLPlaceholder
 
-// redactedCauseError hides the endpoint URL in an error message but keeps the
-// original error reachable. Error() returns the redacted text, so every surface
-// that prints a cause stays free of credentials: BaseError.Error,
-// BaseError.DeepestMessage, BaseError.MarshalJSON, BaseError.MarshalZerologObject
-// and ErrorSummary all render a non-StandardError cause through Error().
-// Unwrap() returns the untouched original, so errors.Is and errors.As still
-// reach sentinels such as context.DeadlineExceeded, io.EOF and net.ErrClosed.
+// redactEndpointInCause hides every endpoint URL in a cause message but keeps
+// the original error reachable. The returned error's Error() gives the
+// redacted text, so every surface that prints a cause stays free of
+// credentials: BaseError.Error, BaseError.DeepestMessage, BaseError.MarshalJSON,
+// BaseError.MarshalZerologObject and ErrorSummary all render a
+// non-StandardError cause through Error(). Unwrap() returns the untouched
+// original, so errors.Is and errors.As still reach sentinels such as
+// context.DeadlineExceeded, io.EOF and net.ErrClosed.
 //
-// The type deliberately does not implement StandardError. The marshalling code
-// in BaseError renders a non-StandardError cause through Error(), which is the
-// redacted path we want.
-type redactedCauseError struct {
-	cause   error
-	message string
-}
-
-func (e *redactedCauseError) Error() string { return e.message }
-
-func (e *redactedCauseError) Unwrap() error { return e.cause }
-
-// redactEndpointInCause wraps cause so its message no longer shows the endpoint
-// URL. A nil or empty URL is a no-op on the message: strings.ReplaceAll with an
-// empty needle would insert the placeholder between every character.
+// A StandardError cause passes through unchanged: it renders its own message
+// and was built by eRPC, not by a library that prints the request URL.
 func redactEndpointInCause(u *url.URL, cause error) error {
-	message := cause.Error()
-	if u != nil {
-		if raw := u.String(); raw != "" {
-			message = strings.ReplaceAll(message, raw, RedactedEndpointPlaceholder)
-		}
+	if cause == nil {
+		return nil
 	}
-	return &redactedCauseError{cause: cause, message: message}
+	if _, ok := cause.(StandardError); ok {
+		return cause
+	}
+	return util.RedactURLError(cause, u)
 }
 
 var NewErrEndpointTransportFailure = func(url *url.URL, cause error) error {
-	if cause != nil {
-		if _, ok := cause.(StandardError); !ok {
-			cause = redactEndpointInCause(url, cause)
-		}
-	}
+	cause = redactEndpointInCause(url, cause)
 	return &ErrEndpointTransportFailure{
 		BaseError{
 			Code:    ErrCodeEndpointTransportFailure,
@@ -2308,6 +2293,9 @@ type ErrEndpointRequestTimeout struct{ BaseError }
 const ErrCodeEndpointRequestTimeout = "ErrEndpointRequestTimeout"
 
 var NewErrEndpointRequestTimeout = func(dur time.Duration, cause error) error {
+	// net/http reports its own Client.Timeout as a *url.Error whose message
+	// holds the full request URL. Redact it here so no caller can forget.
+	cause = redactEndpointInCause(nil, cause)
 	return &ErrEndpointRequestTimeout{
 		BaseError{
 			Code:    ErrCodeEndpointRequestTimeout,
@@ -2329,6 +2317,7 @@ type ErrEndpointRequestCanceled struct{ BaseError }
 const ErrCodeEndpointRequestCanceled = "ErrEndpointRequestCanceled"
 
 var NewErrEndpointRequestCanceled = func(cause error) error {
+	cause = redactEndpointInCause(nil, cause)
 	return &ErrEndpointRequestCanceled{
 		BaseError{
 			Code:    ErrCodeEndpointRequestCanceled,

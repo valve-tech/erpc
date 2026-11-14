@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/semaphore"
 )
@@ -636,7 +637,7 @@ func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Log
 			req, err := http.NewRequestWithContext(ctx, "POST", e.HttpUrl, bytes.NewReader(reqBody))
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to create request for endpoint %s: %w", e.ID, err))
+				errors = append(errors, fmt.Errorf("failed to create request for endpoint %s: %w", e.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}
@@ -646,7 +647,7 @@ func (v *QuicknodeVendor) fetchChainIDs(ctx context.Context, logger *zerolog.Log
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("failed to fetch chain ID for endpoint %s: %w", e.ID, err))
+				errors = append(errors, fmt.Errorf("failed to fetch chain ID for endpoint %s: %w", e.ID, util.RedactURLError(err)))
 				mu.Unlock()
 				return
 			}

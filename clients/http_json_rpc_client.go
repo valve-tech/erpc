@@ -448,9 +448,9 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		for _, req := range requests {
 			req.err <- &common.BaseError{
 				Code:    "ErrHttp",
-				Message: fmt.Sprintf("%v", err),
+				Message: err.Error(),
 				Details: map[string]interface{}{
-					"url":        c.Url.String(),
+					"url":        util.RedactURL(c.Url),
 					"upstreamId": c.upstream.Id(),
 					"request":    requestBody,
 				},
@@ -462,11 +462,14 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", fmt.Sprintf("erpc (%s/%s; Project/%s)", common.ErpcVersion, common.ErpcCommitSha, c.projectId))
 
-	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msgf("sending json rpc POST request (batch)")
+	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msgf("sending json rpc POST request (batch)")
 
 	// pick the client from the proxy pool registry (if configured) or fallback
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
+		// net/http puts the full request URL, API key included, into a
+		// *url.Error. Redact it before anything logs, traces or wraps it.
+		err = util.RedactURLError(err, c.Url)
 		if batchCause := effectiveCause(batchCtx); batchCause != nil {
 			err = batchCause
 		}
@@ -747,9 +750,9 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 		common.SetTraceSpanError(span, err)
 		return nil, &common.BaseError{
 			Code:    "ErrHttp",
-			Message: fmt.Sprintf("%v", err),
+			Message: err.Error(),
 			Details: map[string]interface{}{
-				"url":        c.Url.String(),
+				"url":        util.RedactURL(c.Url),
 				"upstreamId": c.upstream.Id(),
 				"request":    requestBody,
 			},
@@ -763,10 +766,13 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 		}
 	}
 
-	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msg("sending json rpc POST request (single)")
+	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msg("sending json rpc POST request (single)")
 
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
+		// net/http puts the full request URL, API key included, into a
+		// *url.Error. Redact it before anything logs, traces or wraps it.
+		err = util.RedactURLError(err, c.Url)
 		cause := effectiveCause(ctx)
 		c.logger.Debug().Err(err).Object("request", req).AnErr("contextError", cause).Msg("transport failure while sending single request")
 		if cause != nil {
@@ -848,7 +854,8 @@ func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []by
 		if pooledRC != nil {
 			_ = pooledRC.Close()
 		}
-		return nil, err
+		// A parse failure quotes the whole URL, API key included.
+		return nil, util.RedactURLError(err, c.Url)
 	}
 	// NewRequest infers the length only for *bytes.Reader and friends; without
 	// it the pooled gzip body goes out chunked, which costs more on the wire

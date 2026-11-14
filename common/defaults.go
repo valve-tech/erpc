@@ -1451,7 +1451,7 @@ func convertUpstreamToProvider(upstream *UpstreamConfig) (*ProviderConfig, error
 
 	endpoint, err := url.Parse(upstream.Endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid upstream endpoint while converting to provider: %w", err)
+		return nil, fmt.Errorf("invalid upstream endpoint while converting to provider: %w", util.RedactURLError(err))
 	}
 
 	vendorName := strings.Replace(endpoint.Scheme, "evm+", "", 1)
@@ -1952,7 +1952,7 @@ func (u *UpstreamConfig) SetDefaults(defaults *UpstreamConfig) error {
 		if u.VendorName == "" {
 			epUrl, err := url.Parse(u.Endpoint)
 			if err != nil {
-				return fmt.Errorf("failed to parse endpoint: %w", err)
+				return fmt.Errorf("failed to parse endpoint: %w", util.RedactURLError(err))
 			}
 			if util.IsNativeProtocol(u.Endpoint) {
 				host := epUrl.Hostname()
