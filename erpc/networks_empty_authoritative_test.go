@@ -66,7 +66,23 @@ func setupEmptyAuthoritativeNetwork(t *testing.T, ctx context.Context, authorita
 	)
 	network.cfg.Evm.MarkEmptyAsErrorMethods = []string{"trace_block"}
 	network.PinUpstreamOrderForTest("rpc1", "rpc2")
+	// An empty answer is authoritative only for a block at or below the
+	// upstream's known head. This helper starts no pollers, so give each
+	// upstream a head above the block forwardTraceBlock asks for.
+	suggestUpstreamHeadsForTest(ctx, network, 0x100)
 	return network
+}
+
+// suggestUpstreamHeadsForTest gives every upstream of network a known
+// latest head. An empty answer is final only for a block at or below the
+// answering upstream's head, and test networks that start no pollers would
+// otherwise have head 0.
+func suggestUpstreamHeadsForTest(ctx context.Context, network *Network, head int64) {
+	for _, u := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
+		if sp := u.EvmStatePoller(); sp != nil && !sp.IsObjectNull() {
+			sp.SuggestLatestBlock(head)
+		}
+	}
 }
 
 func forwardTraceBlock(t *testing.T, ctx context.Context, network *Network) (*common.NormalizedResponse, time.Duration, error) {

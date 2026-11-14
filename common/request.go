@@ -285,6 +285,9 @@ type NormalizedRequest struct {
 	lastUpstream        atomic.Value
 	evmBlockRef         atomic.Value
 	evmBlockNumber      atomic.Value
+	// emptyResultRangeEnd is the resolved end of a range request (eth_getLogs,
+	// trace_filter) for the empty-result head check; 0 when unresolved.
+	emptyResultRangeEnd atomic.Int64
 
 	compositeType   atomic.Value // Type of composite request (e.g., "logs-split")
 	parentRequestId atomic.Value // ID of the parent request (for sub-requests)
@@ -1131,6 +1134,15 @@ func (r *NormalizedRequest) EvmBlockNumber() interface{} {
 	return r.evmBlockNumber.Load()
 }
 
+// EmptyResultRangeEnd returns the range end that RefreshHeadForEmptyResult
+// resolved for the empty-result head check, or 0 when none was resolved.
+func (r *NormalizedRequest) EmptyResultRangeEnd() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.emptyResultRangeEnd.Load()
+}
+
 func (r *NormalizedRequest) SetEvmBlockNumber(blockNumber interface{}) {
 	if r == nil || blockNumber == nil {
 		return
@@ -1653,7 +1665,8 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 		if nw := r.Network(); nw != nil {
 			netCfg = nw.Config()
 		}
-		acceptsEmpty = IsEmptyResultAccepted(netCfg, method) || UpstreamEmptyIsAuthoritative(upstream, method, resp)
+		acceptsEmpty = (IsEmptyResultAccepted(netCfg, method) && AcceptedEmptyIsFinal(upstream, method, r)) ||
+			UpstreamEmptyIsAuthoritative(upstream, method, r, resp)
 	}
 
 	// Store errors/empty-results for reporting (error messages, metrics).

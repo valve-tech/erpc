@@ -2609,6 +2609,14 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					ulg.Error().Err(e).Msgf("failed to normalize response")
 					err = e
 				}
+				// An empty range answer is judged against the upstream's known
+				// head; refresh a lagging head once before the loop, rotation,
+				// retry and hedge gates read it. The upstream post-forward hook
+				// (markEmptyAsErrorMethods) has already run inside tryForward and
+				// sees the head unrefreshed; no default lists a range method there.
+				if err == nil {
+					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
+				}
 				effectiveReq.MarkUpstreamCompleted(loopCtx, u, r, err)
 
 				// Hedge cancelled → this execution lost the race, bail out
@@ -2638,7 +2646,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					acceptEmpty := !emptyish ||
 						(!failsafeExecutor.HasConsensus() &&
 							(failsafeExecutor.acceptsEmptyResult(method, r) ||
-								common.UpstreamEmptyIsAuthoritative(u, method, r)))
+								common.UpstreamEmptyIsAuthoritative(u, method, effectiveReq, r)))
 					if acceptEmpty {
 						st := effectiveReq.ExecState()
 						st.MarkUpstreamAttemptWon(r.UpstreamId())

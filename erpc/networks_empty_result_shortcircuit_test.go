@@ -128,6 +128,7 @@ func TestEmptyResultAcceptShortCircuit(t *testing.T) {
 			},
 		)
 
+		suggestUpstreamHeadsForTest(ctx, network, 0x100)
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x100"}]}`)
 		req := common.NewNormalizedRequest(requestBytes)
 		req.ApplyDirectiveDefaults(network.cfg.DirectiveDefaults)
@@ -403,6 +404,7 @@ func TestEmptyResultAcceptShortCircuit(t *testing.T) {
 			},
 		)
 
+		suggestUpstreamHeadsForTest(ctx, network, 0x100)
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x100"}]}`)
 		req := common.NewNormalizedRequest(requestBytes)
 		req.ApplyDirectiveDefaults(network.cfg.DirectiveDefaults)
@@ -475,6 +477,7 @@ func TestEmptyResultAcceptShortCircuit(t *testing.T) {
 			},
 		)
 
+		suggestUpstreamHeadsForTest(ctx, network, 0x100)
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":"0x1","toBlock":"0x100"}]}`)
 		req := common.NewNormalizedRequest(requestBytes)
 		req.ApplyDirectiveDefaults(network.cfg.DirectiveDefaults)

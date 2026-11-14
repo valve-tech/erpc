@@ -153,9 +153,13 @@ func (e *networkExecutor) EmptyResultAccept() []string {
 	return e.emptyResultAccept
 }
 
+// acceptsEmptyResult reports whether an empty result for method is a final
+// answer under this executor's emptyResultAccept list. For a method in
+// evm.emptyResultHeadCheckMethods, common.AcceptedEmptyIsFinal must also
+// hold for the upstream that produced it.
 func (e *networkExecutor) acceptsEmptyResult(method string, resp *common.NormalizedResponse) bool {
 	if slices.Contains(e.EmptyResultAccept(), method) {
-		return true
+		return resp == nil || common.AcceptedEmptyIsFinal(resp.Upstream(), method, resp.Request())
 	}
 	if method != "debug_traceBlockByNumber" ||
 		(e != nil && e.cfg != nil && e.cfg.Retry != nil && e.cfg.Retry.EmptyResultAccept != nil) {
@@ -591,7 +595,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			}
 			// An empty answer from an upstream that is authoritative for the
 			// method is valid, the same as a method in the accept list.
-			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method, resp) {
+			if common.UpstreamEmptyIsAuthoritative(resp.Upstream(), method, req, resp) {
 				return ""
 			}
 			if e.acceptsEmptyResult(method, resp) {
@@ -780,7 +784,11 @@ func (e *networkExecutor) runHedge(
 				kept = true
 				return true
 			}
-			if !e.acceptsEmptyResult(method, r) {
+			// An empty answer is usable when the accept list takes it, or
+			// when the upstream that gave it is authoritative for the method,
+			// the same two tests the network loop and the retry policy use.
+			if !e.acceptsEmptyResult(method, r) &&
+				!common.UpstreamEmptyIsAuthoritative(r.Upstream(), method, req, r) {
 				return false
 			}
 		}
