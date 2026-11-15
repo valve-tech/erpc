@@ -55,6 +55,22 @@ func TestBatchServedHeader(t *testing.T) {
 		assert.Empty(t, w.Header().Get("X-ERPC-Served"))
 	})
 
+	t.Run("FailedItemsGetDashEvenWithAnUpstreamId", func(t *testing.T) {
+		upErr := common.NewErrUpstreamRequest(errors.New("boom"), common.NewFakeUpstream("up-err"), "evm:1", "eth_call", 0, 1, 0, 0)
+		jrr, err := common.NewJsonRpcResponse(1, nil, common.NewErrJsonRpcExceptionExternal(-32000, "execution failed", ""))
+		assert.NoError(t, err)
+		rpcErr := routedResponse(t, "eth_call").SetUpstream(common.NewFakeUpstream("up-rpc")).WithJsonRpcResponse(jrr)
+		w := httptest.NewRecorder()
+		costTestServer(&common.ServerConfig{}).writeBatchExecHeaders(ctx, w, []interface{}{
+			servedBy(t, "up-a"),
+			&HttpJsonRpcErrorResponse{Cause: upErr},
+			rpcErr,
+			nil,
+		})
+		assert.Equal(t, "up-a", w.Header().Get("X-ERPC-Served-Ids"))
+		assert.Equal(t, "0,-,-,-", w.Header().Get("X-ERPC-Served"))
+	})
+
 	t.Run("AllCacheHasNoIds", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		costTestServer(&common.ServerConfig{}).writeBatchExecHeaders(ctx, w, []interface{}{

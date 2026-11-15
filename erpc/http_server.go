@@ -1646,6 +1646,30 @@ func (s *HttpServer) writeCostHeaders(ctx context.Context, w http.ResponseWriter
 // X-ERPC-Upstreams-Truncated.
 const maxBatchTraceSegments = 50
 
+// batchItemFailed reports whether a batch item is an error body, a JSON-RPC
+// error response, or no response at all.
+func batchItemFailed(item interface{}) bool {
+	switch v := item.(type) {
+	case nil:
+		return true
+	case *HttpJsonRpcErrorResponse:
+		return true
+	case map[string]interface{}:
+		_, hasCause := v["cause"]
+		_, hasError := v["error"]
+		return hasCause || hasError
+	case error:
+		return true
+	case *common.NormalizedResponse:
+		if v == nil {
+			return true
+		}
+		jrr, _ := v.JsonRpcResponse()
+		return jrr != nil && jrr.Error != nil
+	}
+	return false
+}
+
 // writeBatchExecHeaders is the batch-path counterpart of setResponseHeaders:
 // ONE aggregated diagnostic header set for the whole HTTP response,
 // respecting the same ExecutionHeaders mode. Counters sum across
@@ -1675,7 +1699,9 @@ func (s *HttpServer) writeBatchExecHeaders(ctx context.Context, w http.ResponseW
 
 	for _, item := range items {
 		entry := "-"
-		if rm := lookupResponseMetadata(item); rm != nil {
+		// A failed item (an error body, or a response that carries a JSON-RPC
+		// error) gets "-" even when it names an upstream.
+		if rm := lookupResponseMetadata(item); rm != nil && !batchItemFailed(item) {
 			if rm.FromCache() {
 				entry = "c"
 			} else if id := rm.UpstreamId(); id != "" {
