@@ -1653,7 +1653,8 @@ const maxBatchTraceSegments = 50
 // served from cache); X-ERPC-Duration is the slowest sub-call; the
 // per-attempt trace keeps the exact single-response segment format,
 // concatenated in sub-call order and capped. X-ERPC-Upstream (the single
-// winner id) has no batch meaning and is not emitted.
+// winner id) has no batch meaning and is not emitted; X-ERPC-Served-Ids and
+// X-ERPC-Served name the answering upstream of each item instead.
 func (s *HttpServer) writeBatchExecHeaders(ctx context.Context, w http.ResponseWriter, items []interface{}) {
 	mode := s.executionHeadersMode()
 	if mode == common.ExecutionHeadersOff || len(items) == 0 {
@@ -1667,8 +1668,27 @@ func (s *HttpServer) writeBatchExecHeaders(ctx context.Context, w http.ResponseW
 	var maxDurationMs int64
 	var consensusPolicy string
 	consensusPolicyMixed := false
+	// Per-item answer: an index into servedIds, "c" for a cache hit, "-" for none.
+	servedIds := make([]string, 0, 4)
+	servedIndex := make(map[string]int, 4)
+	served := make([]string, 0, len(items))
 
 	for _, item := range items {
+		entry := "-"
+		if rm := lookupResponseMetadata(item); rm != nil {
+			if rm.FromCache() {
+				entry = "c"
+			} else if id := rm.UpstreamId(); id != "" {
+				idx, seen := servedIndex[id]
+				if !seen {
+					idx = len(servedIds)
+					servedIndex[id] = idx
+					servedIds = append(servedIds, id)
+				}
+				entry = strconv.Itoa(idx)
+			}
+		}
+		served = append(served, entry)
 		if req := extractRequest(item); req != nil {
 			if st := req.ExecState(); st != nil {
 				snap := st.Snapshot()
@@ -1716,6 +1736,13 @@ func (s *HttpServer) writeBatchExecHeaders(ctx context.Context, w http.ResponseW
 			}
 		}
 	}
+
+	// X-ERPC-Served has one entry per item, in response order. Entries index
+	// into X-ERPC-Served-Ids. Both are set in modes all and summary.
+	if len(servedIds) > 0 {
+		w.Header().Set("X-ERPC-Served-Ids", strings.Join(servedIds, ";"))
+	}
+	w.Header().Set("X-ERPC-Served", strings.Join(served, ","))
 
 	setInt(w, "X-ERPC-Attempts", total.Attempts)
 	setInt(w, "X-ERPC-Upstream-Attempts", total.UpstreamAttempts)
