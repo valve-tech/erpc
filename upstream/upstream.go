@@ -1418,6 +1418,22 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 			cfg.Evm = &common.EvmUpstreamConfig{}
 		}
 		nid, err := u.EvmGetChainId(ctx)
+		if err != nil && cfg.Evm.ChainId > 0 && common.HasErrorCode(err, common.ErrCodeEndpointUnsupported) {
+			// The node does not serve eth_chainId at all (-32601 and its
+			// normalized equivalents). Transaction sequencers do this: they
+			// accept eth_sendRawTransaction and little else. The answer says
+			// nothing about the chain, so it cannot contradict the operator's
+			// configured id. Trust that id. A real answer still goes through
+			// the mismatch check below.
+			u.logger.Warn().
+				Str("upstreamId", cfg.Id).
+				Str("endpoint", util.RedactEndpoint(cfg.Endpoint)).
+				Int64("chainId", cfg.Evm.ChainId).
+				Err(err).
+				Msg("upstream does not support eth_chainId; using the configured evm.chainId without verification")
+			u.networkId.Store(util.EvmNetworkId(cfg.Evm.ChainId))
+			return nil
+		}
 		if err != nil {
 			// RPC / network failure — potentially transient (provider outage,
 			// rate limit during startup, DNS blip). Leave the init error

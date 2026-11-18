@@ -118,7 +118,10 @@ configs at this stage; the rest of the upstream block travels as a `"*"` overrid
 exponential backoff (3 s → 130 s, factor 1.5) unless the task returns a `TaskFatal`
 error. Bootstrap calls `eth_chainId`, stores the detected value, derives
 `networkId = evm:<chainId>`, and starts the EVM state poller. A chain ID mismatch
-against a configured `evm.chainId` is fatal (no retry). A state-poller startup
+against a configured `evm.chainId` is fatal (no retry). If `evm.chainId` is set
+and the upstream answers `eth_chainId` with method-not-found (-32601, as
+transaction sequencers do), bootstrap trusts the configured id, logs a WARN, and
+continues. A state-poller startup
 failure is not fatal — the upstream registers and availability checks fail-open
 until the poller recovers. (<SourceLink file="upstream/registry.go" lines="95-104" />)
 
@@ -251,7 +254,7 @@ All paths relative to `projects[*]`. "Default" = value after `SetDefaults`/`Appl
 | `upstreams[*].routing.scoreMultipliers[].errorRate` / `respLatency` / `throttledRate` / `blockHeadLag` / `finalizationLag` / `misbehaviors` | `*float64` | unset = inherit preset | Per-dimension weight overrides for `sortByScore`. `0` removes contribution. |
 | `upstreams[*].routing.scoreLatencyQuantile` | float64 | `0` → policy default p70 | Which response-time quantile feeds the score. |
 | `upstreams[*].routing.probe` | `"on"` \| `"off"` | `""` → `on` | `off` opts this upstream out of probe-excluded shadow-mirror traffic. |
-| `upstreams[*].evm.chainId` | int64 | `0` → auto-detected via `eth_chainId` at bootstrap | Mismatch against detected value is **fatal** (no retry). Must be `0` for vendor-shorthand endpoints. |
+| `upstreams[*].evm.chainId` | int64 | `0` → auto-detected via `eth_chainId` at bootstrap | Mismatch against detected value is **fatal** (no retry). If the upstream answers `eth_chainId` with method-not-found, the configured value is used unverified. Must be `0` for vendor-shorthand endpoints. |
 | `upstreams[*].evm.statePollerInterval` | Duration | `30s` (<SourceLink file="common/defaults.go" lines="1718-1724" />) | Background latest/finalized poll cadence. Non-zero required. |
 | `upstreams[*].evm.statePollerDebounce` | Duration | `0` → inferred from chain block time | Minimum spacing between forced polls. |
 | `upstreams[*].evm.skipWhenSyncing` | `*bool` | `false` (<SourceLink file="common/defaults.go" lines="1766-1772" />) | Skip requests with `ErrUpstreamSyncing` while the poller reports syncing state. |
@@ -839,7 +842,10 @@ SVM upstream gets its own slot/health poller automatically:
   (<SourceLink file="upstream/upstream.go" lines="1199-1210" />)
 - `eth_chainId` detection retries forever on transport errors; non-numeric chainId
   or configured-vs-detected mismatch is `TaskFatal` — the upstream stops retrying
-  permanently. (<SourceLink file="upstream/upstream.go" lines="1419-1455" />)
+  permanently. A method-not-found answer with a configured `evm.chainId` is not a
+  failure: the configured id is used as-is. Without a configured id it fails
+  detection and retries, as before.
+  (<SourceLink file="upstream/upstream.go" lines="1419-1471" />)
 - Cordon state is an explicit flag on the health tracker (NOT a metric). It survives
   rolling-window rotation and idle-sweep eviction; only `Reset()` (test/admin) clears
   it. `erpc_listCordoned` only reports wildcard (`"*"`) scope cordons — method-scoped
