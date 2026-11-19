@@ -123,7 +123,11 @@ func buildFailoverNetwork(
 ) (*Network, *upstream.UpstreamsRegistry, *health.Tracker) {
 	t.Helper()
 
-	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
+	rlCfg := opts.rateLimiters
+	if rlCfg == nil {
+		rlCfg = &common.RateLimiterConfig{}
+	}
+	rlr, err := upstream.NewRateLimitersRegistry(context.Background(), rlCfg, &log.Logger)
 	require.NoError(t, err)
 	// 5s metrics window so accumulated request/failure samples don't get
 	// reset mid-test.
@@ -188,7 +192,7 @@ func buildFailoverNetwork(
 	require.NoError(t, network.Bootstrap(ctx))
 
 	upsList := upr.GetNetworkUpstreams(ctx, util.EvmNetworkId(999))
-	require.Len(t, upsList, 4)
+	require.Len(t, upsList, len(upstreamConfigs))
 	for _, ups := range upsList {
 		require.NoError(t, ups.Bootstrap(ctx))
 	}
@@ -215,6 +219,8 @@ type failoverFixtureOpts struct {
 	configure func(cfgs []*common.UpstreamConfig)
 	// network adjusts the network config before the network is built.
 	network func(cfg *common.NetworkConfig)
+	// rateLimiters configures the rate limiters registry; nil means none.
+	rateLimiters *common.RateLimiterConfig
 }
 
 func setupFailoverFixture(
@@ -788,4 +794,426 @@ func TestNetwork_ConsensusSlotSkippedByBlockAvailability(t *testing.T) {
 		resp.Release()
 	}
 	assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+}
+
+// paidFallbackIds lists the two paid fallbacks in their configured escape
+// order: QuickNode first, then Alchemy.
+var paidFallbackIds = []string{"quicknode-evm-1", "alchemy-evm-1"}
+
+// paidUpstreamHosts maps each upstream of the two-paid-fallbacks layout to
+// its mock host.
+var paidUpstreamHosts = map[string]string{
+	"primary-1":       "rpc1.localhost",
+	"primary-2":       "rpc2.localhost",
+	"primary-3":       "rpc3.localhost",
+	"quicknode-evm-1": "rpc4.localhost",
+	"alchemy-evm-1":   "rpc5.localhost",
+}
+
+// paidUpstreamOrder is the configured order of the layout.
+var paidUpstreamOrder = []string{"primary-1", "primary-2", "primary-3", "quicknode-evm-1", "alchemy-evm-1"}
+
+// callLog records, in order, each upstream that received an HTTP call for
+// one method.
+type callLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (c *callLog) add(id string) {
+	c.mu.Lock()
+	c.calls = append(c.calls, id)
+	c.mu.Unlock()
+}
+
+func (c *callLog) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.calls...)
+}
+
+func (c *callLog) count(id string) int {
+	n := 0
+	for _, got := range c.snapshot() {
+		if got == id {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *callLog) reset() {
+	c.mu.Lock()
+	c.calls = nil
+	c.mu.Unlock()
+}
+
+// mockReply is one upstream's canned answer for a method.
+type mockReply struct {
+	status int
+	body   string
+	delay  time.Duration
+}
+
+func okReply(resultJson string) mockReply {
+	return mockReply{status: 200, body: fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":%s}`, resultJson)}
+}
+
+// retryableFailure is a server error every policy treats as retryable.
+var retryableFailure = mockReply{status: 503, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"unavailable"}}`}
+
+// mockMethodLogged wires a method mock for one upstream that records each
+// call in log before it replies.
+func mockMethodLogged(id, method string, reply mockReply, log *callLog) {
+	host := paidUpstreamHosts[id]
+	m := gock.New("http://" + host).
+		Post("").
+		Persist().
+		Filter(func(r *http.Request) bool {
+			// Filters run before host matching.
+			if r.URL.Host != host || !strings.Contains(util.SafeReadBody(r), method) {
+				return false
+			}
+			log.add(id)
+			return true
+		}).
+		Reply(reply.status)
+	if reply.delay > 0 {
+		m = m.Delay(reply.delay)
+	}
+	m.JSON([]byte(reply.body))
+}
+
+// denyBudget is a rate-limit budget whose only rule allows no eth_call. A
+// "*" rule would also deny the bootstrap's eth_chainId, so the upstream
+// would never register.
+func denyBudget(id string) *common.RateLimitBudgetConfig {
+	return &common.RateLimitBudgetConfig{
+		Id: id,
+		Rules: []*common.RateLimitRuleConfig{{
+			Method:   "eth_call",
+			MaxCount: 0,
+			Period:   common.RateLimitPeriodSecond,
+		}},
+	}
+}
+
+type paidFallbacksOpts struct {
+	// replies sets each upstream's eth_call answer; the primaries default to
+	// a slow retryable failure.
+	replies map[string]mockReply
+	// deny lists the paid fallbacks whose rate-limit budget denies every call.
+	deny []string
+	// extraMocks registers more mocks ahead of the standard ones.
+	extraMocks func()
+}
+
+// setupPaidFallbacksFixture builds 3 primaries and 2 paid tier:fallback
+// upstreams (QuickNode, then Alchemy), with network retry 2 and hedge 1 and
+// the default selection policy, which cordons the fallbacks while the
+// primaries look healthy. It returns the eth_call log.
+func setupPaidFallbacksFixture(t *testing.T, ctx context.Context, opts paidFallbacksOpts) (*Network, *callLog) {
+	t.Helper()
+	util.ResetGock()
+
+	const chainIdHex = "0x3e7" // 999
+	const latestHex = "0x3e8"  // 1000
+	const finalizedHex = "0x3e0"
+
+	calls := &callLog{}
+	if opts.extraMocks != nil {
+		opts.extraMocks()
+	}
+	for _, id := range paidUpstreamOrder {
+		reply, ok := opts.replies[id]
+		if !ok {
+			if strings.HasPrefix(id, "primary") {
+				reply = retryableFailure
+				// Slow enough for the hedge to fire.
+				reply.delay = 30 * time.Millisecond
+			} else {
+				reply = okReply(`"0xfa11"`)
+			}
+		}
+		mockMethodLogged(id, "eth_call", reply, calls)
+	}
+	for _, id := range paidUpstreamOrder {
+		mockJsonRpcUpstream(paidUpstreamHosts[id], chainIdHex, latestHex, finalizedHex)
+	}
+
+	rl := &common.RateLimiterConfig{Store: &common.RateLimitStoreConfig{Driver: "memory"}}
+	denied := map[string]bool{}
+	for _, id := range opts.deny {
+		denied[id] = true
+		rl.Budgets = append(rl.Budgets, denyBudget(id+"-budget"))
+	}
+
+	var cfgs []*common.UpstreamConfig
+	for _, id := range paidUpstreamOrder {
+		cfg := &common.UpstreamConfig{
+			Type:     common.UpstreamTypeEvm,
+			Id:       id,
+			Endpoint: "http://" + paidUpstreamHosts[id],
+			Evm: &common.EvmUpstreamConfig{
+				ChainId:             999,
+				StatePollerInterval: common.Duration(100 * time.Millisecond),
+				StatePollerDebounce: common.Duration(20 * time.Millisecond),
+				BlockAvailability:   headBoundedAvailability(),
+			},
+		}
+		if !strings.HasPrefix(id, "primary") {
+			// The valve paid-backstop shape: no probe mirrors, one attempt,
+			// no hedge, and no auto-tuner rewriting the budget.
+			cfg.Tags = []string{common.TagTierFallback}
+			cfg.Routing = &common.UpstreamRoutingConfig{Probe: common.ProbeModeOff}
+			cfg.Failsafe = []*common.FailsafeConfig{{
+				MatchMethod: "*",
+				Retry:       &common.RetryPolicyConfig{MaxAttempts: 1},
+			}}
+			cfg.RateLimitAutoTune = &common.RateLimitAutoTuneConfig{Enabled: util.BoolPtr(false)}
+		}
+		if denied[id] {
+			cfg.RateLimitBudget = id + "-budget"
+		}
+		cfgs = append(cfgs, cfg)
+	}
+
+	network, upr, _ := buildFailoverNetwork(t, ctx, cfgs, failoverFixtureOpts{
+		enableFailover: true,
+		rateLimiters:   rl,
+		failsafe: []*common.FailsafeConfig{{
+			MatchMethod: "*",
+			Retry:       &common.RetryPolicyConfig{MaxAttempts: 2},
+			Hedge:       &common.HedgePolicyConfig{Delay: common.NewStaticDuration(10 * time.Millisecond), MaxCount: 1},
+		}},
+	})
+
+	// Healthy primaries at the tick: the default policy cordons the fallbacks.
+	policy.ResetSlotStateForTest(network.policyEngine, network.networkId, "*")
+	policy.TickForTest(network.policyEngine, network.networkId, "*")
+	require.NoError(t, upr.RefreshUpstreamNetworkMethodScores())
+	time.Sleep(50 * time.Millisecond)
+
+	// The escape walks the fallbacks in this order.
+	var order []string
+	for _, up := range upr.GetNetworkUpstreams(ctx, util.EvmNetworkId(999)) {
+		order = append(order, up.Id())
+	}
+	t.Logf("registry order: %v", order)
+
+	return network, calls
+}
+
+// fallbackCalls keeps only the calls that reached a paid fallback.
+func fallbackCalls(calls []string) []string {
+	var out []string
+	for _, id := range calls {
+		if !strings.HasPrefix(id, "primary") {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// TestFailover_TwoPaidFallbacks pins the escape order valve's relay depends
+// on: when every primary fails retryably, the escape tries QuickNode, then
+// Alchemy, each at most once per request, and a rate-limit budget that
+// denies one paid fallback moves the escape to the next.
+func TestFailover_TwoPaidFallbacks(t *testing.T) {
+	t.Run("QuickNodeServesAndAlchemyIsNotCalled", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"quicknode-evm-1": okReply(`"0x9999"`),
+				"alchemy-evm-1":   okReply(`"0xa1c0"`),
+			},
+		})
+		calls.reset()
+
+		req := ethCallRequest(1, "0x3e8")
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Release()
+
+		assert.Equal(t, "quicknode-evm-1", resp.UpstreamId())
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Equal(t, "0x9999", strings.Trim(jrr.GetResultString(), `"`))
+		assert.Equal(t, []string{"quicknode-evm-1"}, fallbackCalls(calls.snapshot()),
+			"QuickNode answered, so Alchemy must not be called; calls: %v", calls.snapshot())
+	})
+
+	t.Run("AlchemyOnlyAfterQuickNodeFails", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"quicknode-evm-1": retryableFailure,
+				"alchemy-evm-1":   okReply(`"0xa1c0"`),
+			},
+		})
+		calls.reset()
+
+		req := ethCallRequest(1, "0x3e8")
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Release()
+
+		assert.Equal(t, "alchemy-evm-1", resp.UpstreamId())
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Equal(t, "0xa1c0", strings.Trim(jrr.GetResultString(), `"`))
+		assert.Equal(t, paidFallbackIds, fallbackCalls(calls.snapshot()),
+			"QuickNode first, then Alchemy, each once; calls: %v", calls.snapshot())
+	})
+
+	t.Run("QuickNodeBudgetDeniesSoAlchemyServes", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"quicknode-evm-1": okReply(`"0x9999"`),
+				"alchemy-evm-1":   okReply(`"0xa1c0"`),
+			},
+			deny: []string{"quicknode-evm-1"},
+		})
+		calls.reset()
+
+		counter := telemetry.MetricNetworkFallbackEscapeTotal.WithLabelValues("main", "evm:999", "eth_call")
+		before := promUtil.ToFloat64(counter)
+
+		req := ethCallRequest(1, "0x3e8")
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Release()
+
+		assert.Equal(t, "alchemy-evm-1", resp.UpstreamId())
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Equal(t, "0xa1c0", strings.Trim(jrr.GetResultString(), `"`))
+		// The budget denies before any HTTP call, so QuickNode sends nothing.
+		assert.Equal(t, []string{"alchemy-evm-1"}, fallbackCalls(calls.snapshot()),
+			"calls: %v", calls.snapshot())
+		assert.Equal(t, before+1, promUtil.ToFloat64(counter), "one escape for the request")
+
+		qnErr, ok := upstreamError(req, "quicknode-evm-1")
+		require.True(t, ok, "the escape must have tried QuickNode")
+		assert.True(t, common.HasErrorCode(qnErr, common.ErrCodeUpstreamRateLimitRuleExceeded),
+			"QuickNode's error must be its budget denial; got %v", qnErr)
+	})
+
+	t.Run("BothBudgetsDenyGivesExhaustedAndNoThirdCall", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"quicknode-evm-1": okReply(`"0x9999"`),
+				"alchemy-evm-1":   okReply(`"0xa1c0"`),
+			},
+			deny: []string{"quicknode-evm-1", "alchemy-evm-1"},
+		})
+		calls.reset()
+
+		counter := telemetry.MetricNetworkFallbackEscapeTotal.WithLabelValues("main", "evm:999", "eth_call")
+		before := promUtil.ToFloat64(counter)
+
+		req := ethCallRequest(1, "0x3e8")
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted),
+			"want the aggregated exhausted error; got %v", err)
+		for _, id := range paidFallbackIds {
+			fbErr, ok := upstreamError(req, id)
+			require.True(t, ok, "the escape must have tried %s", id)
+			assert.True(t, common.HasErrorCode(fbErr, common.ErrCodeUpstreamRateLimitRuleExceeded),
+				"%s's error must be its budget denial; got %v", id, fbErr)
+		}
+
+		// Both budgets deny before any HTTP call. No third escape target
+		// exists, and the request must not go round again.
+		assert.Empty(t, fallbackCalls(calls.snapshot()), "calls: %v", calls.snapshot())
+		assert.Equal(t, before+1, promUtil.ToFloat64(counter), "exactly one escape for the request")
+		// 2 network attempts, each an original and 1 hedge, over 3 primaries.
+		assert.LessOrEqual(t, len(calls.snapshot()), 2*2*3,
+			"at most one call per primary per sweep; calls: %v", calls.snapshot())
+	})
+
+	t.Run("UseUpstreamReachesAlchemyAloneForGetFilterChanges", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		filterCalls := &callLog{}
+		network, _ := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"primary-1": okReply(`"0x1111"`),
+				"primary-2": okReply(`"0x2222"`),
+				"primary-3": okReply(`"0x3333"`),
+			},
+			extraMocks: func() {
+				for _, id := range paidUpstreamOrder {
+					mockMethodLogged(id, "eth_getFilterChanges",
+						okReply(fmt.Sprintf(`["%s"]`, id)), filterCalls)
+				}
+			},
+		})
+
+		// The policy cordons tier:fallback while the primaries are healthy.
+		counter := telemetry.MetricNetworkFallbackEscapeTotal.WithLabelValues("main", "evm:999", "eth_getFilterChanges")
+		before := promUtil.ToFloat64(counter)
+
+		req := common.NewNormalizedRequest([]byte(
+			`{"jsonrpc":"2.0","id":1,"method":"eth_getFilterChanges","params":["0x1"]}`,
+		))
+		h := http.Header{}
+		h.Set("X-ERPC-Use-Upstream", "alchemy-evm-1")
+		req.EnrichFromHttp(h, nil, common.UserAgentTrackingModeSimplified)
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Release()
+
+		assert.Equal(t, "alchemy-evm-1", resp.UpstreamId())
+		jrr, err := resp.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Equal(t, `["alchemy-evm-1"]`, jrr.GetResultString())
+		assert.Equal(t, []string{"alchemy-evm-1"}, filterCalls.snapshot(),
+			"the pin must reach Alchemy and nothing else")
+		t.Logf("escape counter delta for the pinned request: %v", promUtil.ToFloat64(counter)-before)
+	})
+}
+
+// upstreamError returns the error the request recorded for upstream id.
+func upstreamError(req *common.NormalizedRequest, id string) (error, bool) {
+	var found error
+	ok := false
+	req.ErrorsByUpstream.Range(func(k, v any) bool {
+		if up, isUp := k.(common.Upstream); isUp && up.Id() == id {
+			found, _ = v.(error)
+			ok = true
+			return false
+		}
+		return true
+	})
+	return found, ok
 }
