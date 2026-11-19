@@ -8050,3 +8050,23 @@ failing pinned fallback 4 paid calls. The escape already had this
 once-per-request rule.
 
 Not reported upstream yet. The same code is in upstream.
+
+## 209. A spent `"*"` budget stops the upstream from registering
+
+**Status: FIXED in the fork.** `TestUpstreamForward_RateLimitBudget`, case
+`init probes neither spend nor hit the budget`
+(`upstream/upstream_forward_test.go`), pins it. The `"*"` budgets of
+`TestFailover_TwoPaidFallbacks` also need the fix to bootstrap.
+
+At init, `detectFeatures` calls `eth_chainId` through `Upstream.Forward`,
+and `Forward` checks the upstream's rate-limit budget. A `"*"` rule with no
+permits left (a budget spent for the day, or `maxCount: 0`) denied the call.
+Init failed, and the upstream stayed unregistered until the budget reset.
+
+The fix marks the init probes' context (`withInitProbe`, `upstream/upstream.go`):
+`detectFeatures` and the SVM genesis-hash check. `Forward` neither checks nor
+spends the budget for a marked call. The chain-family probes use their own
+HTTP client and never reached the budget. The state poller's polls still
+count, as before; a denied first poll does not fail init.
+
+Not reported upstream yet. The same code is in upstream.

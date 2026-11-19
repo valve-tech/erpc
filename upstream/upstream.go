@@ -361,8 +361,25 @@ func NewUpstream(
 	return pup, nil
 }
 
+// initProbeKey marks a context whose calls are init probes: the calls that
+// decide whether the upstream registers at all.
+type initProbeKey struct{}
+
+// withInitProbe returns ctx marked as an init probe. Forward neither checks
+// nor spends the upstream's rate-limit budget for it: a budget spent for the
+// day would otherwise deny eth_chainId, and the upstream would stay
+// unregistered until the budget resets.
+func withInitProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, initProbeKey{}, true)
+}
+
+func isInitProbe(ctx context.Context) bool {
+	v, _ := ctx.Value(initProbeKey{}).(bool)
+	return v
+}
+
 func (u *Upstream) Bootstrap(ctx context.Context) error {
-	err := u.detectFeatures(ctx)
+	err := u.detectFeatures(withInitProbe(ctx))
 	if err != nil {
 		return err
 	}
@@ -400,7 +417,7 @@ func (u *Upstream) Bootstrap(ctx context.Context) error {
 		// The poller's own CompareAndSwap guard covers the remaining retries
 		// (a later attempt that validates then bootstraps twice); this ordering
 		// covers the "never validates" case, where no loop should exist.
-		if err := u.svmVerifyGenesisHash(ctx); err != nil {
+		if err := u.svmVerifyGenesisHash(withInitProbe(ctx)); err != nil {
 			return err
 		}
 		if err := u.svmStatePoller.Bootstrap(ctx); err != nil {
@@ -669,7 +686,7 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 	// Apply rate limits
 	//
 	var limitersBudget *RateLimiterBudget
-	if cfg.RateLimitBudget != "" {
+	if cfg.RateLimitBudget != "" && !isInitProbe(ctx) {
 		var errLimiters error
 		limitersBudget, errLimiters = u.rateLimitersRegistry.GetBudget(cfg.RateLimitBudget)
 		if errLimiters != nil {

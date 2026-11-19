@@ -874,14 +874,14 @@ func mockMethodLogged(id, method string, reply mockReply, log *callLog) {
 	m.JSON([]byte(reply.body))
 }
 
-// denyBudget is a rate-limit budget whose only rule allows no eth_call. A
-// "*" rule would also deny the bootstrap's eth_chainId, so the upstream
-// would never register.
+// denyBudget is a spent rate-limit budget: its "*" rule allows no call. The
+// bootstrap's eth_chainId must not count against it, or the upstream never
+// registers and the fixture's upstream count fails.
 func denyBudget(id string) *common.RateLimitBudgetConfig {
 	return &common.RateLimitBudgetConfig{
 		Id: id,
 		Rules: []*common.RateLimitRuleConfig{{
-			Method:   "eth_call",
+			Method:   "*",
 			MaxCount: 0,
 			Period:   common.RateLimitPeriodSecond,
 		}},
