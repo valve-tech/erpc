@@ -8095,3 +8095,40 @@ HTTP client and never reached the budget. The state poller's polls still
 count, as before; a denied first poll does not fail init.
 
 Not reported upstream yet. The same code is in upstream.
+
+## 210. `TierExcludedOnly` trusts step order: a health exclude placed after the tier split is not seen
+
+**Status:** open. No test pins it yet; entry 211 adds the unit tests.
+
+`policy.Engine.TierExcludedOnly` (`internal/policy/engine.go`, entry 208)
+lets a pin reach a fallback when the latest tick dropped it first at the
+tier split (`preferTag`). The step record is first-step-wins. In the
+default policy every health exclude runs before `preferTag`, so a lagging
+or failing fallback is recorded under `excludeIf`. A custom policy that
+puts an `excludeIf` after `preferTag` gets the opposite: `preferTag`
+drops the fallback first, and the later exclude never records against it.
+A pin can then reach a fallback that the policy would also drop for
+health.
+
+The fix: also require that the tick wrote no probe verdict for the
+upstream. Every exclude step judges the upstreams an earlier step already
+dropped (`_sweepAbsentForVerdicts`, `internal/policy/stdlib/stdlib.js`)
+and records a verdict for each it would drop. So "no verdict" means "no
+exclude step would drop it", whatever the step order.
+
+Fork-only: upstream has no `TierExcludedOnly`.
+
+## 211. `TierExcludedOnly` has no unit tests in `internal/policy`
+
+**Status:** open. Only the network-level cases of
+`TestFailover_TwoPaidFallbacks` (`erpc/networks_failover_escape_test.go`)
+cover it today.
+
+The tests should cover, against the engine directly: a fallback dropped
+only by the tier split (true); dropped first by `removeCordoned` or an
+`excludeIf` (false); blocked by `blockMethods` for the method (false);
+before the first tick (false); a narrow slot that has no order yet, which
+must read the wildcard slot as `GetOrderedInLane` does; a lane slot; and,
+once entry 210 is fixed, an `excludeIf` placed after `preferTag` (false).
+
+Fork-only: upstream has no `TierExcludedOnly`.
