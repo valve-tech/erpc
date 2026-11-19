@@ -8039,23 +8039,40 @@ nothing. The escape did not fire either, because nothing was tried and
 `lastErr` stayed nil. A filter made on a fallback could never be polled.
 
 The fix, `Network.withPinnedFallbacks` (`erpc/networks.go`), acts only when
-the network sets `failover.allowPinToFallback: true` (default off) and no
-routed upstream matches the pin. The request then uses the matching
-fallbacks, in config order, that the escape could also use (breaker closed,
-method allowed), that hold no health-tracker cordon, and that are in the
-request's lane. Their budget and rate limits still apply. A pin reaches no
-other upstream the policy left out, so a pin to an unknown or unhealthy
-upstream still fails with `ErrUpstreamsExhausted`.
+the network sets `failover.allowPinToFallback: true` (default off), the
+request is not internal, and no routed upstream matches the pin. The request
+then uses the matching fallbacks, in config order, that pass every one of:
+
+- the escape's own filter: breaker closed, method allowed;
+- no health-tracker cordon;
+- in the request's lane;
+- `policy.Engine.TierExcludedOnly`: the policy's latest tick dropped the
+  upstream first at the tier split (`preferTag`), with no leaf reason, and
+  no `blockMethods` entry blocks it. The policy's own health excludes
+  (errors, throttling, latency, block lag) write no tracker cordon, so only
+  the policy can say whether it dropped the upstream for health. A policy
+  that splits tiers with another step never lets a pin through.
+
+Their budget and rate limits still apply. A pin to an unknown, unhealthy or
+lagging upstream still fails with `ErrUpstreamsExhausted`.
 
 It is opt-in because a pin that widens past the policy lets any caller who
 can send the directive spend the fallback's budget. Valve's relay strips
 client directives, but eRPC also answers unauthenticated on the internal
-mesh, and other operators have no such relay.
+mesh, and other operators have no such relay. Internal pins (the integrity
+state prober, the chain-view selector) never widen, or they would spend a
+paid budget on every pass.
 
 With the setting on, a pin that matches a `tier:fallback` upstream gets one
-attempt per request (`Network.isPinnedFallback`). Without that rule,
-network retry 2 and hedge 1 sent a failing pinned fallback 4 paid calls.
-The escape already had this once-per-request rule.
+attempt per request (`Network.isPinnedFallback`). The request marks it
+before the attempt (`MarkSingleAttempt`), and `MarkUpstreamCompleted` keeps
+it reserved under the request's lock, so no hedge can take it in between.
+Without that rule, network retry 2 and hedge 1 sent a failing pinned
+fallback 4 paid calls. The escape already had this once-per-request rule.
+
+Known limit, left as it is: the multiplexer key (`Network.multiplexKey`,
+`req.CacheHash()`) ignores `UseUpstream`. Two identical concurrent requests
+with different pins can share one upstream answer. That predates this fix.
 
 Not reported upstream yet. The same code is in upstream.
 

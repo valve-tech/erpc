@@ -272,6 +272,10 @@ type NormalizedRequest struct {
 	// most once across retries and hedges.
 	escalatedToFallbacks atomic.Bool
 
+	// singleAttempt holds the upstreams this request may try only once
+	// (Upstream -> struct{}). MarkUpstreamCompleted keeps them reserved.
+	singleAttempt sync.Map
+
 	lastValidResponse         atomic.Pointer[NormalizedResponse]
 	integrityCaught           atomic.Bool  // an integrity check rejected a response during this request
 	integrityRejectedCheck    atomic.Value // id of the last check that rejected (the "why")
@@ -1370,6 +1374,18 @@ func (r *NormalizedRequest) Upstreams() []Upstream {
 	return out
 }
 
+// MarkSingleAttempt makes upstream a one-attempt upstream for this request:
+// once an attempt on it completes, MarkUpstreamCompleted keeps it reserved
+// in ConsumedUpstreams, so no retry or hedge selects it again. A cancelled
+// hedge still frees it, because that attempt never ran. Call it before the
+// attempt starts.
+func (r *NormalizedRequest) MarkSingleAttempt(upstream Upstream) {
+	if r == nil || upstream == nil {
+		return
+	}
+	r.singleAttempt.Store(upstream, struct{}{})
+}
+
 // MarkEscalatedToFallbacks reports true only for the first caller, so a
 // request escalates to the fallback tier at most once.
 func (r *NormalizedRequest) MarkEscalatedToFallbacks() bool {
@@ -1696,6 +1712,11 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 	// additional within-round protection for those.
 	isEmptyResult := !acceptsEmpty && hasResponse && err == nil && resp != nil && resp.IsResultEmptyish(ctx)
 	canReUse := !hasResponse || (err != nil && IsRetryableTowardsUpstream(err)) || isEmptyResult
+	if _, once := r.singleAttempt.Load(upstream); once {
+		// Freed here, the reservation could be taken by a hedge before
+		// any caller re-stored it, so it is kept under the lock.
+		canReUse = false
+	}
 	if canReUse {
 		r.ConsumedUpstreams.Delete(upstream)
 	}

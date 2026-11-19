@@ -2606,6 +2606,12 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					).Inc()
 				}
 
+				// With allowPinToFallback, a pin to a fallback gets one attempt
+				// per request, as the escape does: no retry or hedge pays the
+				// fallback again.
+				if n.isPinnedFallback(effectiveReq, u) {
+					effectiveReq.MarkSingleAttempt(u)
+				}
 				r, err := tryForward(u, effectiveReq, loopCtx, &ulg, hedges, attempts, snap.Retries)
 				if e := n.normalizeResponse(loopCtx, effectiveReq, r); e != nil {
 					ulg.Error().Err(e).Msgf("failed to normalize response")
@@ -2620,12 +2626,6 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
 				}
 				effectiveReq.MarkUpstreamCompleted(loopCtx, u, r, err)
-				// With allowPinToFallback, a pin to a fallback gets one attempt
-				// per request, as the escape does: no retry or hedge pays the
-				// fallback again.
-				if n.isPinnedFallback(effectiveReq, u) && !common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
-					effectiveReq.ConsumedUpstreams.Store(u, true)
-				}
 
 				// Hedge cancelled → this execution lost the race, bail out
 				if hedges > 0 && common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
@@ -3751,21 +3751,27 @@ func (n *Network) cleanupMultiplexer(mlx *Multiplexer) {
 	mlx.mu.Unlock()
 }
 
-// withPinnedFallbacks lets a use-upstream pin reach a tier:fallback upstream
-// that the selection policy keeps cordoned for tiering. It acts only when the
-// network sets failover.allowPinToFallback and no routed upstream matches the
-// pin. It then returns the matching fallbacks, in config order, that the
-// fallback escape could also use (breaker closed, method allowed), that no
-// health-tracker cordon holds, and that are in the request's lane. Their
+// withPinnedFallbacks lets a client's use-upstream pin reach a tier:fallback
+// upstream that the selection policy keeps cordoned for tiering. It acts
+// only when the network sets failover.allowPinToFallback, the request is not
+// internal, and no routed upstream matches the pin. It then returns the
+// matching fallbacks, in config order, that the fallback escape could also
+// use (breaker closed, method allowed), that no health-tracker cordon holds,
+// that are in the request's lane, and that the policy's latest tick dropped
+// at the tier split and for no other reason (policy.TierExcludedOnly). Their
 // budgets and rate limits still apply. In every other case ups is returned
 // unchanged, so a pin that reaches nothing still fails with
 // ErrUpstreamsExhausted.
+//
+// Internal requests (the integrity state prober, the chain-view selector)
+// pin each upstream in turn. They must not spend a paid fallback's budget
+// on every pass, so they keep the routed list.
 func (n *Network) withPinnedFallbacks(ctx context.Context, req *common.NormalizedRequest, method string, laneIDs []string, ups []common.Upstream) []common.Upstream {
-	if n.cfg == nil || !n.cfg.Failover.PinToFallbackAllowed() || n.upstreamsRegistry == nil {
+	if n.cfg == nil || !n.cfg.Failover.PinToFallbackAllowed() || n.upstreamsRegistry == nil || n.policyEngine == nil {
 		return ups
 	}
 	d := req.Directives()
-	if d == nil || d.UseUpstream == "" {
+	if d == nil || d.UseUpstream == "" || d.IsInternal {
 		return ups
 	}
 	for _, u := range ups {
@@ -3773,8 +3779,9 @@ func (n *Network) withPinnedFallbacks(ctx context.Context, req *common.Normalize
 			return ups
 		}
 	}
+	finality := req.Finality(ctx)
 	var pinned []common.Upstream
-	for _, fb := range n.upstreamsRegistry.GetFallbackEscapeUpstreams(ctx, n.networkId, method, req.Finality(ctx)) {
+	for _, fb := range n.upstreamsRegistry.GetFallbackEscapeUpstreams(ctx, n.networkId, method, finality) {
 		if m, _ := common.UpstreamMatchesSelector(d.UseUpstream, fb); !m {
 			continue
 		}
@@ -3782,6 +3789,11 @@ func (n *Network) withPinnedFallbacks(ctx context.Context, req *common.Normalize
 			continue
 		}
 		if n.metricsTracker != nil && n.metricsTracker.IsCordoned(fb, method) {
+			continue
+		}
+		// The policy's own health excludes (errors, throttling, latency,
+		// block lag) write no tracker cordon, so ask the policy itself.
+		if !n.policyEngine.TierExcludedOnly(n.networkId, method, finality.String(), laneIDs, fb) {
 			continue
 		}
 		pinned = append(pinned, fb)

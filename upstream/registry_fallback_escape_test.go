@@ -192,3 +192,30 @@ func TestGetFallbackEscapeUpstreams_NoFallbacksReturnsEmpty(t *testing.T) {
 	out := registry.GetFallbackEscapeUpstreams(ctx, "evm:123", "eth_call", common.DataFinalityStateUnknown)
 	assert.Empty(t, out, "no fallback-group upstreams configured → empty slice")
 }
+
+// The escape walks the fallbacks in config order, whatever order their
+// bootstraps finished in. The registry order is set to the reverse of the
+// config order, so the test fails every time without the sort.
+func TestGetFallbackEscapeUpstreams_ConfigOrder(t *testing.T) {
+	defer util.ResetGock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry, _ := setupRegistryWithFallbacks(t, ctx)
+
+	registry.OverrideOrderForTest("evm:123", "fallback-2", "fallback-1", "primary-2", "primary-1")
+	var regOrder []string
+	for _, u := range registry.GetNetworkUpstreams(ctx, "evm:123") {
+		regOrder = append(regOrder, u.Id())
+	}
+	require.Equal(t, []string{"fallback-2", "fallback-1", "primary-2", "primary-1"}, regOrder)
+
+	out := registry.GetFallbackEscapeUpstreams(ctx, "evm:123", "eth_call", common.DataFinalityStateUnknown)
+	ids := make([]string, 0, len(out))
+	for _, u := range out {
+		ids = append(ids, u.Id())
+	}
+	assert.Equal(t, []string{"fallback-1", "fallback-2"}, ids)
+
+	assert.Equal(t, 2, registry.ConfigIndex("fallback-1"))
+	assert.Equal(t, 4, registry.ConfigIndex("made-by-a-provider"), "an unlisted upstream sorts last")
+}

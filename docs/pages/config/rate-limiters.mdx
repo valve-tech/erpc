@@ -635,7 +635,7 @@ Full error code reference:
 
 - **`rateLimiters` absent from config = full passthrough.** When `rateLimiters` is omitted entirely, `bootstrap()` logs `"no rate limiters defined which means all capacity of both local cpu/memory and remote upstreams will be used"` at debug level and returns immediately — no budgets are registered and every request is allowed. Source: <SourceLink file="upstream/ratelimiter_registry.go" lines="48-51" />
 - No response carries a `Retry-After` header from eRPC.
-- **Init probes skip the upstream budget.** The `eth_chainId` call (and the SVM genesis-hash check) that decides whether an upstream registers is neither checked against nor charged to its `rateLimitBudget`. A spent budget therefore cannot keep an upstream unregistered. State-poller polls still count. Source: <SourceLink file="upstream/upstream.go" />
+- **Init probes skip the upstream budget.** The calls that decide whether an upstream registers are neither checked against nor charged to its `rateLimitBudget`: the EVM `eth_chainId` call, the SVM genesis-hash check, and the chain-family identity probe. The chain-family probe uses its own HTTP client and never goes through the budget. A spent budget therefore cannot keep an upstream unregistered. State-poller polls still count. Source: <SourceLink file="upstream/upstream.go" />, <SourceLink file="upstream/chain_family_bootstrap.go" />
 
 ### Best practices
 

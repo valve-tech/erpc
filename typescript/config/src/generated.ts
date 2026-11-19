@@ -790,13 +790,15 @@ export interface FailoverConfig {
    */
   onDefaultsExhausted?: boolean;
   /**
-   * AllowPinToFallback lets a use-upstream pin reach a `tier:fallback`
-   * upstream that the selection policy keeps cordoned for tiering. Default
-   * off: a pin then only filters the routed upstreams. Even when on, the pin
-   * never reaches a fallback with an open breaker, a health-tracker cordon,
-   * a method filter that refuses the method, or one outside the request's
-   * lane. Turn it on only where every caller that can send the directive is
-   * trusted to spend the fallback's budget.
+   *  AllowPinToFallback lets a client's use-upstream pin reach a
+   *  `tier:fallback` upstream that the selection policy keeps cordoned for
+   *  tiering. Default off: a pin then only filters the routed upstreams.
+   *  Even when on, the pin reaches a fallback only if the policy's latest
+   *  tick dropped it at the tier split (`preferTag`) and at no earlier step
+   *  (cordons, errors, throttling, latency, block lag), its breaker is
+   *  closed, it allows the method, and it is in the request's lane.
+   *  Internal pins never widen. Turn it on only where every caller that can
+   *  send the directive is trusted to spend the fallback's budget.
    */
   allowPinToFallback?: boolean;
 }

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -317,6 +318,48 @@ func TestMarkUpstreamCompleted_FreesTheReservationForACancelledHedge(t *testing.
 	again, err := r.NextUpstream()
 	require.NoError(t, err, "the upstream must be selectable again")
 	require.Equal(t, "alpha", again.Id())
+}
+
+func TestMarkUpstreamCompleted_KeepsASingleAttemptUpstreamReserved(t *testing.T) {
+	// A one-attempt upstream (a pinned paid fallback) must stay reserved after
+	// a retryable failure. Freeing it, even for an instant, would let a hedge
+	// or retry pay it again.
+	ctx := context.Background()
+	r := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+	once, other := newMockUpstream("once"), newMockUpstream("other")
+	r.SetUpstreams([]Upstream{once, other})
+	r.MarkSingleAttempt(once)
+
+	for range 2 {
+		u, err := r.NextUpstream()
+		require.NoError(t, err)
+		r.MarkUpstreamCompleted(ctx, u, nil, NewErrEndpointServerSideException(context.DeadlineExceeded, nil, 503))
+	}
+	_, stillReserved := r.ConsumedUpstreams.Load(once)
+	assert.True(t, stillReserved, "the one-attempt upstream stays reserved")
+	_, otherReserved := r.ConsumedUpstreams.Load(other)
+	assert.False(t, otherReserved, "an ordinary upstream is freed for the next round")
+
+	again, err := r.NextUpstream()
+	require.NoError(t, err)
+	assert.Equal(t, "other", again.Id(), "only the ordinary upstream can be selected again")
+}
+
+func TestMarkUpstreamCompleted_FreesASingleAttemptUpstreamForACancelledHedge(t *testing.T) {
+	// A cancelled hedge never reached the upstream, so it did not use the one
+	// attempt.
+	ctx := context.Background()
+	r := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call"}`))
+	once := newMockUpstream("once")
+	r.SetUpstreams([]Upstream{once})
+	r.MarkSingleAttempt(once)
+
+	u, err := r.NextUpstream()
+	require.NoError(t, err)
+	r.MarkUpstreamCompleted(ctx, u, nil, NewErrEndpointRequestCanceled(context.Canceled))
+	again, err := r.NextUpstream()
+	require.NoError(t, err)
+	assert.Equal(t, "once", again.Id())
 }
 
 // ---------------------------------------------------------------------------

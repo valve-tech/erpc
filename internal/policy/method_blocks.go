@@ -44,6 +44,15 @@ func newMethodBlockIndex(ups []common.Upstream, blocks map[string]map[string]Met
 	return idx
 }
 
+// blocks reports whether the tick blocked upstream id for method.
+func (idx *methodBlockIndex) blocks(id, method string) bool {
+	if idx == nil {
+		return false
+	}
+	_, ok := idx.blocked[method][id]
+	return ok
+}
+
 // filter drops the upstreams blocked for `method`. The input is never
 // mutated and is returned as-is when nothing is blocked. When the blocks
 // would leave no upstream, the input is returned unchanged: a method keeps

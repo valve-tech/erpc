@@ -901,6 +901,9 @@ type paidFallbacksOpts struct {
 	// fallbackBreaker gives each paid fallback a breaker that one failure
 	// opens for an hour.
 	fallbackBreaker bool
+	// latest overrides an upstream's latest block (hex); the default is
+	// 0x3e8.
+	latest map[string]string
 }
 
 // setupPaidFallbacksFixture builds 3 primaries and 2 paid tier:fallback
@@ -933,7 +936,11 @@ func setupPaidFallbacksFixture(t *testing.T, ctx context.Context, opts paidFallb
 		mockMethodLogged(id, "eth_call", reply, calls)
 	}
 	for _, id := range paidUpstreamOrder {
-		mockJsonRpcUpstream(paidUpstreamHosts[id], chainIdHex, latestHex, finalizedHex)
+		latest := latestHex
+		if v, ok := opts.latest[id]; ok {
+			latest = v
+		}
+		mockJsonRpcUpstream(paidUpstreamHosts[id], chainIdHex, latest, finalizedHex)
 	}
 
 	rl := &common.RateLimiterConfig{Store: &common.RateLimitStoreConfig{Driver: "memory"}}
@@ -1386,6 +1393,51 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 			}
 		}
 		pinRefused(t, ctx, network, calls)
+	})
+
+	t.Run("UseUpstreamSkipsFallbackThePolicyDropsForBlockLag", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Alchemy trails the tip by 40 blocks, past the default policy's
+		// blockNumberLagAbove(16). That writes no tracker cordon.
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies:            healthyPrimaries,
+			allowPinToFallback: true,
+			latest:             map[string]string{"alchemy-evm-1": "0x3c0"},
+		})
+		for _, up := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
+			if up.Id() == "alchemy-evm-1" {
+				require.False(t, network.metricsTracker.IsCordoned(up, "eth_call"), "the lag must not show as a tracker cordon")
+			}
+		}
+		pinRefused(t, ctx, network, calls)
+	})
+
+	t.Run("InternalPinDoesNotReachCordonedFallback", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies:            healthyPrimaries,
+			allowPinToFallback: true,
+		})
+		calls.reset()
+
+		// The integrity state prober and the chain-view selector pin each
+		// upstream like this, on every pass.
+		req := ethCallRequest(1, "0x3e8")
+		req.SetDirectives(&common.RequestDirectives{UseUpstream: "alchemy-evm-1", IsInternal: true})
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+		assert.Empty(t, calls.snapshot(), "an internal pin must not spend the fallback's budget")
 	})
 
 	t.Run("UseUpstreamToUnknownIdStillExhausts", func(t *testing.T) {
