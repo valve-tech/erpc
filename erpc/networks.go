@@ -2179,6 +2179,8 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 
 	_, upstreamSpan := common.StartDetailSpan(ctx, "PolicyEngine.GetOrdered")
 	var upsList []common.Upstream
+	// laneIDs is the request's block-availability lane; nil means no lane.
+	var laneIDs []string
 	if n.policyEngine != nil {
 		// Pass the request's actual finality so per-finality slots
 		// (when EvalPerFinality is on) resolve to the bucket-specific
@@ -2190,7 +2192,6 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 		// configured bounds can serve this block. laneIDs stays nil when the
 		// axis is off or the request has no resolvable block number, in which
 		// case GetOrderedInLane behaves exactly like GetOrdered.
-		var laneIDs []string
 		if n.policyEngine.PerBoundaryEnabled(n.networkId) {
 			laneIDs = n.eligibleUpstreamIDsForBoundary(ctx, method, req)
 			if common.IsTracingDetailed && len(laneIDs) > 0 {
@@ -2206,7 +2207,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			upsList = append(upsList, u)
 		}
 	}
-	upsList = n.withPinnedUpstreams(ctx, req, upsList)
+	upsList = n.withPinnedFallbacks(ctx, req, method, laneIDs, upsList)
 	// Enforce method eligibility at selection time: an upstream whose
 	// ignoreMethods/allowMethods config (including entries added by
 	// autoIgnoreUnsupportedMethods) excludes this method would only be
@@ -2619,9 +2620,10 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
 				}
 				effectiveReq.MarkUpstreamCompleted(loopCtx, u, r, err)
-				// A pin to a fallback gets one attempt per request, as the
-				// escape does: no retry or hedge pays the fallback again.
-				if isPinnedFallback(effectiveReq, u) && !common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
+				// With allowPinToFallback, a pin to a fallback gets one attempt
+				// per request, as the escape does: no retry or hedge pays the
+				// fallback again.
+				if n.isPinnedFallback(effectiveReq, u) && !common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
 					effectiveReq.ConsumedUpstreams.Store(u, true)
 				}
 
@@ -3749,16 +3751,21 @@ func (n *Network) cleanupMultiplexer(mlx *Multiplexer) {
 	mlx.mu.Unlock()
 }
 
-// withPinnedUpstreams honours a use-upstream pin over the selection policy.
-// When no routed upstream matches the pin, it returns the registered
-// upstreams that match, in config order: an upstream the policy cordoned
-// (a tier:fallback one, for example) still serves a request pinned to it.
-// Its budget, rate limits and breaker still apply. ups is returned unchanged
-// when there is no pin, a routed upstream matches it, or no registered
-// upstream matches it, which keeps today's ErrUpstreamsExhausted.
-func (n *Network) withPinnedUpstreams(ctx context.Context, req *common.NormalizedRequest, ups []common.Upstream) []common.Upstream {
+// withPinnedFallbacks lets a use-upstream pin reach a tier:fallback upstream
+// that the selection policy keeps cordoned for tiering. It acts only when the
+// network sets failover.allowPinToFallback and no routed upstream matches the
+// pin. It then returns the matching fallbacks, in config order, that the
+// fallback escape could also use (breaker closed, method allowed), that no
+// health-tracker cordon holds, and that are in the request's lane. Their
+// budgets and rate limits still apply. In every other case ups is returned
+// unchanged, so a pin that reaches nothing still fails with
+// ErrUpstreamsExhausted.
+func (n *Network) withPinnedFallbacks(ctx context.Context, req *common.NormalizedRequest, method string, laneIDs []string, ups []common.Upstream) []common.Upstream {
+	if n.cfg == nil || !n.cfg.Failover.PinToFallbackAllowed() || n.upstreamsRegistry == nil {
+		return ups
+	}
 	d := req.Directives()
-	if d == nil || d.UseUpstream == "" || n.upstreamsRegistry == nil {
+	if d == nil || d.UseUpstream == "" {
 		return ups
 	}
 	for _, u := range ups {
@@ -3767,23 +3774,31 @@ func (n *Network) withPinnedUpstreams(ctx context.Context, req *common.Normalize
 		}
 	}
 	var pinned []common.Upstream
-	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
-		if m, _ := common.UpstreamMatchesSelector(d.UseUpstream, u); m {
-			pinned = append(pinned, u)
+	for _, fb := range n.upstreamsRegistry.GetFallbackEscapeUpstreams(ctx, n.networkId, method, req.Finality(ctx)) {
+		if m, _ := common.UpstreamMatchesSelector(d.UseUpstream, fb); !m {
+			continue
 		}
+		if laneIDs != nil && !slices.Contains(laneIDs, fb.Id()) {
+			continue
+		}
+		if n.metricsTracker != nil && n.metricsTracker.IsCordoned(fb, method) {
+			continue
+		}
+		pinned = append(pinned, fb)
 	}
 	if len(pinned) == 0 {
 		return ups
 	}
-	slices.SortStableFunc(pinned, func(a, b common.Upstream) int {
-		return n.upstreamsRegistry.ConfigIndex(a.Id()) - n.upstreamsRegistry.ConfigIndex(b.Id())
-	})
 	return pinned
 }
 
-// isPinnedFallback reports whether req carries a use-upstream pin and u is a
-// tier:fallback upstream that matches it.
-func isPinnedFallback(req *common.NormalizedRequest, u common.Upstream) bool {
+// isPinnedFallback reports whether n lets a pin reach a fallback, req
+// carries a use-upstream pin, and u is a tier:fallback upstream that matches
+// it.
+func (n *Network) isPinnedFallback(req *common.NormalizedRequest, u common.Upstream) bool {
+	if n.cfg == nil || !n.cfg.Failover.PinToFallbackAllowed() {
+		return false
+	}
 	d := req.Directives()
 	if d == nil || d.UseUpstream == "" {
 		return false

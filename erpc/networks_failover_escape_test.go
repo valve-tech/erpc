@@ -896,6 +896,11 @@ type paidFallbacksOpts struct {
 	deny []string
 	// extraMocks registers more mocks ahead of the standard ones.
 	extraMocks func()
+	// allowPinToFallback sets failover.allowPinToFallback on the network.
+	allowPinToFallback bool
+	// fallbackBreaker gives each paid fallback a breaker that one failure
+	// opens for an hour.
+	fallbackBreaker bool
 }
 
 // setupPaidFallbacksFixture builds 3 primaries and 2 paid tier:fallback
@@ -960,6 +965,15 @@ func setupPaidFallbacksFixture(t *testing.T, ctx context.Context, opts paidFallb
 				MatchMethod: "*",
 				Retry:       &common.RetryPolicyConfig{MaxAttempts: 1},
 			}}
+			if opts.fallbackBreaker {
+				cfg.Failsafe[0].CircuitBreaker = &common.CircuitBreakerPolicyConfig{
+					FailureThresholdCount:    1,
+					FailureThresholdCapacity: 1,
+					HalfOpenAfter:            common.Duration(time.Hour),
+					SuccessThresholdCount:    1,
+					SuccessThresholdCapacity: 1,
+				}
+			}
 			cfg.RateLimitAutoTune = &common.RateLimitAutoTuneConfig{Enabled: util.BoolPtr(false)}
 		}
 		if denied[id] {
@@ -976,6 +990,11 @@ func setupPaidFallbacksFixture(t *testing.T, ctx context.Context, opts paidFallb
 			Retry:       &common.RetryPolicyConfig{MaxAttempts: 2},
 			Hedge:       &common.HedgePolicyConfig{Delay: common.NewStaticDuration(10 * time.Millisecond), MaxCount: 1},
 		}},
+		network: func(cfg *common.NetworkConfig) {
+			if opts.allowPinToFallback {
+				cfg.Failover.AllowPinToFallback = util.BoolPtr(true)
+			}
+		},
 	})
 
 	// Healthy primaries at the tick: the default policy cordons the fallbacks.
@@ -1154,6 +1173,7 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 
 		filterCalls := &callLog{}
 		network, _ := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			allowPinToFallback: true,
 			replies: map[string]mockReply{
 				"primary-1": okReply(`"0x1111"`),
 				"primary-2": okReply(`"0x2222"`),
@@ -1209,6 +1229,7 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 		defer cancel()
 
 		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			allowPinToFallback: true,
 			replies: map[string]mockReply{
 				"primary-1":     okReply(`"0x1111"`),
 				"primary-2":     okReply(`"0x2222"`),
@@ -1232,6 +1253,7 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 		defer cancel()
 
 		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			allowPinToFallback: true,
 			replies: map[string]mockReply{
 				"primary-1":     okReply(`"0x1111"`),
 				"primary-2":     okReply(`"0x2222"`),
@@ -1257,6 +1279,7 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 		defer cancel()
 
 		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			allowPinToFallback: true,
 			replies: map[string]mockReply{
 				"primary-1": okReply(`"0x1111"`),
 				"primary-2": okReply(`"0x2222"`),
@@ -1278,12 +1301,100 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 			"Alchemy's error must be its budget denial; got %v", alErr)
 	})
 
+	healthyPrimaries := map[string]mockReply{
+		"primary-1":     okReply(`"0x1111"`),
+		"primary-2":     okReply(`"0x2222"`),
+		"primary-3":     okReply(`"0x3333"`),
+		"alchemy-evm-1": okReply(`"0xa1c0"`),
+	}
+
+	// pinRefused asserts the pin to Alchemy fails as it did in 0.3.0.18:
+	// ErrUpstreamsExhausted, no eth_call to anyone, and Alchemy never
+	// selected. An open breaker also refuses inside Upstream.Forward, so only
+	// the missing attempt shows that the pin did not select Alchemy.
+	pinRefused := func(t *testing.T, ctx context.Context, network *Network, calls *callLog) {
+		t.Helper()
+		calls.reset()
+		req, resp, err := pinnedEthCall(ctx, network, "alchemy-evm-1", "0x3e8")
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+		assert.Empty(t, calls.snapshot())
+		alErr, tried := upstreamError(req, "alchemy-evm-1")
+		assert.False(t, tried, "the pin must not select Alchemy; its error: %v", alErr)
+	}
+
+	t.Run("UseUpstreamToCordonedFallbackFailsWhenNotAllowed", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// allowPinToFallback is off by default.
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{replies: healthyPrimaries})
+		require.False(t, network.cfg.Failover.PinToFallbackAllowed())
+		pinRefused(t, ctx, network, calls)
+	})
+
+	t.Run("UseUpstreamSkipsFallbackWithOpenBreaker", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		replies := map[string]mockReply{}
+		for k, v := range healthyPrimaries {
+			replies[k] = v
+		}
+		replies["alchemy-evm-1"] = retryableFailure
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies:            replies,
+			allowPinToFallback: true,
+			fallbackBreaker:    true,
+		})
+
+		// One direct failure opens Alchemy's breaker.
+		var alchemy *upstream.Upstream
+		for _, up := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
+			if up.Id() == "alchemy-evm-1" {
+				alchemy = up
+			}
+		}
+		require.NotNil(t, alchemy)
+		trip := ethCallRequest(2, "0x3e8")
+		trip.SetNetwork(network)
+		if resp, _ := alchemy.Forward(ctx, trip, true, false); resp != nil {
+			resp.Release()
+		}
+		require.True(t, alchemy.IsDown("eth_call", common.DataFinalityStateFinalized), "the breaker must be open")
+
+		pinRefused(t, ctx, network, calls)
+	})
+
+	t.Run("UseUpstreamSkipsFallbackWithHealthCordon", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies:            healthyPrimaries,
+			allowPinToFallback: true,
+		})
+		for _, up := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
+			if up.Id() == "alchemy-evm-1" {
+				network.metricsTracker.Cordon(up, "*", "test: unhealthy")
+			}
+		}
+		pinRefused(t, ctx, network, calls)
+	})
+
 	t.Run("UseUpstreamToUnknownIdStillExhausts", func(t *testing.T) {
 		defer util.ResetGock()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			allowPinToFallback: true,
 			replies: map[string]mockReply{
 				"primary-1": okReply(`"0x1111"`),
 				"primary-2": okReply(`"0x2222"`),

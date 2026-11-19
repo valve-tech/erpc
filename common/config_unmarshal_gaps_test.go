@@ -77,6 +77,23 @@ func TestFailoverConfig_Enabled(t *testing.T) {
 	assert.True(t, (&FailoverConfig{OnDefaultsExhausted: &on}).Enabled())
 }
 
+// allowPinToFallback is off unless set to true, and it never turns the
+// escape on.
+func TestFailoverConfig_PinToFallbackAllowed(t *testing.T) {
+	var nilCfg *FailoverConfig
+	assert.False(t, nilCfg.PinToFallbackAllowed())
+	assert.False(t, (&FailoverConfig{}).PinToFallbackAllowed())
+	off, on := false, true
+	assert.False(t, (&FailoverConfig{AllowPinToFallback: &off}).PinToFallbackAllowed())
+	pinOnly := &FailoverConfig{AllowPinToFallback: &on}
+	assert.True(t, pinOnly.PinToFallbackAllowed())
+	assert.False(t, pinOnly.Enabled(), "allowPinToFallback alone must not enable the escape")
+
+	var parsed NetworkConfig
+	require.NoError(t, yaml.Unmarshal([]byte("failover:\n  allowPinToFallback: true\n"), &parsed))
+	assert.True(t, parsed.Failover.PinToFallbackAllowed())
+}
+
 // ---------------------------------------------------------------------------
 // RateLimitRuleConfig.MarshalZerologObject
 // ---------------------------------------------------------------------------

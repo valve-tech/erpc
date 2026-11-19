@@ -906,14 +906,28 @@ type FailoverConfig struct {
 	// advances to the fallback tier within the same request only once every
 	// other upstream failed with an error retryable toward the network.
 	OnDefaultsExhausted *bool `yaml:"onDefaultsExhausted,omitempty" json:"onDefaultsExhausted"`
+	// AllowPinToFallback lets a use-upstream pin reach a `tier:fallback`
+	// upstream that the selection policy keeps cordoned for tiering. Default
+	// off: a pin then only filters the routed upstreams. Even when on, the pin
+	// never reaches a fallback with an open breaker, a health-tracker cordon,
+	// a method filter that refuses the method, or one outside the request's
+	// lane. Turn it on only where every caller that can send the directive is
+	// trusted to spend the fallback's budget.
+	AllowPinToFallback *bool `yaml:"allowPinToFallback,omitempty" json:"allowPinToFallback"`
 }
 
-// Enabled reports whether any failover behaviour is configured.
+// Enabled reports whether the fallback escape (onDefaultsExhausted) is on.
+// AllowPinToFallback does not count: it changes pins only.
 func (f *FailoverConfig) Enabled() bool {
 	if f == nil {
 		return false
 	}
 	return f.OnDefaultsExhausted != nil && *f.OnDefaultsExhausted
+}
+
+// PinToFallbackAllowed reports whether AllowPinToFallback is on.
+func (f *FailoverConfig) PinToFallbackAllowed() bool {
+	return f != nil && f.AllowPinToFallback != nil && *f.AllowPinToFallback
 }
 
 // UnmarshalYAML provides backward compatibility for old single failsafe object format

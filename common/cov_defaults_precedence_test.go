@@ -405,7 +405,7 @@ func TestCovDefaults_NetworkSetDefaults_NetworkDefaultsPrecedence(t *testing.T) 
 		SelectionPolicy:   &SelectionPolicyConfig{EvalInterval: covDefaultsDur(time.Minute)},
 		DirectiveDefaults: &DirectiveDefaultsConfig{EnforceHighestBlock: util.BoolPtr(false)},
 		Multiplexing:      util.BoolPtr(false),
-		Failover:          &FailoverConfig{OnDefaultsExhausted: util.BoolPtr(true)},
+		Failover:          &FailoverConfig{OnDefaultsExhausted: util.BoolPtr(true), AllowPinToFallback: util.BoolPtr(true)},
 		Evm: &EvmNetworkConfig{
 			Integrity:                          &EvmIntegrityConfig{EnforceGetLogsBlockRange: util.BoolPtr(false)},
 			FallbackStatePollerDebounce:        covDefaultsDur(3 * time.Second),
@@ -443,6 +443,9 @@ func TestCovDefaults_NetworkSetDefaults_NetworkDefaultsPrecedence(t *testing.T) 
 	*defaults.Failover.OnDefaultsExhausted = false
 	assert.True(t, n.Failover.Enabled(), "failover is cloned, not aliased")
 	*defaults.Failover.OnDefaultsExhausted = true
+	assert.True(t, n.Failover.PinToFallbackAllowed())
+	*defaults.Failover.AllowPinToFallback = false
+	assert.True(t, n.Failover.PinToFallbackAllowed(), "allowPinToFallback is cloned, not aliased")
 
 	e := n.Evm
 	assert.Equal(t, covDefaultsDur(3*time.Second), e.FallbackStatePollerDebounce)

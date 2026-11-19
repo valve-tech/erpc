@@ -197,7 +197,9 @@ The escape:
 - fires at most once per request, and never for consensus requests;
 - is counted in `erpc_network_fallback_escape_total{project,network,category}` — expect zero in steady state.
 
-A `use-upstream` pin wins over the policy. When no routed upstream matches the pin, the request goes to the registered upstreams that do, cordoned or not. Their budgets, rate limits and breakers still apply. A pinned `tier:fallback` upstream gets one attempt per request, as in the escape.
+`failover.allowPinToFallback` (default `false`) lets a `use-upstream` pin reach a `tier:fallback` upstream that the policy keeps cordoned for tiering. It acts only when no routed upstream matches the pin. The pin then reaches the matching fallbacks, in config order, that have a closed breaker, allow the method, have no health-tracker cordon, and are in the request's lane. Their budgets and rate limits still apply. Each gets one attempt per request, as in the escape. A pin never reaches an upstream that the policy left out for any other reason. When the setting is off, a pin only filters the routed upstreams.
+
+Turn `allowPinToFallback` on only where every caller that can send the directive is trusted to spend the fallback's budget. Otherwise, block the directive with `allowClientDirectives`.
 
 The validation report warns when `onDefaultsExhausted` is enabled but no upstream is tagged `tier:fallback`.
 

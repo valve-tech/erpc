@@ -8029,7 +8029,7 @@ Not reported upstream yet. The same code is in upstream.
 
 **Status: FIXED in the fork.** `TestFailover_TwoPaidFallbacks`
 (`erpc/networks_failover_escape_test.go`) pins it, in the cases whose names
-start with `UseUpstream`.
+start with `UseUpstream`. The fix is opt-in: `failover.allowPinToFallback`.
 
 `X-ERPC-Use-Upstream: alchemy-evm-1` on `eth_getFilterChanges` failed with
 `ErrUpstreamsExhausted` and 0 attempts. The default policy cordons
@@ -8038,16 +8038,24 @@ filters the routed list (`NormalizedRequest.NextUpstream`), so it found
 nothing. The escape did not fire either, because nothing was tried and
 `lastErr` stayed nil. A filter made on a fallback could never be polled.
 
-The fix, `Network.withPinnedUpstreams` (`erpc/networks.go`): when no routed
-upstream matches the pin, the request uses the registered upstreams that
-match it, in config order. Their budget, rate limits, breaker and method
-filters still apply. A pin that no registered upstream matches still fails
-with `ErrUpstreamsExhausted`.
+The fix, `Network.withPinnedFallbacks` (`erpc/networks.go`), acts only when
+the network sets `failover.allowPinToFallback: true` (default off) and no
+routed upstream matches the pin. The request then uses the matching
+fallbacks, in config order, that the escape could also use (breaker closed,
+method allowed), that hold no health-tracker cordon, and that are in the
+request's lane. Their budget and rate limits still apply. A pin reaches no
+other upstream the policy left out, so a pin to an unknown or unhealthy
+upstream still fails with `ErrUpstreamsExhausted`.
 
-A pin that matches a `tier:fallback` upstream gets one attempt per request
-(`isPinnedFallback`). Without that, network retry 2 and hedge 1 sent a
-failing pinned fallback 4 paid calls. The escape already had this
-once-per-request rule.
+It is opt-in because a pin that widens past the policy lets any caller who
+can send the directive spend the fallback's budget. Valve's relay strips
+client directives, but eRPC also answers unauthenticated on the internal
+mesh, and other operators have no such relay.
+
+With the setting on, a pin that matches a `tier:fallback` upstream gets one
+attempt per request (`Network.isPinnedFallback`). Without that rule,
+network retry 2 and hedge 1 sent a failing pinned fallback 4 paid calls.
+The escape already had this once-per-request rule.
 
 Not reported upstream yet. The same code is in upstream.
 
