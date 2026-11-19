@@ -832,16 +832,6 @@ func (c *callLog) snapshot() []string {
 	return append([]string(nil), c.calls...)
 }
 
-func (c *callLog) count(id string) int {
-	n := 0
-	for _, got := range c.snapshot() {
-		if got == id {
-			n++
-		}
-	}
-	return n
-}
-
 func (c *callLog) reset() {
 	c.mu.Lock()
 	c.calls = nil
@@ -1200,6 +1190,115 @@ func TestFailover_TwoPaidFallbacks(t *testing.T) {
 		assert.Equal(t, []string{"alchemy-evm-1"}, filterCalls.snapshot(),
 			"the pin must reach Alchemy and nothing else")
 		t.Logf("escape counter delta for the pinned request: %v", promUtil.ToFloat64(counter)-before)
+	})
+
+	// pinnedEthCall sends an eth_call at blockHex pinned to selector.
+	pinnedEthCall := func(ctx context.Context, network *Network, selector, blockHex string) (*common.NormalizedRequest, *common.NormalizedResponse, error) {
+		req := ethCallRequest(1, blockHex)
+		h := http.Header{}
+		h.Set("X-ERPC-Use-Upstream", selector)
+		req.EnrichFromHttp(h, nil, common.UserAgentTrackingModeSimplified)
+		req.SetNetwork(network)
+		resp, err := network.Forward(ctx, req)
+		return req, resp, err
+	}
+
+	t.Run("UseUpstreamReachesAlchemyAtLatest", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"primary-1":     okReply(`"0x1111"`),
+				"primary-2":     okReply(`"0x2222"`),
+				"primary-3":     okReply(`"0x3333"`),
+				"alchemy-evm-1": okReply(`"0xa1c0"`),
+			},
+		})
+		calls.reset()
+
+		_, resp, err := pinnedEthCall(ctx, network, "alchemy-evm-1", "latest")
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		defer resp.Release()
+		assert.Equal(t, "alchemy-evm-1", resp.UpstreamId())
+		assert.Equal(t, []string{"alchemy-evm-1"}, calls.snapshot())
+	})
+
+	t.Run("UseUpstreamToFailingAlchemyCallsOnlyAlchemy", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"primary-1":     okReply(`"0x1111"`),
+				"primary-2":     okReply(`"0x2222"`),
+				"primary-3":     okReply(`"0x3333"`),
+				"alchemy-evm-1": retryableFailure,
+			},
+		})
+		calls.reset()
+
+		_, resp, err := pinnedEthCall(ctx, network, "alchemy-evm-1", "0x3e8")
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		// Network retry 2 and hedge 1 must not pay the fallback again.
+		assert.Equal(t, []string{"alchemy-evm-1"}, calls.snapshot(),
+			"the pin must reach Alchemy alone, once")
+	})
+
+	t.Run("UseUpstreamToDeniedAlchemySendsNothing", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"primary-1": okReply(`"0x1111"`),
+				"primary-2": okReply(`"0x2222"`),
+				"primary-3": okReply(`"0x3333"`),
+			},
+			deny: []string{"alchemy-evm-1"},
+		})
+		calls.reset()
+
+		req, resp, err := pinnedEthCall(ctx, network, "alchemy-evm-1", "0x3e8")
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		assert.Empty(t, calls.snapshot(), "the budget denies before any HTTP call")
+		alErr, ok := upstreamError(req, "alchemy-evm-1")
+		require.True(t, ok, "the pin must have tried Alchemy")
+		assert.True(t, common.HasErrorCode(alErr, common.ErrCodeUpstreamRateLimitRuleExceeded),
+			"Alchemy's error must be its budget denial; got %v", alErr)
+	})
+
+	t.Run("UseUpstreamToUnknownIdStillExhausts", func(t *testing.T) {
+		defer util.ResetGock()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		network, calls := setupPaidFallbacksFixture(t, ctx, paidFallbacksOpts{
+			replies: map[string]mockReply{
+				"primary-1": okReply(`"0x1111"`),
+				"primary-2": okReply(`"0x2222"`),
+				"primary-3": okReply(`"0x3333"`),
+			},
+		})
+		calls.reset()
+
+		_, resp, err := pinnedEthCall(ctx, network, "no-such-upstream", "0x3e8")
+		if resp != nil {
+			resp.Release()
+		}
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+		assert.Empty(t, calls.snapshot())
 	})
 }
 

@@ -197,6 +197,8 @@ The escape:
 - fires at most once per request, and never for consensus requests;
 - is counted in `erpc_network_fallback_escape_total{project,network,category}` — expect zero in steady state.
 
+A `use-upstream` pin wins over the policy. When no routed upstream matches the pin, the request goes to the registered upstreams that do, cordoned or not. Their budgets, rate limits and breakers still apply. A pinned `tier:fallback` upstream gets one attempt per request, as in the escape.
+
 The validation report warns when `onDefaultsExhausted` is enabled but no upstream is tagged `tier:fallback`.
 
 ## Agent reference

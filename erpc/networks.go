@@ -2206,6 +2206,7 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			upsList = append(upsList, u)
 		}
 	}
+	upsList = n.withPinnedUpstreams(ctx, req, upsList)
 	// Enforce method eligibility at selection time: an upstream whose
 	// ignoreMethods/allowMethods config (including entries added by
 	// autoIgnoreUnsupportedMethods) excludes this method would only be
@@ -2618,6 +2619,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 					common.RefreshHeadForEmptyResult(loopCtx, u, method, effectiveReq, r)
 				}
 				effectiveReq.MarkUpstreamCompleted(loopCtx, u, r, err)
+				// A pin to a fallback gets one attempt per request, as the
+				// escape does: no retry or hedge pays the fallback again.
+				if isPinnedFallback(effectiveReq, u) && !common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
+					effectiveReq.ConsumedUpstreams.Store(u, true)
+				}
 
 				// Hedge cancelled → this execution lost the race, bail out
 				if hedges > 0 && common.HasErrorCode(err, common.ErrCodeEndpointRequestCanceled) {
@@ -3741,6 +3747,53 @@ func (n *Network) cleanupMultiplexer(mlx *Multiplexer) {
 		mlx.resp = nil
 	}
 	mlx.mu.Unlock()
+}
+
+// withPinnedUpstreams honours a use-upstream pin over the selection policy.
+// When no routed upstream matches the pin, it returns the registered
+// upstreams that match, in config order: an upstream the policy cordoned
+// (a tier:fallback one, for example) still serves a request pinned to it.
+// Its budget, rate limits and breaker still apply. ups is returned unchanged
+// when there is no pin, a routed upstream matches it, or no registered
+// upstream matches it, which keeps today's ErrUpstreamsExhausted.
+func (n *Network) withPinnedUpstreams(ctx context.Context, req *common.NormalizedRequest, ups []common.Upstream) []common.Upstream {
+	d := req.Directives()
+	if d == nil || d.UseUpstream == "" || n.upstreamsRegistry == nil {
+		return ups
+	}
+	for _, u := range ups {
+		if m, _ := common.UpstreamMatchesSelector(d.UseUpstream, u); m {
+			return ups
+		}
+	}
+	var pinned []common.Upstream
+	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+		if m, _ := common.UpstreamMatchesSelector(d.UseUpstream, u); m {
+			pinned = append(pinned, u)
+		}
+	}
+	if len(pinned) == 0 {
+		return ups
+	}
+	slices.SortStableFunc(pinned, func(a, b common.Upstream) int {
+		return n.upstreamsRegistry.ConfigIndex(a.Id()) - n.upstreamsRegistry.ConfigIndex(b.Id())
+	})
+	return pinned
+}
+
+// isPinnedFallback reports whether req carries a use-upstream pin and u is a
+// tier:fallback upstream that matches it.
+func isPinnedFallback(req *common.NormalizedRequest, u common.Upstream) bool {
+	d := req.Directives()
+	if d == nil || d.UseUpstream == "" {
+		return false
+	}
+	cfg := u.Config()
+	if cfg == nil || !cfg.HasTag(common.TagTierFallback) {
+		return false
+	}
+	m, _ := common.UpstreamMatchesSelector(d.UseUpstream, u)
+	return m
 }
 
 func (n *Network) shouldHandleMethod(req *common.NormalizedRequest, method string, upsList []common.Upstream) error {

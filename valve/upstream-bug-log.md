@@ -8024,3 +8024,29 @@ upstream list (`UpstreamsRegistry.ConfigIndex`). An upstream that a provider
 made sorts after the listed ones, in registry order.
 
 Not reported upstream yet. The same code is in upstream.
+
+## 208. A use-upstream pin cannot reach an upstream the selection policy cordoned
+
+**Status: FIXED in the fork.** `TestFailover_TwoPaidFallbacks`
+(`erpc/networks_failover_escape_test.go`) pins it, in the cases whose names
+start with `UseUpstream`.
+
+`X-ERPC-Use-Upstream: alchemy-evm-1` on `eth_getFilterChanges` failed with
+`ErrUpstreamsExhausted` and 0 attempts. The default policy cordons
+`tier:fallback` upstreams while the primaries are healthy. The pin only
+filters the routed list (`NormalizedRequest.NextUpstream`), so it found
+nothing. The escape did not fire either, because nothing was tried and
+`lastErr` stayed nil. A filter made on a fallback could never be polled.
+
+The fix, `Network.withPinnedUpstreams` (`erpc/networks.go`): when no routed
+upstream matches the pin, the request uses the registered upstreams that
+match it, in config order. Their budget, rate limits, breaker and method
+filters still apply. A pin that no registered upstream matches still fails
+with `ErrUpstreamsExhausted`.
+
+A pin that matches a `tier:fallback` upstream gets one attempt per request
+(`isPinnedFallback`). Without that, network retry 2 and hedge 1 sent a
+failing pinned fallback 4 paid calls. The escape already had this
+once-per-request rule.
+
+Not reported upstream yet. The same code is in upstream.
