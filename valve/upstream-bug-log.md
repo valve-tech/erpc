@@ -8004,3 +8004,23 @@ The cost: a read that the table does not list (`txpool_*`, `web3_clientVersion`,
 generator sets `preserveDefaultMethods: true`.
 
 Not reported upstream yet. The same code is in upstream.
+
+## 207. The fallback escape tries the `tier:fallback` upstreams in random order
+
+**Status: FIXED in the fork.** `TestFailover_TwoPaidFallbacks`
+(`erpc/networks_failover_escape_test.go`) pins it. Its
+`QuickNodeServesAndAlchemyIsNotCalled`, `AlchemyOnlyAfterQuickNodeFails` and
+`QuickNodeBudgetDeniesSoAlchemyServes` cases failed in 5 or 6 of 10 runs on
+`0.3.0.18-valve`, and pass in 10 of 10 with the fix.
+
+`GetFallbackEscapeUpstreams` (`upstream/registry.go`) walked the network's
+upstreams in registry order. The registry adds an upstream when its bootstrap
+finishes, and the bootstraps run in parallel. So the order changed from one
+start to the next. Valve lists QuickNode before Alchemy and expects QuickNode
+to be tried first.
+
+The fix sorts the escape list by each upstream's index in the project's
+upstream list (`UpstreamsRegistry.ConfigIndex`). An upstream that a provider
+made sorts after the listed ones, in registry order.
+
+Not reported upstream yet. The same code is in upstream.

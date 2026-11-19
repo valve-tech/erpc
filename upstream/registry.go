@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -479,7 +480,26 @@ func (u *UpstreamsRegistry) GetFallbackEscapeUpstreams(ctx context.Context, netw
 		}
 		out = append(out, up)
 	}
+	// Walk the fallbacks in config order. The registry holds them in the
+	// order their bootstraps finished, and those run in parallel, so that
+	// order is random. An operator lists a cheaper fallback first and expects
+	// it to be tried first.
+	sort.SliceStable(out, func(i, j int) bool {
+		return u.ConfigIndex(out[i].Id()) < u.ConfigIndex(out[j].Id())
+	})
 	return out
+}
+
+// ConfigIndex returns the position of upstream id in the project's upstream
+// list. An upstream the list does not name (one a provider made) sorts after
+// every listed upstream.
+func (u *UpstreamsRegistry) ConfigIndex(id string) int {
+	for i, c := range u.upsCfg {
+		if c != nil && c.Id == id {
+			return i
+		}
+	}
+	return len(u.upsCfg)
 }
 
 // GetWsUpstreams returns all WS-capable upstreams for a network (ws:// or wss:// endpoints).
