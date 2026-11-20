@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const blockBody = `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`
+const blockByNumberBody = `{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`
 
 // The constructor is the only place a policy learns which connector serves it.
 // Bind the wrong one and every write goes to storage nobody reads. A real
@@ -27,11 +27,11 @@ func TestNewEvmJsonRpcCache_BindsEachPolicyToItsNamedConnector(t *testing.T) {
 		cachePolicies(cachePolicyCfg("mem", "eth_getBlockByNumber")),
 	))
 
-	req := cacheRequest(blockBody)
+	req := cacheRequest(blockByNumberBody)
 	resp := cacheResponse(t, req, `{"number":"0x1234","hash":"0xabc"}`)
 	require.NoError(t, f.cache.Set(ctx, req, resp))
 
-	got := f.mustGetEventually(ctx, cacheRequest(blockBody))
+	got := f.mustGetEventually(ctx, cacheRequest(blockByNumberBody))
 	require.JSONEq(t, `{"number":"0x1234","hash":"0xabc"}`, got)
 	require.Equal(t, "mem", f.connector("mem").Id())
 }
@@ -89,7 +89,7 @@ func TestNewEvmJsonRpcCache_ConnectorTagsGateBothSides(t *testing.T) {
 	))
 
 	pinned := func(selector string) *common.NormalizedRequest {
-		r := cacheRequest(blockBody)
+		r := cacheRequest(blockByNumberBody)
 		r.SetDirectives(&common.RequestDirectives{UseUpstream: selector})
 		return r
 	}
@@ -225,13 +225,13 @@ func TestSetPolicies_ReplacesThePolicySet(t *testing.T) {
 		cachePolicies(cachePolicyCfg("mem", "eth_getBlockByNumber")),
 	))
 
-	req := cacheRequest(blockBody)
+	req := cacheRequest(blockByNumberBody)
 	require.NoError(t, f.cache.Set(ctx, req, cacheResponse(t, req, `{"number":"0x1234"}`)))
-	require.JSONEq(t, `{"number":"0x1234"}`, f.mustGetEventually(ctx, cacheRequest(blockBody)))
+	require.JSONEq(t, `{"number":"0x1234"}`, f.mustGetEventually(ctx, cacheRequest(blockByNumberBody)))
 
 	f.cache.SetPolicies(nil)
 
-	resp, err := f.cache.Get(ctx, cacheRequest(blockBody))
+	resp, err := f.cache.Get(ctx, cacheRequest(blockByNumberBody))
 	require.NoError(t, err)
 	require.Nil(t, resp, "a cache with no policies still served a cached value")
 	require.Empty(t, f.cache.policies)
@@ -274,7 +274,7 @@ func TestCompression_RoundTripsThroughARealConnector(t *testing.T) {
 		strings.TrimSuffix(strings.Repeat(`{"topic":"0xaaaa","data":"0xbbbb"},`, 40), ",") + `]}`
 	require.Greater(t, len(raw), 64)
 
-	req := cacheRequest(blockBody)
+	req := cacheRequest(blockByNumberBody)
 	resp := cacheResponse(t, req, raw)
 	require.NoError(t, f.cache.Set(ctx, req, resp))
 
@@ -301,7 +301,7 @@ func TestCompression_RoundTripsThroughARealConnector(t *testing.T) {
 	require.Less(t, len(stored), len(raw), "the stored frame is not smaller than the JSON")
 
 	// And the read path must still hand the caller the original JSON.
-	require.JSONEq(t, raw, f.mustGetEventually(ctx, cacheRequest(blockBody)))
+	require.JSONEq(t, raw, f.mustGetEventually(ctx, cacheRequest(blockByNumberBody)))
 }
 
 // Below the threshold nothing is compressed. Framing a 20-byte result makes it
@@ -451,7 +451,7 @@ func TestCompression_PooledEncoderIsResetBetweenValues(t *testing.T) {
 // with an unknown block number.
 func TestNormalizeRequest_AppliesEvmNormalisationToTheRequest(t *testing.T) {
 	h := &EvmArchitectureHandler{}
-	req := cacheRequest(blockBody)
+	req := cacheRequest(blockByNumberBody)
 
 	require.NoError(t, h.NormalizeRequest(context.Background(), req))
 

@@ -80,7 +80,7 @@ func setupEmptyAuthoritativeNetwork(t *testing.T, ctx context.Context, authorita
 func suggestUpstreamHeadsForTest(ctx context.Context, network *Network, head int64) {
 	for _, u := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
 		if sp := u.EvmStatePoller(); sp != nil && !sp.IsObjectNull() {
-			sp.SuggestLatestBlock(head)
+			sp.SuggestLatestBlock(head, time.Now())
 		}
 	}
 }

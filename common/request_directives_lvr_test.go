@@ -462,23 +462,6 @@ func TestShouldSkipCacheRead_TrueFalseAndPatterns(t *testing.T) {
 	})
 }
 
-// Internal requests (state poller, chain-id probe) bypass retry, hedge and
-// breaker policies. Misreading a client request as internal would silently
-// disable failover for it.
-func TestNormalizedRequest_IsInternalOnlyWhenTheDirectiveSaysSo(t *testing.T) {
-	var nilReq *NormalizedRequest
-	require.False(t, nilReq.IsInternal())
-
-	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber"}`))
-	require.False(t, req.IsInternal(), "a request with no directives is not internal")
-
-	req.SetDirectives(&RequestDirectives{})
-	require.False(t, req.IsInternal())
-
-	req.SetDirectives(&RequestDirectives{IsInternal: true})
-	require.True(t, req.IsInternal())
-}
-
 // The trusted user header attributes metrics when a gateway did the auth. Auth
 // must always win, or a client-supplied header could impersonate another user.
 func TestSetUserFromTrustedHeader_NeverOverridesAuth(t *testing.T) {

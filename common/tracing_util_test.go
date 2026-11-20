@@ -23,8 +23,8 @@ import (
 // default, so a panic here would take down every request.
 func TestStartSpan_DisabledReturnsUsableNoopSpan(t *testing.T) {
 	saveTracingGlobals(t)
-	IsTracingEnabled = false
-	IsTracingDetailed = false
+	SetTracingEnabled(false)
+	SetTracingDetailed(false)
 	SetTracingDetailed(false)
 
 	base := context.Background()
@@ -110,7 +110,7 @@ func TestExtractHTTPRequestTraceContext(t *testing.T) {
 
 	t.Run("disabled returns the request context untouched", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = false
+		SetTracingEnabled(false)
 
 		ctx := ExtractHTTPRequestTraceContext(newReq())
 		assert.False(t, trace.SpanContextFromContext(ctx).IsValid(),
@@ -119,7 +119,7 @@ func TestExtractHTTPRequestTraceContext(t *testing.T) {
 
 	t.Run("enabled adopts the incoming traceparent", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = true
+		SetTracingEnabled(true)
 
 		ctx := ExtractHTTPRequestTraceContext(newReq())
 		sc := trace.SpanContextFromContext(ctx)
@@ -132,7 +132,7 @@ func TestExtractHTTPRequestTraceContext(t *testing.T) {
 func TestInjectHTTPResponseTraceContext(t *testing.T) {
 	t.Run("disabled writes no header", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = false
+		SetTracingEnabled(false)
 
 		w := httptest.NewRecorder()
 		InjectHTTPResponseTraceContext(context.Background(), w)
@@ -161,7 +161,7 @@ func TestInjectHTTPResponseTraceContext(t *testing.T) {
 
 func TestStartHTTPServerSpan_Disabled(t *testing.T) {
 	saveTracingGlobals(t)
-	IsTracingEnabled = false
+	SetTracingEnabled(false)
 
 	base := context.Background()
 	r := httptest.NewRequest(http.MethodPost, "http://erpc.local/main/evm/1", nil)
@@ -306,7 +306,7 @@ func TestEnrichHTTPServerSpan(t *testing.T) {
 // A context with no recording span must be ignored rather than panic.
 func TestEnrichHTTPServerSpan_NoRecordingSpan(t *testing.T) {
 	saveTracingGlobals(t)
-	IsTracingEnabled = false
+	SetTracingEnabled(false)
 
 	assert.NotPanics(t, func() {
 		EnrichHTTPServerSpan(context.Background(), 500, errors.New("boom"))
@@ -319,7 +319,7 @@ func TestEnrichHTTPServerSpan_NoRecordingSpan(t *testing.T) {
 
 func TestStartRequestSpan_Disabled(t *testing.T) {
 	saveTracingGlobals(t)
-	IsTracingEnabled = false
+	SetTracingEnabled(false)
 
 	base := context.Background()
 	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}`))
@@ -382,7 +382,7 @@ func TestStartRequestSpan_ForceTraceByMatcher(t *testing.T) {
 			network: "evm:1", wantForced: true, wantReason: "network:evm:1",
 		},
 		{
-			name: "network matcher misses when the context has no network",
+			name:     "network matcher misses when the context has no network",
 			matchers: []*ForceTraceMatcher{{Network: "evm:1"}}, network: "",
 			wantForced: false,
 		},
@@ -410,7 +410,7 @@ func TestStartRequestSpan_ForceTraceByMatcher(t *testing.T) {
 
 func TestEndRequestSpan_Disabled(t *testing.T) {
 	saveTracingGlobals(t)
-	IsTracingEnabled = false
+	SetTracingEnabled(false)
 
 	assert.NotPanics(t, func() {
 		EndRequestSpan(context.Background(), nil, nil)
@@ -582,7 +582,7 @@ func TestEndRequestSpan_NonRecordingSpanIsIgnored(t *testing.T) {
 func TestForceFlushTraces(t *testing.T) {
 	t.Run("no error when tracing is off", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = false
+		SetTracingEnabled(false)
 		tracerProvider = nil
 
 		require.NoError(t, ForceFlushTraces(context.Background()))
@@ -590,7 +590,7 @@ func TestForceFlushTraces(t *testing.T) {
 
 	t.Run("no error when enabled but no provider is installed", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = true
+		SetTracingEnabled(true)
 		tracerProvider = nil
 
 		require.NoError(t, ForceFlushTraces(context.Background()))

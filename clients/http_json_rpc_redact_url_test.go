@@ -301,7 +301,7 @@ func TestHttpClient_SpanErrorRedactsEndpoint(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp), sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	common.SetTracerProviderForTest(tp)
-	t.Cleanup(func() { common.IsTracingEnabled = false })
+	t.Cleanup(func() { common.SetTracingEnabled(false) })
 
 	logs := &lockedBuffer{}
 	client := redactClient(t, closedAddr(t), false, 0, false, logs)

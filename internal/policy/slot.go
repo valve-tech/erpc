@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,7 @@ type Slot struct {
 	cfg         *common.SelectionPolicyConfig
 
 	// cache holds the most recent eval output. nil before the first tick.
-	cache atomic.Pointer[[]common.Upstream]
+	cache atomic.Pointer[ranking]
 
 	// excludedCache holds the upstreams the most recent tick marked
 	// excluded — same atomic-load contract as `cache`. Read by the
@@ -67,6 +68,10 @@ type Slot struct {
 	previousExcluded []string
 	lastSwitchAt     *time.Time
 	excludedSince    map[string]int64
+	// heldPreviousOrder and heldLastSwitchAt are the held ranking's own
+	// cross-tick state (see heldRun), nil while it does not run.
+	heldPreviousOrder []string
+	heldLastSwitchAt  *time.Time
 	// lastScores holds the per-upstream `score` values the JS produced on
 	// the most recent successful tick (via `sortByScore(...)` setting
 	// `u.score = overall / (1 + penalty)`, higher = better). Entries are
@@ -90,6 +95,10 @@ type Slot struct {
 	// Bad-eval streak counter; spec §5.7 falls back to the default policy
 	// after 3 consecutive failures. (Hookup deferred to Phase 5.15.)
 	consecutiveFails int
+	// heldGauged is the upstream IDs the last tick set
+	// `selection_held_position` for. Touched only inside tickOnce and,
+	// once the ticker goroutine has exited, stop.
+	heldGauged []string
 
 	// Test-only overrides applied inside tickOnce after buildEvalContext.
 	// Zero values mean "no override". Guarded by `mu` along with the
@@ -98,9 +107,26 @@ type Slot struct {
 	testFinality  string
 	testNowOffset int64 // added to ctx.Now (milliseconds)
 
+	// kick asks the ticker goroutine for an eval now; kickDone, set while a
+	// kick waits, closes once the eval answering it has run. A kick holds
+	// the 1-slot buffer only while kickDone is set, so a send never blocks.
+	kick     chan struct{}
+	kickMu   sync.Mutex
+	kickDone chan struct{}
+	ticking  atomic.Bool
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+}
+
+// ranking is one tick's output for the request path, swapped as one value so
+// a request never pairs a tip ranking with another tick's held ranking. held
+// is nil when the tick ran no held ranking (see heldRun).
+type ranking struct {
+	tip        []common.Upstream
+	held       []common.Upstream
+	heldBlocks *methodBlockIndex
 }
 
 func newSlot(e *Engine, networkID, networkLabel, method, finality, boundary string, upstreamsFn func() []common.Upstream, cfg *common.SelectionPolicyConfig) *Slot {
@@ -118,6 +144,7 @@ func newSlot(e *Engine, networkID, networkLabel, method, finality, boundary stri
 		cfg:           cfg,
 		excludedSince: make(map[string]int64),
 		stopCh:        make(chan struct{}),
+		kick:          make(chan struct{}, 1),
 	}
 	// Seed lastAccessedAtMs to "now" so a freshly-created slot doesn't
 	// look idle to the very next sweep tick.
@@ -136,6 +163,7 @@ func (s *Slot) start(ctx context.Context) {
 	if interval <= 0 {
 		return
 	}
+	s.ticking.Store(true)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -148,23 +176,47 @@ func (s *Slot) start(ctx context.Context) {
 			case <-s.stopCh:
 				return
 			case <-ticker.C:
-				// Engine-level pause gate: simulator's pause button (and
-				// any future "freeze the policy verdict" caller) flips
-				// this so the cache stays at the last verdict for the
-				// duration of the pause. Skipping the call is enough —
-				// nothing else in the slot's tick path runs.
-				if s.engine.paused.Load() {
-					continue
-				}
-				s.tickOnce()
+				s.tickUnlessPaused()
+			case <-s.kick:
+				s.kickMu.Lock()
+				done := s.kickDone
+				s.kickDone = nil
+				s.kickMu.Unlock()
+				s.tickUnlessPaused()
+				close(done)
 			}
 		}
 	}()
 }
 
+// tickUnlessPaused honours the engine's pause gate (the simulator's pause
+// button): the cache stays at the last verdict while paused.
+func (s *Slot) tickUnlessPaused() {
+	if !s.engine.paused.Load() {
+		s.tickOnce()
+	}
+}
+
+// refresh asks the ticker goroutine for an eval now. The channel closes
+// once an eval that started after the call has run; callers before that
+// eval starts share it. nil for a frozen slot, which only manual ticks move.
+func (s *Slot) refresh() <-chan struct{} {
+	if !s.ticking.Load() {
+		return nil
+	}
+	s.kickMu.Lock()
+	defer s.kickMu.Unlock()
+	if s.kickDone == nil {
+		s.kickDone = make(chan struct{})
+		s.kick <- struct{}{}
+	}
+	return s.kickDone
+}
+
 func (s *Slot) stop() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.wg.Wait()
+	s.emitHeldPositions(nil, nil)
 }
 
 // decisionsRingSize bounds the slot's in-memory decision history.
@@ -315,14 +367,20 @@ func (s *Slot) tickOnce() {
 	decision.Diff = diffAgainst(state.PreviousOrder, orderedIDs)
 	decision.Diff.StickyHeld = evalRes.StickyHeld
 
+	// 5b. The held ranking, published with the tip ranking below.
+	heldOrder, held, heldBlocks := s.heldRun(ups, metrics, metricsAcrossMethods, metricsByMethod, evalCtx, orderedIDs, start)
+	decision.Output.HeldOrder = heldOrder
+
 	// 6. Atomic swap caches — included (request-path read) AND excluded
 	// (Prober read). Both are atomic.Pointer slices; consumers MUST
 	// treat the returned slice as read-only.
-	ordered2 := ordered
-	s.cache.Store(&ordered2)
+	s.cache.Store(&ranking{tip: ordered, held: held, heldBlocks: heldBlocks})
 	excludedUps := materializeExcluded(ups, excluded)
 	s.excludedCache.Store(&excludedUps)
 	s.methodBlocks.Store(newMethodBlockIndex(ups, evalRes.MethodBlocks))
+	if len(decision.Diff.Added) > 0 || len(decision.Diff.Removed) > 0 {
+		s.engine.eligibleChanged(s.networkID)
+	}
 
 	// 6b. Reconcile this network's probe subsystem against the
 	// eval-emitted `__probeConfig`. Non-nil → create/update Prober;
@@ -359,7 +417,112 @@ func (s *Slot) tickOnce() {
 	s.mu.Unlock()
 
 	s.emitMetrics(decision, state)
+	s.emitHeldPositions(ups, heldOrder)
 	s.logStepTrail(decision)
+}
+
+// heldRun runs the eval a second time, for the held ranking, when ups
+// includes a frozen upstream (Tracker.IsHeadFrozen) and the slot's finality
+// is not realtime or unfinalized. The request path uses that ranking only for
+// client reads of finalized block numbers. The run reads lag as 0 for the
+// frozen upstreams only and keeps its own previous order and last switch, so
+// it writes nothing the tip run reads: no sticky register, cache, probe,
+// exclusion or metric. Its sticky primary starts as the tip ranking's.
+func (s *Slot) heldRun(ups []common.Upstream, metrics, acrossMethods map[string]UpstreamMetrics, byMethod map[string]map[string]UpstreamMetrics, evalCtx EvalContext, tipOrder []string, start time.Time) (order []string, held []common.Upstream, blocks *methodBlockIndex) {
+	var frozen map[string]struct{}
+	if f := parseFinality(evalCtx.Finality); f != common.DataFinalityStateRealtime && f != common.DataFinalityStateUnfinalized {
+		for _, u := range ups {
+			if s.engine.tracker.IsHeadFrozen(u) {
+				if frozen == nil {
+					frozen = make(map[string]struct{})
+				}
+				frozen[u.Id()] = struct{}{}
+			}
+		}
+	}
+	s.mu.Lock()
+	if frozen == nil {
+		s.heldPreviousOrder, s.heldLastSwitchAt = nil, nil
+		s.mu.Unlock()
+		return nil, nil, nil
+	}
+	prev := s.heldPreviousOrder
+	if prev == nil {
+		prev = tipOrder
+	}
+	evalCtx.PreviousOrder = cloneStrings(prev)
+	evalCtx.LastSwitchAt = nil
+	if s.heldLastSwitchAt != nil {
+		ms := s.heldLastSwitchAt.UnixMilli()
+		evalCtx.LastSwitchAt = &ms
+	}
+	s.mu.Unlock()
+
+	res, err := runEval(s.engine.pool, s.cfg, ups, withoutFrozenLag(metrics, frozen), withoutFrozenLag(acrossMethods, frozen), byMethod, evalCtx, false, nil)
+	if err != nil {
+		s.engine.logger.Warn().
+			Str("network", s.networkID).
+			Str("method", s.method).
+			Err(err).
+			Msg("selection policy held-ranking eval failed; requests use the tip ranking")
+		return nil, nil, nil
+	}
+	held, _ = materializeOrder(ups, res.OrderedIDs)
+	s.mu.Lock()
+	if len(res.OrderedIDs) > 0 && (len(prev) == 0 || prev[0] != res.OrderedIDs[0]) {
+		t := start
+		s.heldLastSwitchAt = &t
+	}
+	s.heldPreviousOrder = res.OrderedIDs
+	s.mu.Unlock()
+	return res.OrderedIDs, held, newMethodBlockIndex(ups, res.MethodBlocks)
+}
+
+// withoutFrozenLag copies m with the four lag fields 0 for frozen IDs.
+func withoutFrozenLag(m map[string]UpstreamMetrics, frozen map[string]struct{}) map[string]UpstreamMetrics {
+	out := make(map[string]UpstreamMetrics, len(m))
+	for id, um := range m {
+		if _, ok := frozen[id]; ok {
+			um.BlockHeadLag, um.FinalizationLag = 0, 0
+			um.BlockHeadLagSeconds, um.FinalizationLagSeconds = 0, 0
+		}
+		out[id] = um
+	}
+	return out
+}
+
+// emitHeldPositions sets `selection_held_position` for each upstream of a
+// tick that ran the held ranking (order non-nil), -1 for those it excluded,
+// and deletes the series the tick did not set, so the gauge is absent while
+// the slot runs no held ranking or has stopped. Lane slots emit nothing:
+// their series would collide with the full-pool slot's.
+func (s *Slot) emitHeldPositions(ups []common.Upstream, order []string) {
+	if s.boundary != "*" {
+		return
+	}
+	project := s.engine.projectID
+	var gauged []string
+	if order != nil {
+		pos := make(map[string]int, len(order))
+		for i, id := range order {
+			pos[id] = i
+		}
+		gauged = make([]string, 0, len(ups))
+		for _, u := range ups {
+			p, ok := pos[u.Id()]
+			if !ok {
+				p = -1
+			}
+			telemetry.MetricSelectionHeldPosition.WithLabelValues(project, s.networkLabel, s.method, s.finality, u.Id()).Set(float64(p))
+			gauged = append(gauged, u.Id())
+		}
+	}
+	for _, id := range s.heldGauged {
+		if !slices.Contains(gauged, id) {
+			telemetry.MetricSelectionHeldPosition.DeleteLabelValues(project, s.networkLabel, s.method, s.finality, id)
+		}
+	}
+	s.heldGauged = gauged
 }
 
 // logStepTrail emits DEBUG-level structured logs for the per-step trail

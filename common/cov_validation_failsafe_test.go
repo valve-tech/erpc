@@ -25,8 +25,8 @@ func TestCovValidation_Failsafe(t *testing.T) {
 	}
 	cvRunCases(t, baseline, (*FailsafeConfig).Validate, []cvCase[FailsafeConfig]{
 		{"matchMethod empty", func(f *FailsafeConfig) { f.MatchMethod = "" }, "failsafe.matchMethod cannot be empty, use '*' to match any method"},
-		{"matchRequestKind unknown", func(f *FailsafeConfig) { f.MatchRequestKind = "admin" }, "failsafe.matchRequestKind 'admin' is invalid, must be one of: user | internal | *"},
-		{"matchRequestKind internal", func(f *FailsafeConfig) { f.MatchRequestKind = "internal" }, ""},
+		{"matchRequestKind unknown", func(f *FailsafeConfig) { f.MatchRequestKind = "admin" }, "failsafe.matchRequestKind 'admin' is invalid, must be one of: user | *"},
+		{"matchRequestKind internal", func(f *FailsafeConfig) { f.MatchRequestKind = "internal" }, "failsafe.matchRequestKind 'internal' is deleted: no eRPC-own request (tracker fetch, head poll, probe) goes through a failsafe policy; remove it"},
 
 		{"timeout without duration", func(f *FailsafeConfig) { f.Timeout.Duration = nil }, "upstream.*.failsafe.timeout.duration is required"},
 		{"timeout quantile out of range", func(f *FailsafeConfig) { f.Timeout.Duration = &AdaptiveDuration{Quantile: 1.5, Base: 1} }, "upstream.*.failsafe.timeout.duration.quantile must be between 0 and 1"},
@@ -173,6 +173,7 @@ func TestCovValidation_Network(t *testing.T) {
 		{"unknown budget", func(n *NetworkConfig) { n.RateLimitBudget = "nope" }, "network.*.rateLimitBudget 'nope' does not exist in config.rateLimiters"},
 		{"bad alias", func(n *NetworkConfig) { n.Alias = "eth main" }, "network.*.alias 'eth main' must contain only alphanumeric characters, dash, or underscore"},
 		{"bad cacheKeySuffix", func(n *NetworkConfig) { n.CacheKeySuffix = "a/b" }, "network.*.cacheKeySuffix 'a/b' must contain only alphanumeric characters, dash, or underscore"},
+		{"negative maxClientBatchSize", func(n *NetworkConfig) { v := -1; n.MaxClientBatchSize = &v }, "network.*.maxClientBatchSize must be 0 (no limit) or greater, got -1"},
 		{"nil static response", func(n *NetworkConfig) { n.StaticResponses = append(n.StaticResponses, nil) }, "network.*.staticResponses[1]: entry is nil"},
 		{"static response without method", func(n *NetworkConfig) { n.StaticResponses[0].Method = "" }, "network.*.staticResponses[0]: method is required"},
 		{"static response without response", func(n *NetworkConfig) { n.StaticResponses[0].Response = nil }, "network.*.staticResponses[0]: response is required"},
@@ -199,7 +200,6 @@ func TestCovValidation_EvmNetwork(t *testing.T) {
 	}
 	cvRunCases(t, baseline, (*EvmNetworkConfig).Validate, []cvCase[EvmNetworkConfig]{
 		{"fallbackFinalityDepth", func(e *EvmNetworkConfig) { e.FallbackFinalityDepth = 0 }, "network.*.evm.fallbackFinalityDepth must be greater than 0"},
-		{"fallbackStatePollerDebounce", func(e *EvmNetworkConfig) { e.FallbackStatePollerDebounce = 0 }, "network.*.evm.fallbackStatePollerDebounce is required"},
 		{"getLogsMaxAllowedRange", func(e *EvmNetworkConfig) { e.GetLogsMaxAllowedRange = 0 }, "network.*.evm.getLogsMaxAllowedRange must be greater than 0"},
 		{"unknown local answer", func(e *EvmNetworkConfig) { e.LocalAnswers["eth_getBalance"] = true }, "network.*.evm.localAnswers.eth_getBalance: eRPC has no local answer for this method"},
 		{"bad safeBlockSource", func(e *EvmNetworkConfig) { e.SafeBlockSource = "(tag:archive" }, `network.*.evm.safeBlockSource has invalid selector "(tag:archive"`},

@@ -192,9 +192,9 @@ func resolveRangeEnd(ctx context.Context, req *NormalizedRequest) int64 {
 	}
 	switch {
 	case !present || tag == "" || tag == "latest" || tag == "safe" || tag == "pending":
-		return EvmHighestLatestBlockNumber(nw, ctx)
+		return EvmHeadOf(nw, ctx, req).Latest
 	case tag == "finalized":
-		return EvmHighestFinalizedBlockNumber(nw, ctx)
+		return EvmHeadOf(nw, ctx, req).Finalized
 	}
 	return 0
 }

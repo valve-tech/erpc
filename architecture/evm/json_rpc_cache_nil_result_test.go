@@ -68,7 +68,13 @@ func TestCacheSet_ATraceRecordStaysValidJsonWithNoResult(t *testing.T) {
 	defer cancel()
 
 	req := cacheRequest(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`)
-	require.NotPanics(t, func() { _ = cache.Set(ctx, req, nil) })
+	// A nil response no longer reaches the trace branch: Set returns early
+	// when there is no JSON-RPC answer. A real answer with no result bytes
+	// still does.
+	jrr, err := common.NewJsonRpcResponseFromBytes([]byte(`1`), nil, nil)
+	require.NoError(t, err)
+	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
+	require.NotPanics(t, func() { _ = cache.Set(ctx, req, resp) })
 
 	var caching int
 	for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {

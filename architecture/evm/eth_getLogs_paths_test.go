@@ -159,67 +159,6 @@ func (n *splitCapturingNetwork) observed() ([]string, []string) {
 	return append([]string(nil), n.ranges...), append([]string(nil), n.skipCacheReads...)
 }
 
-func upstreamWithSplitThreshold(threshold int64) *forwardingUpstream {
-	u := newForwardingUpstream(123)
-	u.cfg.Evm.GetLogsAutoSplittingRangeThreshold = threshold
-	return u
-}
-
-func TestNetworkPreForward_SplitsIntoContiguousRangesAndCarriesTheDirective(t *testing.T) {
-	n := newSplitCapturingNetwork(t, &common.EvmNetworkConfig{ChainId: 123, GetLogsSplitConcurrency: 1})
-	r := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x6"})
-	r.SetDirectives(&common.RequestDirectives{SkipCacheRead: "redis-*"})
-
-	handled, resp, err := networkPreForward_eth_getLogs(
-		context.Background(), n, []common.Upstream{upstreamWithSplitThreshold(2)}, r)
-
-	require.NoError(t, err)
-	require.True(t, handled, "a range past the threshold must be answered by the split, not forwarded whole")
-	require.NotNil(t, resp)
-
-	ranges, skips := n.observed()
-	// Discriminating: the sub-ranges must tile [1,6] exactly, with no gap and no
-	// overlap. Asserting the count alone would pass for wrong boundaries.
-	assert.Equal(t, []string{"0x1-0x2", "0x3-0x4", "0x5-0x6"}, ranges)
-	assert.Equal(t, []string{"redis-*", "redis-*", "redis-*"}, skips,
-		"the caller's skip-cache-read directive must reach every sub-request")
-}
-
-func TestNetworkPreForward_AFailingSubRequestFailsTheWholeSplit(t *testing.T) {
-	n := &splitCapturingNetwork{forwardingNetwork: newForwardingNetwork(123)}
-	n.cfg = &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
-	n.on("eth_getLogs", func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
-		return nil, errors.New("upstream exhausted")
-	})
-	r := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x6"})
-
-	handled, resp, err := networkPreForward_eth_getLogs(
-		context.Background(), n, []common.Upstream{upstreamWithSplitThreshold(2)}, r)
-
-	require.Error(t, err, "a partial answer must never be presented as the whole range")
-	assert.True(t, handled)
-	assert.Nil(t, resp)
-	assert.Contains(t, err.Error(), "upstream exhausted")
-}
-
-func TestNetworkPreForward_UpstreamsWithoutAThresholdAreIgnored(t *testing.T) {
-	n := newSplitCapturingNetwork(t, &common.EvmNetworkConfig{ChainId: 123, GetLogsSplitConcurrency: 1})
-	withThreshold := upstreamWithSplitThreshold(2)
-	noEvmConfig := newForwardingUpstream(123)
-	noEvmConfig.cfg.Evm = nil
-	r := createTestRequest(map[string]interface{}{"fromBlock": "0x1", "toBlock": "0x4"})
-
-	handled, _, err := networkPreForward_eth_getLogs(
-		context.Background(), n, []common.Upstream{nil, noEvmConfig, withThreshold}, r)
-
-	require.NoError(t, err)
-	require.True(t, handled)
-	ranges, _ := n.observed()
-	// Discriminating: a nil entry or a non-EVM upstream must neither panic nor
-	// drag the effective threshold to zero (which would disable splitting).
-	assert.Equal(t, []string{"0x1-0x2", "0x3-0x4"}, ranges)
-}
-
 // --- upstreamPreForward_eth_getLogs ---
 
 func getLogsIntegrityNetwork() *mockNetwork {

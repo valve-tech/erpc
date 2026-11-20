@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/erpc/erpc/health"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,11 +69,11 @@ func TestSuggestFinalizedBlock_SmallAdvanceAppliesInline(t *testing.T) {
 	up := newSuggestGateUpstream(123, "123", nil)
 	p := newGateTestPoller(t, up)
 
-	p.SuggestFinalizedBlock(1000)
+	p.SuggestFinalizedBlock(1000, time.Now())
 	require.Equal(t, int64(1000), p.FinalizedBlock(),
 		"a cold-start suggestion must apply before the call returns")
 
-	p.SuggestFinalizedBlock(1001)
+	p.SuggestFinalizedBlock(1001, time.Now())
 	require.Equal(t, int64(1001), p.FinalizedBlock(),
 		"a small advance must apply before the call returns")
 	require.False(t, up.isCordoned())
@@ -85,21 +87,23 @@ func TestSuggestFinalizedBlock_SmallAdvanceAppliesInline(t *testing.T) {
 // verification, so nothing justifies discarding it.
 func TestSuggestFinalizedBlock_SmallAdvanceSurvivesAMajorJumpVerification(t *testing.T) {
 	up := newBlockingChainIdUpstream(123, "123")
-	p := newGateTestPoller(t, up)
+	logger := zerolog.Nop()
+	up.tracker = health.NewTracker(&logger, "test", 2*time.Second)
+	p := newUpstreamTestPoller(t, up, up.tracker)
 
-	p.SuggestFinalizedBlock(1000)
+	p.SuggestFinalizedBlock(1000, time.Now())
 	require.Eventually(t, func() bool { return p.FinalizedBlock() == 1000 },
 		2*time.Second, 10*time.Millisecond)
 
 	major := int64(1000 + gateTolerance + 1000)
-	p.SuggestFinalizedBlock(major)
+	p.SuggestFinalizedBlock(major, time.Now())
 	select {
 	case <-up.entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the major jump never reached the chain-identity check")
 	}
 
-	p.SuggestFinalizedBlock(1001)
+	p.SuggestFinalizedBlock(1001, time.Now())
 	require.Equal(t, int64(1001), p.FinalizedBlock(),
 		"a small advance must not be dropped while a major jump verifies its chain identity")
 

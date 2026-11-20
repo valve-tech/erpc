@@ -45,9 +45,8 @@ func newTracingHarnessWithSampler(t *testing.T, detailed bool, sampler sdktrace.
 
 	tracer = tp.Tracer(instrumentationName)
 	tracerProvider = tp
-	IsTracingEnabled = true
-	IsTracingDetailed = detailed
-	tracingDetailed.Store(detailed)
+	SetTracingEnabled(true)
+	SetTracingDetailed(detailed)
 
 	// t.Context() is already cancelled by the time cleanup runs, so shut the
 	// provider down on a fresh context and let it flush.
@@ -63,17 +62,15 @@ func saveTracingGlobals(t *testing.T) {
 
 	prevTracer := tracer
 	prevProvider := tracerProvider
-	prevEnabled := IsTracingEnabled
-	prevDetailed := IsTracingDetailed
-	prevAtomicDetailed := tracingDetailed.Load()
+	prevEnabled := IsTracingEnabled()
+	prevDetailed := IsTracingDetailed()
 	prevMatchers := forceTraceMatchers
 
 	t.Cleanup(func() {
 		tracer = prevTracer
 		tracerProvider = prevProvider
-		IsTracingEnabled = prevEnabled
-		IsTracingDetailed = prevDetailed
-		tracingDetailed.Store(prevAtomicDetailed)
+		SetTracingEnabled(prevEnabled)
+		SetTracingDetailed(prevDetailed)
 		forceTraceMatchers = prevMatchers
 	})
 }

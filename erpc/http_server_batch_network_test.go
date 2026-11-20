@@ -50,8 +50,8 @@ func TestBatchRoutesEachEntryToItsOwnNetwork(t *testing.T) {
 	// chain 123 lives on rpc1 and answers 0x1111; chain 456 lives on rpc2 and
 	// answers 0x2222. eth_chainId has to agree with the configured chain or the
 	// upstream is rejected before any of this is reachable.
-	mockChain(t, "http://rpc1.localhost", "0x7b", "0x1111")
-	mockChain(t, "http://rpc2.localhost", "0x1c8", "0x2222")
+	mockBalanceChain(t, "http://rpc1.localhost", "0x7b", "0x1111")
+	mockBalanceChain(t, "http://rpc2.localhost", "0x1c8", "0x2222")
 
 	cfg := &common.Config{
 		Server: &common.ServerConfig{ListenV4: util.BoolPtr(true)},
@@ -139,9 +139,9 @@ func TestBatchRoutesEachEntryToItsOwnNetwork(t *testing.T) {
 	}
 }
 
-// mockChain stands up the state-poller methods an upstream must answer before
+// mockBalanceChain stands up the state-poller methods an upstream must answer before
 // it is usable, plus an eth_getBalance whose result identifies the chain.
-func mockChain(t *testing.T, endpoint, chainIdHex, balance string) {
+func mockBalanceChain(t *testing.T, endpoint, chainIdHex, balance string) {
 	t.Helper()
 
 	reply := func(match string, result string) {

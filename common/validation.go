@@ -67,23 +67,6 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	if c.Indexer != nil {
-		if err := c.Indexer.Validate(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Validate rejects nonsensical values; zeros pass through and resolve to
-// internal defaults inside the indexer.
-func (i *IndexerConfig) Validate() error {
-	if i.CanonicalChainDepth < 0 {
-		return fmt.Errorf("indexer.canonicalChainDepth must be >= 0 (0 uses the default)")
-	}
-	if i.DedupWindowSize < 0 {
-		return fmt.Errorf("indexer.dedupWindowSize must be >= 0 (0 uses the default)")
-	}
 	return nil
 }
 
@@ -110,6 +93,9 @@ func (s *ServerConfig) Validate() error {
 	}
 	if s.MaxTimeout == nil || *s.MaxTimeout == 0 {
 		return fmt.Errorf("server.maxTimeout is required")
+	}
+	if s.MaxRequestBodySize != nil && *s.MaxRequestBodySize < 0 {
+		return fmt.Errorf("server.maxRequestBodySize must be 0 (no limit) or greater, got %d", *s.MaxRequestBodySize)
 	}
 	if ws := s.WebSocket; ws != nil {
 		if ws.PingInterval == nil || *ws.PingInterval <= 0 {
@@ -407,6 +393,12 @@ func (s *SharedStateConfig) Validate() error {
 }
 
 func (c *CacheConfig) Validate() error {
+	switch c.CachingStrategy {
+	case "", CachingStrategyDefaultAllow, CachingStrategyDefaultIgnore:
+		// empty is fine pre-SetDefaults; after SetDefaults it is defaultAllow
+	default:
+		return fmt.Errorf("cache.*.cachingStrategy must be 'defaultAllow' or 'defaultIgnore', got %q", c.CachingStrategy)
+	}
 	existingIds := make(map[string]bool)
 	for _, connector := range c.Connectors {
 		if err := connector.Validate(); err != nil {
@@ -864,6 +856,11 @@ func (p *ProjectConfig) Validate(c *Config) error {
 			return err
 		}
 	}
+	// Before the networks: each network's block already carries the project's
+	// folded in, so a project error must be reported as the project's.
+	if err := p.Integrity.Validate(); err != nil {
+		return fmt.Errorf("project.*: %w", err)
+	}
 	if p.Networks != nil {
 		existingIds := make(map[string]bool)
 		existingAliases := make(map[string]bool)
@@ -908,9 +905,6 @@ func (p *ProjectConfig) Validate(c *Config) error {
 		if !c.HasRateLimiterBudget(p.RateLimitBudget) {
 			return fmt.Errorf("project.*.rateLimitBudget '%s' does not exist in config.rateLimiters", p.RateLimitBudget)
 		}
-	}
-	if err := p.Integrity.Validate(); err != nil {
-		return fmt.Errorf("project.*: %w", err)
 	}
 	return nil
 }
@@ -1206,9 +1200,25 @@ func (e *EvmUpstreamConfig) Validate(u *UpstreamConfig) error {
 			return fmt.Errorf("upstream.*.evm.chainId must be 0 for non-http endpoints, but '%d' is provided for %s", e.ChainId, util.RedactEndpoint(u.Endpoint))
 		}
 	}
+	switch e.SubscriptionSource {
+	case "", SubscriptionSourceOff, SubscriptionSourceOnDemand, SubscriptionSourceAlways:
+	default:
+		return fmt.Errorf("upstream '%s': upstreams[].evm.subscriptionSource '%s' is invalid, must be one of: %s, %s, %s", u.Id, e.SubscriptionSource, SubscriptionSourceOff, SubscriptionSourceOnDemand, SubscriptionSourceAlways)
+	}
+	pushes := e.SubscriptionSource != "" && e.SubscriptionSource != SubscriptionSourceOff
+	// A source is push only (spec §5.1): heads of any other endpoint come
+	// from the block clock.
+	if pushes && !util.IsWsEndpoint(u.Endpoint) {
+		return fmt.Errorf("upstream '%s': upstreams[].evm.subscriptionSource %s needs a ws or wss endpoint, %s is not one", u.Id, e.SubscriptionSource, util.RedactEndpoint(u.Endpoint))
+	}
 
 	if e.StatePollerInterval == 0 {
 		return fmt.Errorf("upstream.*.evm.statePollerInterval is required")
+	}
+	// Shadow upstreams never join the network's upstreams, so intake would
+	// drop every header they feed.
+	if pushes && u.IsShadow() {
+		return fmt.Errorf("upstream '%s': evm.subscriptionSource %s is invalid on a shadow upstream, only off", u.Id, e.SubscriptionSource)
 	}
 	// NodeType deprecated; keep syntax validation for back-compat only
 	if e.NodeType != "" {
@@ -1359,9 +1369,11 @@ func (f *FailsafeConfig) Validate() error {
 	}
 
 	switch f.MatchRequestKind {
-	case "", "*", "user", "internal":
+	case "", "*", "user":
+	case "internal":
+		return fmt.Errorf("failsafe.matchRequestKind 'internal' is deleted: no eRPC-own request (tracker fetch, head poll, probe) goes through a failsafe policy; remove it")
 	default:
-		return fmt.Errorf("failsafe.matchRequestKind '%s' is invalid, must be one of: user | internal | *", f.MatchRequestKind)
+		return fmt.Errorf("failsafe.matchRequestKind '%s' is invalid, must be one of: user | *", f.MatchRequestKind)
 	}
 
 	for _, c := range f.MatchCommitment {
@@ -1498,7 +1510,6 @@ func (c *ConsensusPolicyConfig) Validate() error {
 	}
 
 	anyWaivable := false
-	anyEmptyWaiver := false
 	haveNeverWaivableFloor := false
 	for i, rp := range c.RequiredParticipants {
 		if rp == nil {
@@ -1534,9 +1545,6 @@ func (c *ConsensusPolicyConfig) Validate() error {
 			// nothing and cannot serve as the floor.
 			haveNeverWaivableFloor = true
 		}
-		if rp.WaiveAgreementOnEmptyOutsideRetention {
-			anyEmptyWaiver = true
-		}
 	}
 	// R9: a policy that opts into a waiver (MissingData or empty-outside-retention)
 	// must keep a floor — at least one never-waivable entry with minAgreement>0 —
@@ -1545,51 +1553,37 @@ func (c *ConsensusPolicyConfig) Validate() error {
 	if anyWaivable && !haveNeverWaivableFloor {
 		return fmt.Errorf("consensus.requiredParticipants: a policy using waiveAgreementOnMissingData or waiveAgreementOnEmptyOutsideRetention must also keep at least one never-waivable entry with minAgreement > 0 (the waivable quotas cannot be the only floor)")
 	}
-	// R11: the empty-outside-retention waiver needs a block proof, which comes
-	// from blockEvidenceFields. Opting in without configuring it is a config
-	// error — the waiver could never fire and the operator's intent is silently
-	// dropped.
-	if anyEmptyWaiver && len(c.BlockEvidenceFields) == 0 {
-		return fmt.Errorf("consensus.requiredParticipants uses waiveAgreementOnEmptyOutsideRetention but consensus.blockEvidenceFields is empty: the waiver needs a per-method block-evidence field to prove the winner's block is outside retention")
-	}
-	// A block-evidence path that is also ignored would let differing block
-	// numbers collapse into one winner group while waiver proof is taken from
-	// a size-selected response — reject that overlap at load time. An ignore
-	// path that is an ancestor of the evidence path strips it too
-	// (ignoreFields["receipt"] removes receipt.blockNumber), so reject any
-	// ignore path equal to or a dot-delimited ancestor of an evidence path.
-	// Method lookup matches runtime methodFields (exact first, then EqualFold).
+	// An evidence path that is also ignored would let differing block numbers
+	// collapse into one winner group while the waiver reads the block from a
+	// size-selected response. An ignore path that is an ancestor of the
+	// evidence path strips it too (ignoreFields["receipt"] removes
+	// receipt.blockNumber). Method lookup matches runtime methodFields.
 	for method, evidencePaths := range c.BlockEvidenceFields {
 		ignored, ignoreKey, found := lookupMethodFields(c.IgnoreFields, method)
-		if !found || len(evidencePaths) == 0 {
+		if !found {
 			continue
 		}
 		for _, ep := range evidencePaths {
 			for _, ip := range ignored {
 				if ip == ep || strings.HasPrefix(ep, ip+".") {
-					return fmt.Errorf("consensus.blockEvidenceFields[%q] path %q is also listed in ignoreFields[%q]: evidence fields must not be ignored or waiver proof can disagree with the winning group", method, ep, ignoreKey)
+					return fmt.Errorf("consensus.blockEvidenceFields[%q] path %q is also listed in ignoreFields[%q]: evidence fields must not be ignored or the waiver's block can disagree with the winning group", method, ep, ignoreKey)
 				}
 			}
 		}
 	}
-
-	// blockEvidenceFields only supports the shapes extractFieldValues reads:
-	// "result", a flat top-level field of a result object ("blockNumber",
-	// "number"), or an array wildcard "*.field" for array results (eth_getLogs,
-	// eth_getBlockReceipts — max across elements). Nested dotted paths ("a.b")
-	// resolve to nil at runtime and would silently disable the waiver — reject
-	// them at load time.
+	// extractFieldValues reads only "result", a flat field of a result object,
+	// or "*.field" over an array result. A nested path resolves to nothing at
+	// runtime and would silently never waive.
 	for method, paths := range c.BlockEvidenceFields {
 		for _, ep := range paths {
 			if ep == "result" || strings.HasPrefix(ep, "*.") {
 				continue
 			}
 			if strings.Contains(ep, ".") {
-				return fmt.Errorf("consensus.blockEvidenceFields[%q] path %q is unsupported: use \"result\", a flat top-level field (e.g. \"blockNumber\"), or an array wildcard \"*.field\"; nested paths cannot prove the winner's block and would silently disable the empty-outside-retention waiver", method, ep)
+				return fmt.Errorf("consensus.blockEvidenceFields[%q] path %q is unsupported: use \"result\", a flat field (e.g. \"blockNumber\"), or an array wildcard \"*.field\"", method, ep)
 			}
 		}
 	}
-
 	// Smoke-compile the custom-policy eval function so a syntactically broken
 	// selector fails at load time rather than falling closed on every request.
 	if c.CustomPolicy != nil {
@@ -1978,6 +1972,9 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	if err := validateCacheKeySuffix("network.*.cacheKeySuffix", n.CacheKeySuffix); err != nil {
 		return err
 	}
+	if n.MaxClientBatchSize != nil && *n.MaxClientBatchSize < 0 {
+		return fmt.Errorf("network.*.maxClientBatchSize must be 0 (no limit) or greater, got %d", *n.MaxClientBatchSize)
+	}
 	for i, sr := range n.StaticResponses {
 		if err := sr.Validate(); err != nil {
 			return fmt.Errorf("network.*.staticResponses[%d]: %w", i, err)
@@ -1992,6 +1989,9 @@ func (n *NetworkConfig) Validate(c *Config) error {
 func (n *NetworkDefaults) Validate() error {
 	if n == nil {
 		return nil
+	}
+	if n.MaxClientBatchSize != nil && *n.MaxClientBatchSize < 0 {
+		return fmt.Errorf("networkDefaults.maxClientBatchSize must be 0 (no limit) or greater, got %d", *n.MaxClientBatchSize)
 	}
 	return validateCacheKeySuffix("networkDefaults.cacheKeySuffix", n.CacheKeySuffix)
 }
@@ -2034,9 +2034,6 @@ func (e *EvmNetworkConfig) Validate() error {
 	if e.FallbackFinalityDepth == 0 {
 		return fmt.Errorf("network.*.evm.fallbackFinalityDepth must be greater than 0")
 	}
-	if e.FallbackStatePollerDebounce == 0 {
-		return fmt.Errorf("network.*.evm.fallbackStatePollerDebounce is required")
-	}
 	if e.GetLogsMaxAllowedRange == 0 {
 		return fmt.Errorf("network.*.evm.getLogsMaxAllowedRange must be greater than 0")
 	}
@@ -2061,6 +2058,14 @@ func (e *EvmNetworkConfig) Validate() error {
 			if err := ValidatePattern(sel); err != nil {
 				return fmt.Errorf("network.*.evm.servedTip.guaranteedFor has invalid selector %q: %w", sel, err)
 			}
+		}
+	}
+	if ct := e.ChainTracker; ct != nil {
+		if ct.ReorgWindow < 0 {
+			return fmt.Errorf("network.*.evm.chainTracker.reorgWindow must be >= 0")
+		}
+		if ct.MaxBackfill < 0 {
+			return fmt.Errorf("network.*.evm.chainTracker.maxBackfill must be >= 0")
 		}
 	}
 	if e.SafeBlockSource != "" {
@@ -2142,6 +2147,9 @@ func (s *SvmUpstreamConfig) Validate(u *UpstreamConfig) error {
 	}
 	if !isValidSvmSegment(s.Cluster) {
 		return fmt.Errorf("upstream.*.svm.cluster '%s' is invalid, must contain only alphanumeric characters, dash, underscore, or dot", s.Cluster)
+	}
+	if s.StatePollerDebounce.Duration() < 0 {
+		return fmt.Errorf("upstream.*.svm.statePollerDebounce must be greater than or equal to 0")
 	}
 	if s.BlockAvailability != nil {
 		if err := s.BlockAvailability.Validate(); err != nil {
@@ -2369,8 +2377,8 @@ func (s *IntegritySettings) validate() error {
 	if b := s.Budget; b != nil && (b.MaxPerSecond < 0 || b.MaxConcurrent < 0) {
 		return fmt.Errorf("integrity.budget.maxPerSecond/maxConcurrent must be >= 0")
 	}
-	if s.ReorgWindow < 0 {
-		return fmt.Errorf("integrity.reorgWindow must be >= 0")
+	if f := s.Follow; f != nil && f.Interval < 0 {
+		return fmt.Errorf("integrity.follow.interval must be >= 0")
 	}
 	if s.MisbehaviorsDestination != nil {
 		if err := s.MisbehaviorsDestination.Validate(); err != nil {

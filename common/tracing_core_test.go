@@ -42,16 +42,16 @@ func TestInitializeTracing_DisabledLeavesTracingOff(t *testing.T) {
 
 			saveTracingGlobals(t)
 			resetTracingInitOnce(t)
-			IsTracingEnabled = true
-			IsTracingDetailed = true
+			SetTracingEnabled(true)
+			SetTracingDetailed(true)
 			SetTracingDetailed(true)
 
 			logger := zerolog.Nop()
 			require.NoError(t, InitializeTracing(ctx, &logger, tc.cfg))
 
-			assert.False(t, IsTracingEnabled, "a disabled config must turn tracing off")
-			assert.False(t, IsTracingDetailed, "a disabled config must turn detailed tracing off")
-			assert.False(t, TracingDetailed(), "a disabled config must turn detailed tracing off for accessor readers too")
+			assert.False(t, IsTracingEnabled(), "a disabled config must turn tracing off")
+			assert.False(t, IsTracingDetailed(), "a disabled config must turn detailed tracing off")
+			assert.False(t, IsTracingDetailed(), "a disabled config must turn detailed tracing off for accessor readers too")
 		})
 	}
 }
@@ -64,7 +64,7 @@ func TestInitializeTracing_UnsupportedProtocolReturnsError(t *testing.T) {
 
 	saveTracingGlobals(t)
 	resetTracingInitOnce(t)
-	IsTracingEnabled = false
+	SetTracingEnabled(false)
 
 	logger := zerolog.Nop()
 	err := InitializeTracing(ctx, &logger, &TracingConfig{
@@ -76,7 +76,7 @@ func TestInitializeTracing_UnsupportedProtocolReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported tracing protocol")
 	assert.Contains(t, err.Error(), "carrier-pigeon")
-	assert.False(t, IsTracingEnabled, "a failed init must not claim tracing is on")
+	assert.False(t, IsTracingEnabled(), "a failed init must not claim tracing is on")
 }
 
 // The happy path must set the globals the rest of the process reads, and must
@@ -87,8 +87,8 @@ func TestInitializeTracing_EnabledSetsGlobalsAndMatchers(t *testing.T) {
 
 	saveTracingGlobals(t)
 	resetTracingInitOnce(t)
-	IsTracingEnabled = false
-	IsTracingDetailed = false
+	SetTracingEnabled(false)
+	SetTracingDetailed(false)
 	forceTraceMatchers = nil
 
 	logger := zerolog.Nop()
@@ -110,9 +110,9 @@ func TestInitializeTracing_EnabledSetsGlobalsAndMatchers(t *testing.T) {
 		_ = ShutdownTracing(shutdownCtx)
 	})
 
-	assert.True(t, IsTracingEnabled, "an enabled config must turn tracing on")
-	assert.True(t, IsTracingDetailed, "detailed:true must reach IsTracingDetailed")
-	assert.True(t, TracingDetailed(), "detailed:true must reach accessor readers too")
+	assert.True(t, IsTracingEnabled(), "an enabled config must turn tracing on")
+	assert.True(t, IsTracingDetailed(), "detailed:true must reach IsTracingDetailed()")
+	assert.True(t, IsTracingDetailed(), "detailed:true must reach accessor readers too")
 	assert.NotNil(t, tracer, "the package tracer must be installed")
 	assert.NotNil(t, tracerProvider, "the package tracer provider must be installed")
 	assert.Equal(t, []*ForceTraceMatcher{matcher}, forceTraceMatchers,
@@ -415,7 +415,7 @@ func TestShouldForceTrace(t *testing.T) {
 func TestSetAndGetForceTraceNetwork(t *testing.T) {
 	t.Run("stores the network when tracing is on", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = true
+		SetTracingEnabled(true)
 
 		ctx := SetForceTraceNetwork(context.Background(), "evm:1")
 		assert.Equal(t, "evm:1", GetForceTraceNetwork(ctx))
@@ -423,7 +423,7 @@ func TestSetAndGetForceTraceNetwork(t *testing.T) {
 
 	t.Run("stores nothing when tracing is off", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = false
+		SetTracingEnabled(false)
 
 		ctx := SetForceTraceNetwork(context.Background(), "evm:1")
 		assert.Equal(t, "", GetForceTraceNetwork(ctx))
@@ -431,7 +431,7 @@ func TestSetAndGetForceTraceNetwork(t *testing.T) {
 
 	t.Run("stores nothing for an empty network", func(t *testing.T) {
 		saveTracingGlobals(t)
-		IsTracingEnabled = true
+		SetTracingEnabled(true)
 
 		ctx := SetForceTraceNetwork(context.Background(), "")
 		assert.Equal(t, "", GetForceTraceNetwork(ctx))

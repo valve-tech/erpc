@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
-	"github.com/erpc/erpc/indexer"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/gorilla/websocket"
@@ -70,7 +70,6 @@ func NewHttpServer(
 	cfg *common.ServerConfig,
 	healthCheckCfg *common.HealthCheckConfig,
 	adminCfg *common.AdminConfig,
-	indexerCfg *common.IndexerConfig,
 	erpc *ERPC,
 ) (*HttpServer, error) {
 	reqMaxTimeout := 150 * time.Second
@@ -96,18 +95,6 @@ func NewHttpServer(
 	gzipPool := util.NewGzipReaderPool()
 
 	subMgrLogger := logger.With().Str("component", "subscriptions").Logger()
-	indexerLogger := logger.With().Str("component", "indexer").Logger()
-	indexerOpts := indexer.Options{}
-	if indexerCfg != nil {
-		indexerOpts.DedupWindowSize = indexerCfg.DedupWindowSize
-	}
-	if cfg != nil && cfg.WebSocket != nil {
-		indexerOpts.FallbackGasLimit = cfg.WebSocket.FallbackGasLimit
-	}
-	indexerOpts.OnDedupLate = func(networkId string, kind indexer.EventKind) {
-		telemetry.MetricIndexerDedupLateTotal.WithLabelValues(networkId, kind.String()).Inc()
-	}
-	idx := indexer.New(&indexerLogger, indexerOpts)
 
 	srv := &HttpServer{
 		logger:              logger,
@@ -119,7 +106,7 @@ func NewHttpServer(
 		draining:            &draining,
 		drained:             make(chan struct{}),
 		gzipPool:            gzipPool,
-		subscriptionManager: NewSubscriptionManager(&subMgrLogger, idx),
+		subscriptionManager: NewSubscriptionManager(&subMgrLogger),
 		reqMaxTimeout:       reqMaxTimeout,
 	}
 
@@ -520,6 +507,16 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			bodyReader = gzReader
 		}
 
+		// Bound the decompressed body: reading stops one byte past the limit,
+		// which is enough to tell an over-limit body from one at the limit.
+		var maxBodySize int64
+		if s.serverCfg.MaxRequestBodySize != nil {
+			maxBodySize = *s.serverCfg.MaxRequestBodySize
+		}
+		if maxBodySize > 0 {
+			bodyReader = io.LimitReader(bodyReader, maxBodySize+1)
+		}
+
 		// Replace the existing body read with our potentially decompressed reader
 		_, readBodySpan := common.StartDetailSpan(httpCtx, "Http.ReadBody")
 		body, cleanup, err := util.ReadAll(bodyReader, 2048)
@@ -528,6 +525,9 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			defer cleanup()
 		}
 		readBodySpan.End()
+		if err == nil && maxBodySize > 0 && int64(len(body)) > maxBodySize {
+			err = common.NewErrRequestBodyTooLarge(maxBodySize)
+		}
 		if err != nil {
 			common.SetTraceSpanError(readBodySpan, err)
 			handleErrorResponse(
@@ -579,6 +579,55 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 			}
 		}
 
+		if isBatch && project != nil {
+			if capArch, capErr := clientBatchCapError(httpCtx, project, requests, architecture, chainId); capErr != nil {
+				handleErrorResponse(
+					httpCtx,
+					&lg,
+					&startedAt,
+					nil,
+					capErr,
+					w,
+					encoder,
+					writeFatalError,
+					&common.TRUE,
+					s.executionHeadersMode(),
+					capArch,
+				)
+				parseRequestsSpan.End()
+				return
+			}
+		}
+
+		// A Solana node answers a batch as one parsed value: "[]" gets HTTP
+		// 200 with no body, and an element whose id it cannot read fails the
+		// whole batch with one -32700. EVM nodes answer per element.
+		if isBatch && architecture == string(common.ArchitectureSvm) {
+			if len(requests) == 0 {
+				w.WriteHeader(http.StatusOK)
+				common.EnrichHTTPServerSpan(httpCtx, http.StatusOK, nil)
+				parseRequestsSpan.End()
+				return
+			}
+			if perr := svm.BatchParseError(requests); perr != nil {
+				handleErrorResponse(
+					httpCtx,
+					&lg,
+					&startedAt,
+					nil,
+					perr,
+					w,
+					encoder,
+					writeFatalError,
+					s.serverCfg.IncludeErrorDetails,
+					s.executionHeadersMode(),
+					common.ArchitectureSvm,
+				)
+				parseRequestsSpan.End()
+				return
+			}
+		}
+
 		responses := make([]interface{}, len(requests))
 		// notifications marks valid Solana requests without an "id" member. They
 		// still run, but get no reply (JSON-RPC 2.0 §4.1), which is what Agave
@@ -597,15 +646,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 		for i, reqBody := range requests {
 			wg.Add(1)
-			// architecture and chainId are passed in rather than captured. A batch
-			// resolves them per entry — each request object may name its own
-			// "networkId" — so the resolution below assigns to them. Captured,
-			// that assignment would be a write to state shared by every entry's
-			// goroutine: the first entry to resolve would publish its network to
-			// the others, which then took the "already resolved" branch and were
-			// forwarded to the wrong chain. A copy per goroutine keeps each
-			// entry's resolution its own, and takes the race with it.
-			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string, architecture, chainId string) {
+			go func(index int, rawReq json.RawMessage, headers http.Header, queryArgs map[string][]string) {
 				defer func() {
 					defer wg.Done()
 					if rec := recover(); rec != nil {
@@ -789,6 +830,11 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 					}
 				}
 
+				// Each request of a path-less batch names its own network, so
+				// resolve into locals: writing the shared path values from
+				// concurrent goroutines raced and routed every request of the
+				// batch to whichever network one of them named first.
+				architecture, chainId := architecture, chainId
 				var networkId string
 
 				if architecture == "" || chainId == "" {
@@ -842,7 +888,7 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 				responses[index] = resp
 				common.EndRequestSpan(requestCtx, resp, nil)
-			}(i, reqBody, headers, queryArgs, architecture, chainId)
+			}(i, reqBody, headers, queryArgs)
 		}
 
 		wg.Wait()
@@ -876,8 +922,8 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		common.InjectHTTPResponseTraceContext(httpCtx, w)
 
 		// Notifications get no entry; a request of only notifications gets an
-		// empty body. An empty batch ("[]") still has len(responses)==0 and
-		// must keep writing "[]" via the isBatch branch below.
+		// empty body. An EVM empty batch ("[]") still has len(responses)==0
+		// and must keep writing "[]" via the isBatch branch below.
 		replies := responses
 		if slices.Contains(notifications, true) {
 			replies = make([]interface{}, 0, len(responses))
@@ -1844,11 +1890,15 @@ func determineResponseStatusCode(res interface{}, architectureHint ...common.Net
 	// 400 Bad Request - malformed requests. Solana clients expect what Agave
 	// does: HTTP 200 with the -32700/-32600/-32602 error in the body. web3.js
 	// and @solana/kit throw a transport error on 400 and never read the code.
-	case common.HasErrorCode(err, common.ErrCodeJsonRpcRequestUnmarshal, common.ErrCodeInvalidRequest) &&
+	case common.HasErrorCode(err, common.ErrCodeJsonRpcRequestUnmarshal, common.ErrCodeInvalidRequest, common.ErrCodeClientBatchTooLarge) &&
 		isSvmRequest(extractRequest(res), architectureHint...):
 		return http.StatusOK
-	case common.HasErrorCode(err, common.ErrCodeInvalidUrlPath, common.ErrCodeJsonRpcRequestUnmarshal, common.ErrCodeInvalidRequest):
+	case common.HasErrorCode(err, common.ErrCodeInvalidUrlPath, common.ErrCodeJsonRpcRequestUnmarshal, common.ErrCodeInvalidRequest, common.ErrCodeClientBatchTooLarge):
 		return http.StatusBadRequest
+	// 413 Content Too Large - the body crossed server.maxRequestBodySize. A
+	// transport limit, not a malformed body, so Solana requests get it too.
+	case common.HasErrorCode(err, common.ErrCodeRequestBodyTooLarge):
+		return http.StatusRequestEntityTooLarge
 	// 401 Unauthorized - authentication failures
 	case common.HasErrorCode(err, common.ErrCodeAuthUnauthorized, common.ErrCodeEndpointUnauthorized):
 		return http.StatusUnauthorized
@@ -1925,6 +1975,8 @@ func processErrorBody(logger *zerolog.Logger, startedAt *time.Time, nq *common.N
 			common.ErrCodeAuthUnauthorized,
 			common.ErrCodeAuthRateLimitRuleExceeded,
 			common.ErrCodeJsonRpcRequestUnmarshal,
+			common.ErrCodeRequestBodyTooLarge,
+			common.ErrCodeClientBatchTooLarge,
 			common.ErrCodeProjectNotFound,
 		) {
 			logger.Debug().Err(err).Object("request", nq).Object("response", respMarshaler).Msg("forward request errored with client-side exception")
@@ -1945,6 +1997,73 @@ func processErrorBody(logger *zerolog.Logger, startedAt *time.Time, nq *common.N
 	}
 
 	return resp
+}
+
+// clientBatchCapError reports the first network whose maxClientBatchSize a
+// batch exceeds, counting only the requests addressed to it, with that
+// network's architecture so the reply takes its wire shape. A URL path names
+// one network for the whole batch; without one each request names its own
+// ("networkId"), so a batch spanning networks is held to each network's own
+// limit. Requests whose network does not resolve fail on their own later.
+func clientBatchCapError(ctx context.Context, project *PreparedProject, requests []json.RawMessage, architecture, chainId string) (common.NetworkArchitecture, error) {
+	if architecture != "" && chainId != "" {
+		return batchCapErrorFor(project, architecture+":"+chainId, len(requests))
+	}
+	if !projectHasClientBatchCap(project.Config) {
+		return "", nil
+	}
+	byHint := make(map[string]int)
+	for _, raw := range requests {
+		if hint := common.NewNormalizedRequest(raw).NetworkIdHint(); hint != "" {
+			byHint[hint]++
+		}
+	}
+	// An alias and the canonical id are one network, so count by canonical id.
+	byNetwork := make(map[string]int, len(byHint))
+	for hint, n := range byHint {
+		if id, _, _ := batchCapOf(project, hint); id != "" {
+			byNetwork[id] += n
+		}
+	}
+	for id, n := range byNetwork {
+		if arch, err := batchCapErrorFor(project, id, n); err != nil {
+			return arch, err
+		}
+	}
+	return "", nil
+}
+
+func batchCapErrorFor(project *PreparedProject, networkId string, batchSize int) (common.NetworkArchitecture, error) {
+	id, arch, limit := batchCapOf(project, networkId)
+	if limit <= 0 || batchSize <= limit {
+		return "", nil
+	}
+	return arch, common.NewErrClientBatchTooLarge(id, batchSize, limit)
+}
+
+func networkBatchCapError(nw *Network, batchSize int) (common.NetworkArchitecture, error) {
+	cfg := nw.Config()
+	if cfg == nil || cfg.MaxClientBatchSize == nil || *cfg.MaxClientBatchSize <= 0 || batchSize <= *cfg.MaxClientBatchSize {
+		return "", nil
+	}
+	return nw.Architecture(), common.NewErrClientBatchTooLarge(nw.Id(), batchSize, *cfg.MaxClientBatchSize)
+}
+
+// projectHasClientBatchCap spares batches routed per request the extra
+// envelope parse when no network of the project can carry a limit.
+func projectHasClientBatchCap(cfg *common.ProjectConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.NetworkDefaults != nil && cfg.NetworkDefaults.MaxClientBatchSize != nil && *cfg.NetworkDefaults.MaxClientBatchSize > 0 {
+		return true
+	}
+	for _, n := range cfg.Networks {
+		if n != nil && n.MaxClientBatchSize != nil && *n.MaxClientBatchSize > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // isSvmRequest reports whether a request targets a Solana network. Authentication
@@ -2115,76 +2234,6 @@ func handleErrorResponse(
 			attribute.Int("response_status", statusCode),
 		),
 	)
-}
-
-// prewarmInterval is how often the prewarm reconciler re-scans for WS-capable
-// networks that still need their newHeads subscription established. Var (not
-// const) so tests can compress it.
-var prewarmInterval = 15 * time.Second
-
-// PrewarmUpstreamSubscriptions proactively establishes the upstream newHeads
-// subscription for every WS-capable network, without waiting for a client
-// eth_subscribe. This keeps the EVM state poller's latest-block tip fed by
-// pushed heads (cheap) instead of falling back to RPC-polling `latest` every
-// cycle (expensive) — so an instance that never receives a client subscription still
-// polls efficiently.
-//
-// It runs as a reconciler because networks initialize asynchronously (the
-// registry's background initializer tasks): each tick it attempts to bootstrap
-// any network not yet warmed, until ctx is cancelled. bootstrapNetwork is
-// idempotent per network, so re-scans are cheap. Networks with no WS upstreams
-// are skipped permanently — the state poller handles head tracking for
-// HTTP-only networks via RPC polling. No-op while the WebSocket server is
-// disabled.
-func (s *HttpServer) PrewarmUpstreamSubscriptions(ctx context.Context) {
-	if s.subscriptionManager == nil || s.erpc == nil || !s.webSocketEnabled() {
-		return
-	}
-
-	// indexer network key (project/network) -> bootstrapped or definitively
-	// skipped (HTTP-only).
-	settled := make(map[string]struct{})
-
-	reconcile := func() {
-		for _, prj := range s.erpc.GetProjects() {
-			for _, nw := range prj.GetNetworks() {
-				id := nw.Id()
-				key := indexerNetworkKey(nw)
-				if _, done := settled[key]; done {
-					continue
-				}
-				err := s.subscriptionManager.bootstrapNetwork(ctx, nw)
-				switch {
-				case err == nil:
-					settled[key] = struct{}{}
-					s.logger.Info().Str("networkId", id).
-						Msg("prewarmed upstream newHeads subscription")
-				case common.HasErrorCode(err, common.ErrCodeNoWsUpstreamAvailable):
-					// HTTP-only network — nothing to prewarm; don't retry.
-					settled[key] = struct{}{}
-					s.logger.Debug().Str("networkId", id).
-						Msg("no WS upstreams; skipping subscription prewarm")
-				default:
-					// Transient (network still initializing, upstreams not ready,
-					// circuit breaker open). Leave unsettled; retried next tick.
-					s.logger.Debug().Err(err).Str("networkId", id).
-						Msg("subscription prewarm not ready yet, will retry")
-				}
-			}
-		}
-	}
-
-	reconcile() // immediate first pass
-	ticker := time.NewTicker(prewarmInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			reconcile()
-		}
-	}
 }
 
 func (s *HttpServer) Start(logger *zerolog.Logger) error {

@@ -2,6 +2,7 @@ package evm
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/erpc/erpc/common"
@@ -125,8 +126,10 @@ func TestShouldCacheResponse_AnEmptyAnswerForAFutureBlockIsNeverStored(t *testin
 		{"AtTheHeadUnderOnly", 1000, common.CacheEmptyBehaviorOnly, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := common.NewNormalizedRequest([]byte(
-				`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x3e9",false]}`))
+			// The refusal rule reads the block from the params, so they must
+			// name the case's block.
+			req := common.NewNormalizedRequest([]byte(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x%x",false]}`, tc.block)))
 			req.SetNetwork(network)
 			req.SetEvmBlockNumber(tc.block)
 			resp := cacheResponse(t, req, `null`)

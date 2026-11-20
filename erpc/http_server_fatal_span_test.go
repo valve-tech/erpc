@@ -37,8 +37,8 @@ func recordSpans(t *testing.T) *tracetest.InMemoryExporter {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp), sdktrace.WithSampler(sdktrace.AlwaysSample()))
 	common.SetTracerProviderForTest(tp)
 	t.Cleanup(func() {
-		common.IsTracingEnabled = false
-		common.IsTracingDetailed = false
+		common.SetTracingEnabled(false)
+		common.SetTracingDetailed(false)
 	})
 	return exp
 }

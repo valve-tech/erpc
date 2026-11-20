@@ -126,6 +126,6 @@ func FuzzParseCompositeBlockParam(f *testing.F) {
 		if err := common.SonicCfg.Unmarshal(raw, &param); err != nil {
 			return
 		}
-		_, _, _ = parseCompositeBlockParam(param)
+		_, _, _ = common.ParseEvmBlockParam(param)
 	})
 }

@@ -29,10 +29,15 @@ func TestFailsafeConfig_Validate_MatchMethodAndRequestKind(t *testing.T) {
 	require.ErrorContains(t, (&FailsafeConfig{}).Validate(),
 		"failsafe.matchMethod cannot be empty, use '*'")
 
-	for _, kind := range []string{"", "*", "user", "internal"} {
+	for _, kind := range []string{"", "*", "user"} {
 		require.NoError(t, (&FailsafeConfig{MatchMethod: "*", MatchRequestKind: kind}).Validate(),
 			"matchRequestKind %q", kind)
 	}
+
+	// Upstream #1335 deleted "internal": no eRPC-own request goes through a
+	// failsafe policy, so a config that names it must fail loudly.
+	require.ErrorContains(t, (&FailsafeConfig{MatchMethod: "*", MatchRequestKind: "internal"}).Validate(),
+		"matchRequestKind 'internal' is deleted")
 
 	err := (&FailsafeConfig{MatchMethod: "*", MatchRequestKind: "system"}).Validate()
 	require.ErrorContains(t, err, "matchRequestKind 'system' is invalid")

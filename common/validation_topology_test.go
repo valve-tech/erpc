@@ -113,11 +113,6 @@ func TestConfig_Validate_PropagatesEveryChildError(t *testing.T) {
 			},
 			"proxyPool.*.id is required",
 		},
-		{
-			"indexer",
-			func(c *Config) { c.Indexer = &IndexerConfig{CanonicalChainDepth: -1} },
-			"indexer.canonicalChainDepth",
-		},
 	}
 
 	for _, tc := range cases {
@@ -129,15 +124,6 @@ func TestConfig_Validate_PropagatesEveryChildError(t *testing.T) {
 			require.Contains(t, err.Error(), tc.wantSub)
 		})
 	}
-}
-
-// The indexer treats 0 as "use the internal default", so 0 must pass while a
-// negative value must not: a negative ring-buffer size would panic much later,
-// inside the reorg tracker, far from the config that caused it.
-func TestIndexerConfig_Validate_ZeroMeansDefaultNegativeIsRejected(t *testing.T) {
-	require.NoError(t, (&IndexerConfig{}).Validate())
-	require.ErrorContains(t, (&IndexerConfig{CanonicalChainDepth: -1}).Validate(), "canonicalChainDepth must be >= 0")
-	require.ErrorContains(t, (&IndexerConfig{DedupWindowSize: -1}).Validate(), "dedupWindowSize must be >= 0")
 }
 
 func TestServerConfig_Validate_ListenerNeedsHostAndPort(t *testing.T) {

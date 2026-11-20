@@ -240,7 +240,7 @@ func TestNewHttpServer_ResolvesResponseHeadersAtStartupAndSkipsEmptyOnes(t *test
 			"X-Cluster": "$ERPC_TEST_UNSET_VARIABLE",
 			"X-Fixed":   "constant",
 		},
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil)
 	require.NoError(t, err)
 
 	require.Equal(t, map[string]string{

@@ -57,7 +57,7 @@ func TestNetworkPostForward_BlockNumber_ChargesTheLagToTheUpstreamThatServedIt(t
 	n.On("ProjectId").Return(project).Maybe()
 	n.On("Id").Return("evm:1").Maybe()
 	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{}}).Maybe()
-	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(int64(110)).Maybe()
+	n.On("HeadLatest", mock.Anything).Return(int64(110)).Maybe()
 
 	ups := staleBlockNumberUpstream("lagging-rpc", "vendorx")
 	counter := telemetry.MetricUpstreamStaleLatestBlock.
@@ -91,7 +91,7 @@ func TestNetworkPostForward_BlockNumber_CorrectsAnUnattributedAnswer(t *testing.
 	n.On("ProjectId").Return(project).Maybe()
 	n.On("Id").Return("evm:1").Maybe()
 	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{}}).Maybe()
-	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(int64(110)).Maybe()
+	n.On("HeadLatest", mock.Anything).Return(int64(110)).Maybe()
 
 	out, err := networkPostForward_eth_blockNumber(
 		ctx, n, enforcingBlockNumberRequest(), blockNumberResponse(100, nil), nil)
@@ -114,7 +114,7 @@ func TestNetworkPostForward_BlockNumber_LeavesTheAnswerAloneWithoutTheDirective(
 	n.On("ProjectId").Return(project).Maybe()
 	n.On("Id").Return("evm:1").Maybe()
 	n.On("Config").Return(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{}}).Maybe()
-	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(int64(110)).Maybe()
+	n.On("HeadLatest", mock.Anything).Return(int64(110)).Maybe()
 
 	ups := staleBlockNumberUpstream("lagging-rpc", "vendory")
 	counter := telemetry.MetricUpstreamStaleLatestBlock.

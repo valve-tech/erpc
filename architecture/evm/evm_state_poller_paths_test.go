@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/health"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +32,7 @@ func TestPollFinalizedBlockNumber_StoresTheHeadAndAsksForTheFinalizedTag(t *test
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResult(req, blockHeader(500))
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	got, err := p.PollFinalizedBlockNumber(context.Background())
 	require.NoError(t, err)
@@ -50,7 +51,7 @@ func TestPollFinalizedBlockNumber_GivesUpAfterTenUnsupportedAnswers(t *testing.T
 	up.on("eth_getBlockByNumber", func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return nil, common.NewErrEndpointUnsupported(errors.New("no finalized tag on this node"))
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	// Drop the debounce to a tick so each call really re-fetches.
 	p.SetNetworkConfig(&common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -80,7 +81,7 @@ func TestPollFinalizedBlockNumber_TransportFailureSurfacesTheCause(t *testing.T)
 	up.on("eth_getBlockByNumber", func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return nil, errors.New("dial tcp: connection refused")
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	_, err := p.PollFinalizedBlockNumber(context.Background())
 	require.Error(t, err, "a transport failure is a real poll failure, not an unsupported method")
@@ -94,12 +95,12 @@ func TestFetchBlock_NullResultIsNotAnError(t *testing.T) {
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResult(req, `null`)
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	num, ts, err := p.fetchBlock(context.Background(), "finalized")
+	pb, err := p.fetchBlock(context.Background(), "finalized", common.UpstreamPoliciesTimeoutOnly)
 	require.NoError(t, err, "a node that has no finalized block yet answers null; that is not a failure")
-	assert.Equal(t, int64(0), num)
-	assert.Equal(t, int64(0), ts)
+	assert.Equal(t, int64(0), pb.number)
+	assert.Equal(t, int64(0), pb.timestamp)
 }
 
 func TestFetchBlock_BlockWithoutANumberIsRejectedWithTheResultAttached(t *testing.T) {
@@ -107,9 +108,9 @@ func TestFetchBlock_BlockWithoutANumberIsRejectedWithTheResultAttached(t *testin
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResult(req, `{"hash":"0xdead","timestamp":"0x10"}`)
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	_, _, err := p.fetchBlock(context.Background(), "latest")
+	_, err := p.fetchBlock(context.Background(), "latest", common.UpstreamPoliciesTimeoutOnly)
 	require.Error(t, err)
 	// Discriminating: the offending body must travel with the error, otherwise
 	// an operator cannot tell this apart from a null result.
@@ -124,9 +125,9 @@ func TestFetchBlock_NonHexBlockNumberIsAnError(t *testing.T) {
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResult(req, `{"number":"not-a-number","hash":"0xabc"}`)
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	_, _, err := p.fetchBlock(context.Background(), "latest")
+	_, err := p.fetchBlock(context.Background(), "latest", common.UpstreamPoliciesTimeoutOnly)
 	require.Error(t, err, "a block number that is not hex must not be read as zero")
 }
 
@@ -135,12 +136,12 @@ func TestFetchBlock_UnparsableTimestampKeepsTheBlockNumber(t *testing.T) {
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResult(req, `{"number":"0x2a","hash":"0xabc","timestamp":"zzz"}`)
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	num, ts, err := p.fetchBlock(context.Background(), "latest")
+	pb, err := p.fetchBlock(context.Background(), "latest", common.UpstreamPoliciesTimeoutOnly)
 	require.NoError(t, err, "a broken timestamp must not discard a good block number")
-	assert.Equal(t, int64(42), num)
-	assert.Equal(t, int64(0), ts)
+	assert.Equal(t, int64(42), pb.number)
+	assert.Equal(t, int64(0), pb.timestamp)
 }
 
 // --- fetchSyncingState ---
@@ -150,7 +151,7 @@ func syncingPoller(t *testing.T, h forwardHandler) *EvmStatePoller {
 	t.Helper()
 	up := newForwardingUpstream(123)
 	up.on("eth_syncing", h)
-	return newGateTestPoller(t, up)
+	return newUpstreamTestPoller(t, up, nil)
 }
 
 func syncingResult(raw string) forwardHandler {
@@ -226,7 +227,7 @@ func TestFetchSyncingState_ErrorMemberBesideAResultIsHonoured(t *testing.T) {
 
 func TestResolveDebounce_PrefersTheMeasuredBlockTimeOverTheFallback(t *testing.T) {
 	up := newForwardingUpstream(123)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	// Feed the tracker four block observations two seconds apart, which is what
 	// its EMA needs before it reports a block time at all.
@@ -243,7 +244,7 @@ func TestResolveDebounce_PrefersTheMeasuredBlockTimeOverTheFallback(t *testing.T
 
 func TestResolveDebounce_HonoursTheConfiguredBlockTimeMultiplier(t *testing.T) {
 	up := newForwardingUpstream(123)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	for i := int64(1); i <= 4; i++ {
 		p.tracker.SetLatestBlockNumber(up, i, 1_700_000_000+i*2)
 	}
@@ -254,12 +255,16 @@ func TestResolveDebounce_HonoursTheConfiguredBlockTimeMultiplier(t *testing.T) {
 	assert.Equal(t, 500*time.Millisecond, got)
 }
 
-func TestResolveDebounce_FallsBackToConfigThenToOneSecond(t *testing.T) {
-	p := newGateTestPoller(t, newForwardingUpstream(123))
+func TestResolveDebounce_FallsBackToConfigThenToTheColdBlockTime(t *testing.T) {
+	p := newUpstreamTestPoller(t, newForwardingUpstream(123), nil)
 
 	assert.Equal(t, 7*time.Second,
 		p.resolveDebounce(&common.EvmNetworkConfig{FallbackStatePollerDebounce: common.Duration(7 * time.Second)}))
-	assert.Equal(t, 1*time.Second, p.resolveDebounce(nil),
+	// Upstream (#1335) replaced the fixed one-second floor with the cold
+	// block time at the poll cadence (0.7 by default).
+	want := (*common.EvmNetworkConfig)(nil).PollCadence(health.ColdBlockTime)
+	require.Positive(t, want)
+	assert.Equal(t, want, p.resolveDebounce(nil),
 		"with no block time and no config the poller must still debounce")
 }
 
@@ -297,7 +302,7 @@ func TestInitializeEarliestBlockDetection_BoundWithNoEarliestAnchorIsNotSchedule
 	up.cfg.Evm.BlockAvailability = &common.EvmBlockAvailabilityConfig{
 		Upper: &common.EvmAvailabilityBoundConfig{LatestBlockMinus: &minus},
 	}
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -309,7 +314,7 @@ func TestInitializeEarliestBlockDetection_BoundWithNoEarliestAnchorIsNotSchedule
 
 func TestInitializeEarliestBlockDetection_DetectsTheBoundOnceAndThenStopsSearching(t *testing.T) {
 	up := earliestBoundUpstream(t, 100, 0)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 	require.Equal(t, int64(100), p.EarliestBlock(common.EvmProbeBlockHeader))
@@ -332,7 +337,7 @@ func TestInitializeEarliestBlockDetection_ARunningSchedulerSkipsTheProbeEntirely
 	// A rate far beyond the test's lifetime: the loop must start, but its
 	// ticker must never fire, so the assertion stays deterministic.
 	up := earliestBoundUpstream(t, 100, time.Hour)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 	require.Equal(t, int64(100), p.EarliestBlock(common.EvmProbeBlockHeader))
@@ -360,7 +365,7 @@ func TestInitializeEarliestBlockDetection_OnlyAPositiveUpdateRateStartsASchedule
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			up := earliestBoundUpstream(t, 100, tc.rate)
-			p := newGateTestPoller(t, up)
+			p := newUpstreamTestPoller(t, up, nil)
 
 			p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -384,7 +389,7 @@ func TestInitializeEarliestBlockDetection_HeadFailureSkipsTheCycleBeforeAnySearc
 	up.cfg.Evm.BlockAvailability = &common.EvmBlockAvailabilityConfig{
 		Lower: &common.EvmAvailabilityBoundConfig{EarliestBlockPlus: &plus},
 	}
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -407,7 +412,7 @@ func TestInitializeEarliestBlockDetection_NullHeadSkipsTheCycle(t *testing.T) {
 	up.cfg.Evm.BlockAvailability = &common.EvmBlockAvailabilityConfig{
 		Lower: &common.EvmAvailabilityBoundConfig{EarliestBlockPlus: &plus},
 	}
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -431,7 +436,7 @@ func TestInitializeEarliestBlockDetection_AnUnnamedProbeSharesTheBlockHeaderSche
 		Probe:             common.EvmProbeBlockHeader,
 		UpdateRate:        common.Duration(2 * time.Hour),
 	}
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -449,7 +454,7 @@ func TestFetchBlockHashByNumber_TransportFailureReadsAsNotAvailable(t *testing.T
 	up.on("eth_getBlockByNumber", func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return nil, errors.New("dial tcp: connection refused")
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	hash, ok, err := p.fetchBlockHashByNumber(context.Background(), 10)
 	require.NoError(t, err, "a probe helper must never surface transport errors to the binary search")
@@ -462,7 +467,7 @@ func TestFetchBlockHashByNumber_ErrorMemberBesideAHashReadsAsNotAvailable(t *tes
 	up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return jsonResultBesideError(req, blockHeader(10), -32000, "pruned")
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	hash, ok, _ := p.fetchBlockHashByNumber(context.Background(), 10)
 	// Discriminating: the body DOES carry a usable hash. Only a reader that

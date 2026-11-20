@@ -98,6 +98,9 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		// precondition is a fact by the next line — nothing has to converge.
 		seedEvmHeads(t, ctx, network.upstreamsRegistry, primaryUp, 1000, 1000)
 		seedEvmHeads(t, ctx, network.upstreamsRegistry, fallbackUp, 1010, 1010)
+		// The network head forms from intake votes (#1335), not the counters.
+		voteHead(t, network, primaryUp, 1000)
+		voteHead(t, network, fallbackUp, 1010)
 
 		require.Equal(t, int64(1000), primaryUp.EvmEffectiveFinalizedBlock())
 		require.Equal(t, int64(1010), fallbackUp.EvmEffectiveFinalizedBlock(),
@@ -109,9 +112,9 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 			idsFromUpstreams(network.policyEngine.GetOrdered(network.networkId, "*", "*")),
 			"preferTag('!tier:fallback') must drop the fallback while the primary is healthy")
 
-		assert.Equal(t, int64(1000), network.EvmHighestFinalizedBlockNumber(ctx),
+		assert.Equal(t, int64(1000), servedHead(network, ctx).Finalized,
 			"the tip is picked over the policy-eligible set, which excludes the fallback")
-		assert.Equal(t, int64(1000), network.EvmHighestLatestBlockNumber(ctx),
+		assert.Equal(t, int64(1000), servedHead(network, ctx).Latest,
 			"the tip is picked over the policy-eligible set, which excludes the fallback")
 	})
 
@@ -208,14 +211,17 @@ func TestNetwork_FallbackTierDoesNotDefineTheServedTip(t *testing.T) {
 		// two writes are the only ones the counters ever see.
 		seedEvmHeads(t, ctx, upstreamsRegistry, primaryUp, 1000, 1000)
 		seedEvmHeads(t, ctx, upstreamsRegistry, fallbackUp, 1050, 1050)
+		// The network head forms from intake votes (#1335), not the counters.
+		voteHead(t, network, primaryUp, 1000)
+		voteHead(t, network, fallbackUp, 1050)
 
 		require.Equal(t, int64(1000), primaryUp.EvmEffectiveFinalizedBlock())
 		require.Equal(t, int64(1050), fallbackUp.EvmEffectiveFinalizedBlock(),
 			"the fallback must be ahead, else the tip assertions pass vacuously")
 
-		assert.Equal(t, int64(1000), network.EvmHighestFinalizedBlockNumber(ctx),
+		assert.Equal(t, int64(1000), servedHead(network, ctx).Finalized,
 			"N=2 majority is the lower head: one upstream out ahead never defines the tip")
-		assert.Equal(t, int64(1000), network.EvmHighestLatestBlockNumber(ctx),
+		assert.Equal(t, int64(1000), servedHead(network, ctx).Latest,
 			"N=2 majority is the lower head: one upstream out ahead never defines the tip")
 	})
 }

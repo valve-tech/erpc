@@ -188,6 +188,8 @@ type Initializer struct {
 	attempts atomic.Int32
 	tasks    sync.Map
 	tasksMu  sync.Mutex
+	// runs runs every task attempt; Wait waits for them.
+	runs Goroutines
 
 	autoRetryActive atomic.Bool
 	cancelAutoRetry atomic.Value // context.CancelFunc
@@ -220,6 +222,17 @@ func (i *Initializer) taskLogger() *zerolog.Logger {
 		return &discardTaskLogger
 	}
 	return i.logger
+}
+
+// Wait waits, once appCtx ended, until no task attempt or auto-retry loop
+// runs; none starts after.
+func (i *Initializer) Wait() {
+	// Marked under stopMu, as Stop does, so no loop is added once Wait runs.
+	i.stopMu.Lock()
+	i.stopped.Store(true)
+	i.stopMu.Unlock()
+	i.autoRetryWg.Wait()
+	i.runs.Wait()
 }
 
 func NewInitializer(appCtx context.Context, logger *zerolog.Logger, conf *InitializerConfig) *Initializer {
@@ -416,66 +429,11 @@ func (i *Initializer) attemptRemainingTasks(respectBackoff bool) {
 				doneCh := t.createNewDoneChannel()
 				tasksToRun = append(tasksToRun, t)
 
-				go func(bt *BootstrapTask, doneCh chan struct{}, attemptID int32) {
-					// Close the channel when the function finishes
-					defer close(doneCh)
-
-					if i.appCtx.Err() != nil {
-						if bt.finishAttempt(attemptID, TaskFailed, i.appCtx.Err()) {
-							i.taskLogger().Warn().Str("task", bt.Name).Err(i.appCtx.Err()).Msg("initialization task context error")
-						}
-						wg.Done()
-						return
-					}
-
-					tctx, cancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout)
-					bt.ctxCancel.Store(cancel)
+				if !i.runs.Go(func() { i.runAttempt(t, doneCh, attemptID, &wg) }) {
+					t.finishAttempt(attemptID, TaskFailed, errInitializerStopped)
 					wg.Done()
-					err := bt.Fn(tctx)
-					if err == nil {
-						// If the function returns nil but context says we're canceled, treat it as an error
-						err = tctx.Err()
-					}
-
-					if err != nil {
-						// Detect fatal control errors without importing the common package to avoid cycles
-						var fatal interface{ IsTaskFatal() bool }
-						if errors.As(err, &fatal) {
-							// Fatal errors should stop retries
-							// Unwrap underlying error if available
-							underlying := err
-							if uw, ok := err.(interface{ Unwrap() error }); ok && uw.Unwrap() != nil {
-								underlying = uw.Unwrap()
-							}
-							if bt.finishAttempt(attemptID, TaskFatal, underlying) {
-								i.taskLogger().Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
-							}
-							return
-						}
-						if !errors.Is(err, context.Canceled) {
-							if cause := context.Cause(tctx); cause != nil {
-								err = cause
-							}
-						} else {
-							// Preserve a reason already set (e.g. by reap) when canceled.
-							if wr, ok := bt.lastErr.Load().(wrappedError); ok && wr.err != nil {
-								err = wr.err
-							}
-						}
-						terminal := TaskFailed
-						if errors.Is(err, context.DeadlineExceeded) {
-							terminal = TaskTimedOut
-						}
-						if bt.finishAttempt(attemptID, terminal, err) {
-							i.taskLogger().Warn().Str("task", bt.Name).Err(err).Str("state", terminal.String()).Msg("initialization task failed")
-						}
-					} else {
-						if bt.finishAttempt(attemptID, TaskSucceeded, nil) {
-							lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
-							i.taskLogger().Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
-						}
-					}
-				}(t, doneCh, attemptID)
+					close(doneCh)
+				}
 			} else {
 				wg.Done()
 			}
@@ -487,6 +445,72 @@ func (i *Initializer) attemptRemainingTasks(respectBackoff bool) {
 
 	// Wait for tasks to "start" running. To wait for them to finish, use WaitForTasks()
 	wg.Wait()
+}
+
+// errInitializerStopped fails an attempt the initializer can no longer
+// start: Wait began.
+var errInitializerStopped = errors.New("initializer stopped")
+
+// runAttempt runs attempt attemptID of bt and closes doneCh when it ends;
+// started is done once the attempt runs or failed to.
+func (i *Initializer) runAttempt(bt *BootstrapTask, doneCh chan struct{}, attemptID int32, started *sync.WaitGroup) {
+	defer close(doneCh)
+
+	if i.appCtx.Err() != nil {
+		if bt.finishAttempt(attemptID, TaskFailed, i.appCtx.Err()) {
+			i.taskLogger().Warn().Str("task", bt.Name).Err(i.appCtx.Err()).Msg("initialization task context error")
+		}
+		started.Done()
+		return
+	}
+
+	tctx, cancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout)
+	bt.ctxCancel.Store(cancel)
+	started.Done()
+	err := bt.Fn(tctx)
+	if err == nil {
+		// If the function returns nil but context says we're canceled, treat it as an error
+		err = tctx.Err()
+	}
+
+	if err == nil {
+		if bt.finishAttempt(attemptID, TaskSucceeded, nil) {
+			lastAttempt, _ := bt.lastAttempt.Load().(time.Time)
+			i.taskLogger().Info().Str("task", bt.Name).Dur("durationMs", time.Since(lastAttempt)).Msg("initialization task succeeded")
+		}
+		return
+	}
+	// Detect fatal control errors without importing the common package to avoid cycles
+	var fatal interface{ IsTaskFatal() bool }
+	if errors.As(err, &fatal) {
+		// Fatal errors should stop retries
+		// Unwrap underlying error if available
+		underlying := err
+		if uw, ok := err.(interface{ Unwrap() error }); ok && uw.Unwrap() != nil {
+			underlying = uw.Unwrap()
+		}
+		if bt.finishAttempt(attemptID, TaskFatal, underlying) {
+			i.taskLogger().Error().Str("task", bt.Name).Err(underlying).Msg("initialization task fatal error")
+		}
+		return
+	}
+	if !errors.Is(err, context.Canceled) {
+		if cause := context.Cause(tctx); cause != nil {
+			err = cause
+		}
+	} else {
+		// Preserve a reason already set (e.g. by reap) when canceled.
+		if wr, ok := bt.lastErr.Load().(wrappedError); ok && wr.err != nil {
+			err = wr.err
+		}
+	}
+	terminal := TaskFailed
+	if errors.Is(err, context.DeadlineExceeded) {
+		terminal = TaskTimedOut
+	}
+	if bt.finishAttempt(attemptID, terminal, err) {
+		i.taskLogger().Warn().Str("task", bt.Name).Err(err).Str("state", terminal.String()).Msg("initialization task failed")
+	}
 }
 
 func (i *Initializer) State() InitializationState {
@@ -599,10 +623,8 @@ func (i *Initializer) Status() *InitializerStatus {
 func (i *Initializer) Errors() error {
 	var errs []error
 	i.tasks.Range(func(key, value interface{}) bool {
-		t := value.(*BootstrapTask)
-		// Call Error() ONCE: a retry can store wrappedError{nil} between two
-		// calls, and the second would then dereference nil.
-		if te := t.Error(); te != nil {
+		// One load: a retry can clear lastErr between two Error() calls.
+		if te := value.(*BootstrapTask).Error(); te != nil {
 			errs = append(errs, te.Err)
 		}
 		return true

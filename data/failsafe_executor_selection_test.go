@@ -176,15 +176,22 @@ func TestNewCacheExecutor_DefaultsTheMethodToAWildcard(t *testing.T) {
 // headAwareConnector is a connector that also reports the head it serves.
 type headAwareConnector struct {
 	Connector
+	num  int64
 	ts   int64
 	ok   bool
 	seen string
 }
 
-func (h *headAwareConnector) CacheLatestBlockTimestamp(networkId string) (int64, bool) {
+func (h *headAwareConnector) CacheLatestBlock(networkId string) (int64, int64, bool) {
 	h.seen = networkId
-	return h.ts, h.ok
+	return h.num, h.ts, h.ok
 }
+
+func (h *headAwareConnector) RefreshLatestBlock(context.Context, string) ([]byte, time.Time) {
+	return nil, time.Time{}
+}
+
+func (h *headAwareConnector) CacheServer(string) string { return "" }
 
 // TestFailsafeConnector_PassesThroughTheHeadReport proves the realtime age
 // guard keeps working through the failsafe wrapper. If the wrapper stopped
@@ -194,12 +201,13 @@ func TestFailsafeConnector_PassesThroughTheHeadReport(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
 	t.Run("a head-aware connector's answer reaches the caller", func(t *testing.T) {
-		inner := &headAwareConnector{Connector: NewMockConnector("memory-1"), ts: 1717171717, ok: true}
+		inner := &headAwareConnector{Connector: NewMockConnector("memory-1"), num: 900, ts: 1717171717, ok: true}
 		fc, err := NewFailsafeConnector(context.Background(), &logger, inner, nil, nil)
 		require.NoError(t, err)
 
-		ts, ok := fc.CacheLatestBlockTimestamp("evm:1")
+		num, ts, ok := fc.CacheLatestBlock("evm:1")
 		assert.True(t, ok)
+		assert.Equal(t, int64(900), num)
 		assert.Equal(t, int64(1717171717), ts)
 		assert.Equal(t, "evm:1", inner.seen, "the network id must reach the wrapped connector unchanged")
 	})
@@ -208,8 +216,9 @@ func TestFailsafeConnector_PassesThroughTheHeadReport(t *testing.T) {
 		fc, err := NewFailsafeConnector(context.Background(), &logger, NewMockConnector("memory-1"), nil, nil)
 		require.NoError(t, err)
 
-		ts, ok := fc.CacheLatestBlockTimestamp("evm:1")
+		num, ts, ok := fc.CacheLatestBlock("evm:1")
 		assert.False(t, ok)
+		assert.Equal(t, int64(0), num)
 		assert.Equal(t, int64(0), ts)
 	})
 }

@@ -49,7 +49,6 @@ type Config struct {
 	Projects     []*ProjectConfig   `yaml:"projects,omitempty" json:"projects"`
 	RateLimiters *RateLimiterConfig `yaml:"rateLimiters,omitempty" json:"rateLimiters"`
 	Metrics      *MetricsConfig     `yaml:"metrics,omitempty" json:"metrics"`
-	Indexer      *IndexerConfig     `yaml:"indexer,omitempty" json:"indexer"`
 	ProxyPools   []*ProxyPoolConfig `yaml:"proxyPools,omitempty" json:"proxyPools"`
 	Tracing      *TracingConfig     `yaml:"tracing,omitempty" json:"tracing"`
 
@@ -86,21 +85,6 @@ var LegacyTranslateFn func(*Config) ([]string, error)
 // LegacyTranslateLogger lets the caller observe deprecation warnings
 // emitted by LegacyTranslateFn. If nil, warnings are dropped silently.
 var LegacyTranslateLogger func(warning string)
-
-// IndexerConfig tunes the transport-neutral event-stream indexer that
-// powers `eth_subscribe` fan-out and reorg-aware log invalidation. Most
-// deployments can leave this unset.
-type IndexerConfig struct {
-	// CanonicalChainDepth is the per-network ring-buffer size for the
-	// canonical-chain tracker. It bounds how deep a reorg the indexer
-	// can fully resolve — reorgs beyond this window get only the
-	// immediate head evicted. 0 uses the internal default (256).
-	CanonicalChainDepth int `yaml:"canonicalChainDepth,omitempty" json:"canonicalChainDepth"`
-	// DedupWindowSize is the per-filter seen-set capacity for log /
-	// pending-tx fan-out across sibling upstreams. 0 uses the internal
-	// default (8192).
-	DedupWindowSize int `yaml:"dedupWindowSize,omitempty" json:"dedupWindowSize"`
-}
 
 // LoadConfig loads the configuration from the specified file.
 // It supports both YAML and TypeScript (.ts) files.
@@ -304,6 +288,11 @@ type ServerConfig struct {
 	ResponseHeaders     map[string]string      `yaml:"responseHeaders,omitempty" json:"responseHeaders"`
 	WebSocket           *WebSocketServerConfig `yaml:"webSocket,omitempty" json:"webSocket"`
 
+	// MaxRequestBodySize caps one HTTP request body in bytes, counted after
+	// gzip decompression (0 = unlimited). An over-limit body gets HTTP 413
+	// and none of it runs.
+	MaxRequestBodySize *int64 `yaml:"maxRequestBodySize,omitempty" json:"maxRequestBodySize"`
+
 	// ExecutionHeaders controls the per-request diagnostic headers
 	// (X-ERPC-Attempts, X-ERPC-Upstreams-Tried, etc.) that expose how
 	// eRPC routed and resolved each request. Defaults to "all" — set
@@ -328,19 +317,15 @@ type WebSocketServerConfig struct {
 	MaxMessageSize                int64     `yaml:"maxMessageSize,omitempty" json:"maxMessageSize"`
 	PingInterval                  *Duration `yaml:"pingInterval,omitempty" json:"pingInterval" tstype:"Duration"`
 	MaxSubscriptionsPerConnection int       `yaml:"maxSubscriptionsPerConnection,omitempty" json:"maxSubscriptionsPerConnection"`
-	// NotifyBufferSize is a floor on each subscription's queue cap. The cap
-	// itself follows the protocol: two blocks of ceil(gasLimit / 375) logs.
-	// It never preallocates.
-	NotifyBufferSize int `yaml:"notifyBufferSize,omitempty" json:"notifyBufferSize"`
-	// NotifyBudgetBytes bounds the notification bytes queued across the
-	// whole process. Over it, the connection holding the most is closed
-	// with 4013.
-	NotifyBudgetBytes int64 `yaml:"notifyBudgetBytes,omitempty" json:"notifyBudgetBytes"`
-	// FallbackGasLimit sizes queue caps on a network before its first head.
-	FallbackGasLimit uint64 `yaml:"fallbackGasLimit,omitempty" json:"fallbackGasLimit"`
-	// CloseSlowSubscribers is retired: a slow subscriber is always closed
-	// with 4013. Still parsed so old configs load; setting it logs a warn.
-	CloseSlowSubscribers bool `yaml:"closeSlowSubscribers,omitempty" json:"closeSlowSubscribers"`
+	// NotifyBufferSize, NotifyBudgetBytes, FallbackGasLimit and
+	// CloseSlowSubscribers are retired: the chain-tracker subscriptions bound
+	// each connection's writer instead. They still parse, so old configs
+	// load, and a set value logs one warning.
+	NotifyBufferSize     int    `yaml:"notifyBufferSize,omitempty" json:"notifyBufferSize"`
+	NotifyBudgetBytes    int64  `yaml:"notifyBudgetBytes,omitempty" json:"notifyBudgetBytes"`
+	FallbackGasLimit     uint64 `yaml:"fallbackGasLimit,omitempty" json:"fallbackGasLimit"`
+	CloseSlowSubscribers bool   `yaml:"closeSlowSubscribers,omitempty" json:"closeSlowSubscribers"`
+
 	// MaxConcurrentRequestsPerConnection bounds the messages a connection has
 	// in flight; further frames wait (backpressure) instead of being rejected.
 	// A batch is one message; its requests run concurrently, as over HTTP.
@@ -478,10 +463,39 @@ type SharedStateConfig struct {
 	UpdateMaxWait Duration `yaml:"updateMaxWait,omitempty" json:"updateMaxWait" tstype:"Duration"`
 }
 
+// CachingStrategy controls write-side admission when combined with a response
+// cacheability mark (see AllowsCacheWrite). Cache hits are served with zero
+// re-validation, so modules that decide grades (consensus in v1) mark the
+// response instead of teaching the cache policy names.
+type CachingStrategy string
+
+const (
+	CachingStrategyDefaultAllow  CachingStrategy = "defaultAllow"
+	CachingStrategyDefaultIgnore CachingStrategy = "defaultIgnore"
+)
+
 type CacheConfig struct {
 	Connectors  []*ConnectorConfig   `yaml:"connectors,omitempty" json:"connectors" tstype:"TsConnectorConfig[]"`
 	Policies    []*CachePolicyConfig `yaml:"policies,omitempty" json:"policies"`
 	Compression *CompressionConfig   `yaml:"compression,omitempty" json:"compression"`
+	// CachingStrategy is the default write posture for unmarked responses.
+	// Omit → defaultAllow (today's open write). defaultIgnore writes only when
+	// a module marks the response cacheable (true).
+	CachingStrategy CachingStrategy `yaml:"cachingStrategy,omitempty" json:"cachingStrategy,omitempty" tstype:"'defaultAllow' | 'defaultIgnore'"`
+}
+
+// AllowsCacheWrite applies the strategy × mark decision table for Cache.Set.
+// mark nil = undecided (no module voted); true/false = explicit vote.
+func AllowsCacheWrite(strategy CachingStrategy, mark *bool) bool {
+	if strategy == "" {
+		strategy = CachingStrategyDefaultAllow
+	}
+	switch strategy {
+	case CachingStrategyDefaultIgnore:
+		return mark != nil && *mark
+	default: // defaultAllow and any unrecognized value treated as allow
+		return mark == nil || *mark
+	}
 }
 
 type CompressionConfig struct {
@@ -888,15 +902,16 @@ const (
 // Removed legacy nested UserAgentConfig; use ProjectConfig.UserAgentMode
 
 type NetworkDefaults struct {
-	RateLimitBudget   string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
-	Failsafe          FailsafeConfigList       `yaml:"failsafe,omitempty" json:"failsafe"`
-	SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
-	DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty" json:"directiveDefaults"`
-	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm" tstype:"TsEvmNetworkConfigForDefaults"`
-	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm" tstype:"TsSvmNetworkConfigForDefaults"`
-	Multiplexing      *bool                    `yaml:"multiplexing,omitempty" json:"multiplexing"`
-	Failover          *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
-	CacheKeySuffix    string                   `yaml:"cacheKeySuffix,omitempty" json:"cacheKeySuffix"`
+	RateLimitBudget    string                   `yaml:"rateLimitBudget,omitempty" json:"rateLimitBudget"`
+	Failsafe           FailsafeConfigList       `yaml:"failsafe,omitempty" json:"failsafe"`
+	SelectionPolicy    *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
+	DirectiveDefaults  *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty" json:"directiveDefaults"`
+	Evm                *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm" tstype:"TsEvmNetworkConfigForDefaults"`
+	Svm                *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm" tstype:"TsSvmNetworkConfigForDefaults"`
+	Multiplexing       *bool                    `yaml:"multiplexing,omitempty" json:"multiplexing"`
+	CacheKeySuffix     string                   `yaml:"cacheKeySuffix,omitempty" json:"cacheKeySuffix"`
+	Failover           *FailoverConfig          `yaml:"failover,omitempty" json:"failover"`
+	MaxClientBatchSize *int                     `yaml:"maxClientBatchSize,omitempty" json:"maxClientBatchSize"`
 }
 
 // FailoverConfig controls per-request escalation to fallback-tier upstreams,
@@ -1349,13 +1364,13 @@ type ShadowUpstreamConfig struct {
 	Enabled      bool                `yaml:"enabled" json:"enabled"`
 	SampleRate   *float64            `yaml:"sampleRate,omitempty" json:"sampleRate,omitempty"`
 	IgnoreFields map[string][]string `yaml:"ignoreFields,omitempty" json:"ignoreFields"`
-	// PinBlockTag rewrites a tag block selector ("latest"/"pending") in the mirrored copy to a
-	// concrete height before forwarding: the primary's resolved block number when its response
-	// carries one, else the network's tracked head at mirror time. Without it the shadow executes
-	// the tag at its OWN head wall-clock-later than the primary did, so any read of volatile state
-	// (pool reserves, oracle prices — most visibly large multicalls) diverges by construction and
-	// reports a mismatch that says nothing about correctness. Default false = mirror byte-identical
-	// requests, exactly as before.
+	// PinBlockTag rewrites a "latest" block selector (stated or omitted) of a state read in the
+	// mirrored copy to the block the primary was sent: its response's own block number when it
+	// carries one, else the request's Latest, or the serving upstream's own head when the tag
+	// reached it as is. Without it the shadow executes the tag at its OWN head wall-clock-later
+	// than the primary did, so any read of volatile state (pool reserves, oracle prices — most
+	// visibly large multicalls) diverges by construction and reports a mismatch that says nothing
+	// about correctness. Default false: the shadow is sent the primary's params as they are.
 	PinBlockTag bool `yaml:"pinBlockTag,omitempty" json:"pinBlockTag,omitempty"`
 }
 
@@ -1588,8 +1603,9 @@ type EvmUpstreamConfig struct {
 	StatePollerInterval Duration `yaml:"statePollerInterval,omitempty" json:"statePollerInterval" tstype:"Duration"`
 	// StatePollerDebounce overrides the debounce interval for the state poller.
 	// When 0 (default), the interval is dynamically inferred from the chain's
-	// observed block time, falling back to the network-level
-	// FallbackStatePollerDebounce, then to a 1s floor.
+	// observed block time; until that is known, the network-level
+	// FallbackStatePollerDebounce when set, else 0.7s (the 1s cold block
+	// time × dynamicBlockTimeDebounceMultiplier).
 	StatePollerDebounce                Duration                    `yaml:"statePollerDebounce,omitempty" json:"statePollerDebounce" tstype:"Duration"`
 	BlockAvailability                  *EvmBlockAvailabilityConfig `yaml:"blockAvailability,omitempty" json:"blockAvailability"`
 	GetLogsAutoSplittingRangeThreshold int64                       `yaml:"getLogsAutoSplittingRangeThreshold,omitempty" json:"getLogsAutoSplittingRangeThreshold"`
@@ -1615,12 +1631,21 @@ type EvmUpstreamConfig struct {
 	// upstream when its blockAvailability upper bound is below that head or the head is unknown.
 	// For an upstream whose own head lags the network: it answers only blocks it holds, and a block
 	// it lacks fails as missing data so the next upstream answers, instead of an older "latest".
+	// Never a request whose tag reaches upstreams as is (translateLatestTag: false, skip-interpolation).
 	PinLatestTag *bool `yaml:"pinLatestTag,omitempty" json:"pinLatestTag"`
 	// RequestFormat rewrites the params this upstream is sent into the request
 	// form its client parses correctly; other upstreams, the cache and the
 	// response keep the client's own params. Unset sends the params unchanged.
 	// See EvmRequestFormat for the values.
 	RequestFormat EvmRequestFormat `yaml:"requestFormat,omitempty" json:"requestFormat" tstype:"EvmRequestFormat"`
+	// SubscriptionSource sets when this ws/wss upstream pushes newHeads to
+	// the chain tracker: off, onDemand (while a client tap needs every
+	// block: eth_subscribe newHeads or logs, a gRPC block stream; it stops
+	// 60s after the last one ends) or always (from network init). Anything
+	// but off on another endpoint is refused at load: the block clock
+	// fetches every upstream's head. Unset: onDemand for ws/wss endpoints,
+	// off otherwise.
+	SubscriptionSource SubscriptionSourceMode `yaml:"subscriptionSource,omitempty" json:"subscriptionSource"`
 	// Deprecated: never read at runtime. Configure data integrity via the network
 	// `integrity` block instead. Retained only so existing YAML still parses.
 	DeprecatedIntegrity *UpstreamIntegrityConfig `yaml:"integrity,omitempty" json:"integrity"`
@@ -1897,6 +1922,34 @@ func (l *FailsafeConfigList) UnmarshalYAML(unmarshal func(interface{}) error) er
 	return nil
 }
 
+// SubscriptionSourceMode is when a ws/wss upstream pushes newHeads
+// (evm.subscriptionSource).
+type SubscriptionSourceMode string
+
+const (
+	SubscriptionSourceOff      SubscriptionSourceMode = "off"
+	SubscriptionSourceOnDemand SubscriptionSourceMode = "onDemand"
+	SubscriptionSourceAlways   SubscriptionSourceMode = "always"
+)
+
+// SubscriptionSource is the upstream's evm.subscriptionSource, or, unset,
+// onDemand for a ws/wss endpoint and off for any other.
+func (u *UpstreamConfig) SubscriptionSource() SubscriptionSourceMode {
+	if u.Evm != nil && u.Evm.SubscriptionSource != "" {
+		return u.Evm.SubscriptionSource
+	}
+	if util.IsWsEndpoint(u.Endpoint) {
+		return SubscriptionSourceOnDemand
+	}
+	return SubscriptionSourceOff
+}
+
+// IsShadow reports whether the upstream only receives copies of served
+// requests (shadow.enabled): it never serves, and never joins the network.
+func (u *UpstreamConfig) IsShadow() bool {
+	return u != nil && u.Shadow != nil && u.Shadow.Enabled
+}
+
 type FailsafeConfig struct {
 	MatchMethod   string              `yaml:"matchMethod,omitempty" json:"matchMethod"`
 	MatchFinality []DataFinalityState `yaml:"matchFinality,omitempty" json:"matchFinality"`
@@ -1907,14 +1960,10 @@ type FailsafeConfig struct {
 	// write methods (sendTransaction, simulateTransaction, requestAirdrop) are "none".
 	// Rejected at upstream and connector scopes.
 	MatchCommitment []string `yaml:"matchCommitment,omitempty" json:"matchCommitment" tstype:"('none' | 'processed' | 'confirmed' | 'finalized')[]"`
-	// MatchRequestKind scopes this policy by who issued the request:
-	// "user" (client traffic), "internal" (erpc's own auxiliary fetches, e.g.
-	// the integrity module's canonical corroboration), or ""/"*" for both.
-	// This is what lets an operator give INTERNAL canonical fetches a
-	// consensus policy (quorum-verified ground truth, deduplicated to ~once
-	// per block by the ChainView) while user data methods rely on integrity
-	// validation instead of per-request fan-out.
-	MatchRequestKind string                      `yaml:"matchRequestKind,omitempty" json:"matchRequestKind,omitempty" tstype:"'user' | 'internal' | '*'"`
+	// MatchRequestKind "user", "*" or "" matches every client request: no
+	// eRPC-own request (tracker fetch, head poll, probe) goes through a
+	// failsafe policy. "internal" is refused at load.
+	MatchRequestKind string                      `yaml:"matchRequestKind,omitempty" json:"matchRequestKind,omitempty" tstype:"'user' | '*'"`
 	Retry            *RetryPolicyConfig          `yaml:"retry" json:"retry"`
 	CircuitBreaker   *CircuitBreakerPolicyConfig `yaml:"circuitBreaker" json:"circuitBreaker"`
 	Timeout          *TimeoutPolicyConfig        `yaml:"timeout" json:"timeout"`
@@ -2264,14 +2313,14 @@ type ConsensusPolicyConfig struct {
 	// or field name for nested result objects (e.g., "nonce" for result.nonce).
 	// When multiple fields are specified, they act as tie-breakers in order.
 	PreferHighestValueFor map[string][]string `yaml:"preferHighestValueFor,omitempty" json:"preferHighestValueFor"`
-	// BlockEvidenceFields names, per method, the response field paths that
-	// carry the winner's own block number (e.g. eth_getTransactionByHash →
-	// ["blockNumber"]). It follows the same shape as PreferHighestValueFor:
-	// "result" for the direct result, or a field name for a nested result
-	// object. This is the block proof consumed by the empty-outside-retention
-	// waiver (requiredParticipants[].waiveAgreementOnEmptyOutsideRetention):
-	// the first resolved value is taken as the winner's block. A method not
-	// listed here has no proof, so the waiver never fires for it (dispute).
+	// BlockEvidenceFields is an opt-in that weakens the empty-outside-retention
+	// waiver. It names, per method, the response field paths that carry the
+	// winning answer's own block number ("result", a flat field such as
+	// "blockNumber", or "*.field" for array results). When neither the request
+	// nor a non-winner gives the waiver a block, it trusts this one. The
+	// agreeing upstreams then vouch for their own claim: two that collude can
+	// get a fabricated hash lookup served. A non-winner that contradicts the
+	// block still fails the waiver closed.
 	BlockEvidenceFields map[string][]string `yaml:"blockEvidenceFields,omitempty" json:"blockEvidenceFields,omitempty"`
 	// FireAndForget when true, allows consensus to return a response to the client immediately
 	// upon short-circuit, but does NOT cancel in-flight requests to other upstreams.
@@ -2345,6 +2394,14 @@ type ConsensusPolicyConfig struct {
 	// selection happens once, at the top level. Empty (default) = no named
 	// policies (only the inline default exists).
 	Policies map[string]*ConsensusPolicyConfig `yaml:"policies,omitempty" json:"policies,omitempty"`
+
+	// CacheableResponses marks whether responses produced under this policy may
+	// be persisted by the cache. Consensus.Run stamps the winning response with
+	// this value; Cache.Set combines it with cachingStrategy (feature
+	// cacheable-responses). Omit defaults: inline / fail-closed "default" →
+	// true; named policies.* → false (stamped before extends so extends:default
+	// does not inherit the inline true).
+	CacheableResponses *bool `yaml:"cacheableResponses,omitempty" json:"cacheableResponses,omitempty"`
 }
 
 // ConsensusDefaultPolicyName is the reserved label reported (metric +
@@ -2354,13 +2411,6 @@ type ConsensusPolicyConfig struct {
 // stays unambiguous between "selector chose the policy named default" and
 // "selector fell closed to the inline default".
 const ConsensusDefaultPolicyName = "default"
-
-// ConsensusDefaultEvalTimeout is the wall-clock cap applied when
-// customPolicy.evalTimeout is omitted (0). Kept in sync with
-// ConsensusPolicyConfig.SetDefaults so NewConsensus (used by tests and any
-// caller that skips SetDefaults) cannot disable the selector timeout by
-// accident.
-const ConsensusDefaultEvalTimeout = 50 * time.Millisecond
 
 // ConsensusCustomPolicyConfig configures the pre-round consensus-policy
 // selector. EvalFunction is the operator-supplied JS expression evaluating to
@@ -2403,25 +2453,26 @@ type ConsensusRequiredParticipant struct {
 	// WaiveAgreementOnEmptyOutsideRetention, when true, waives this entry's
 	// MinAgreement quota for a round in which at least MinAgreement distinct
 	// tag-matching participants returned an EMPTY result, no matching
-	// participant returned a non-empty result, AND the winning group's block
-	// (extracted via the policy's blockEvidenceFields) is older than
-	// RetentionBlocks behind the observed chain head. This is the v1.1
-	// empty-waiver: it lets an abstainer that legitimately pruned old history
-	// (e.g. post-EIP-4444) fall out of the quota when the winner proves the
-	// data is outside the abstainer's retained range, without weakening the
-	// quota for recent data — a null on a recent block still holds the quota
-	// and disputes. A matching sibling that returned data also holds the
-	// quota (that is a real vote, not a prune). Sibling errors do not block
-	// the empty count. Requires RetentionBlocks > 0 and a policy-level
-	// blockEvidenceFields entry for the method. Default false = the quota is
-	// never waived on empty (strict).
+	// participant returned a non-empty result, AND the block is older than
+	// RetentionBlocks behind the observed chain head. It lets an abstainer that
+	// legitimately pruned old history (e.g. post-EIP-4444) fall out of the
+	// quota without weakening the quota for recent data — a null on a recent
+	// block still holds the quota and disputes. The block is the one the
+	// client's request names. A hash lookup names none, so its answer's block
+	// counts only once an upstream outside the agreeing set confirms it;
+	// agreeing upstreams cannot fabricate the proof unless the policy opts
+	// into BlockEvidenceFields. Tag requests never waive.
+	// A matching sibling that returned data also holds the quota (that is a
+	// real vote, not a prune). Sibling errors do not block the empty count.
+	// Requires RetentionBlocks > 0.
+	// Default false = the quota is never waived on empty (strict).
 	WaiveAgreementOnEmptyOutsideRetention bool `yaml:"waiveAgreementOnEmptyOutsideRetention,omitempty" json:"waiveAgreementOnEmptyOutsideRetention,omitempty"`
 	// RetentionBlocks is the depth, in blocks behind the observed chain head,
 	// that this participant is expected to retain. It defines the boundary for
-	// WaiveAgreementOnEmptyOutsideRetention: a winner block is "outside
-	// retention" when head - winnerBlock > RetentionBlocks. Only meaningful when
-	// WaiveAgreementOnEmptyOutsideRetention is set. Default 0 = no retention
-	// boundary (the empty-waiver never fires).
+	// WaiveAgreementOnEmptyOutsideRetention: a requested block is "outside
+	// retention" when head - requestedBlock > RetentionBlocks. Only meaningful
+	// when WaiveAgreementOnEmptyOutsideRetention is set. Default 0 = no
+	// retention boundary (the empty-waiver never fires).
 	RetentionBlocks int64 `yaml:"retentionBlocks,omitempty" json:"retentionBlocks,omitempty"`
 }
 
@@ -2465,6 +2516,7 @@ func consensusPolicyRejectUnknownFields(value *yaml.Node) error {
 		"misbehaviorsDestination": true, "requiredParticipants": true, "blockEvidenceFields": true,
 		"fireAndForget": true, "maxWaitOnResult": true, "maxWaitOnEmpty": true,
 		"disputeLogLevel": true, "customPolicy": true, "policies": true, "extends": true,
+		"cacheableResponses": true,
 	}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		key := value.Content[i].Value
@@ -2535,6 +2587,10 @@ func (c *ConsensusPolicyConfig) Copy() *ConsensusPolicyConfig {
 	if c.PreferLargerResponses != nil {
 		v := *c.PreferLargerResponses
 		copied.PreferLargerResponses = &v
+	}
+	if c.CacheableResponses != nil {
+		v := *c.CacheableResponses
+		copied.CacheableResponses = &v
 	}
 
 	if c.RequiredParticipants != nil {
@@ -2912,6 +2968,12 @@ type NetworkConfig struct {
 	// When {networkId}:{suffix} is itself a valid network id, colons in the
 	// network id are escaped; see CachePartitionKey.
 	CacheKeySuffix string `yaml:"cacheKeySuffix,omitempty" json:"cacheKeySuffix"`
+	// MaxClientBatchSize caps how many requests one client JSON-RPC batch may
+	// address to this network. Unset inherits networkDefaults; unset there or
+	// 0 means no limit. An over-limit batch runs none of its requests.
+	// Distinct from upstream jsonRpc.batchMaxSize, which shapes the batches
+	// eRPC itself sends to an upstream.
+	MaxClientBatchSize *int `yaml:"maxClientBatchSize,omitempty" json:"maxClientBatchSize"`
 }
 
 // StaticResponseConfig declares a canned JSON-RPC response for a specific
@@ -2968,9 +3030,12 @@ type DirectiveDefaultsConfig struct {
 	// retained only so existing YAML still parses. At startup the flags that map
 	// to a current check are translated into `integrity.checks` by
 	// migrateLegacyIntegrityChecks (an explicit `integrity` block wins per check);
-	// they are NOT read at runtime. The receipt-count / expected-block /
-	// receipt-to-transaction flags have no equivalent in the new model and are
-	// accepted but ignored. See docs/pages/config/failsafe/integrity.mdx.
+	// they are NOT read at runtime, except validateTransactionsRoot: false,
+	// which also says the network's roots are not Ethereum's trie, so the
+	// chain tracker takes gasUsed 0 as an empty block. The receipt-count /
+	// expected-block / receipt-to-transaction flags have no equivalent in
+	// the new model and are accepted but ignored. See
+	// docs/pages/config/failsafe/integrity.mdx.
 	DeprecatedValidateTransactionsRoot        *bool   `yaml:"validateTransactionsRoot,omitempty" json:"validateTransactionsRoot"`
 	DeprecatedValidateHeaderFieldLengths      *bool   `yaml:"validateHeaderFieldLengths,omitempty" json:"validateHeaderFieldLengths"`
 	DeprecatedValidateTransactionFields       *bool   `yaml:"validateTransactionFields,omitempty" json:"validateTransactionFields"`
@@ -3093,6 +3158,13 @@ type SvmUpstreamConfig struct {
 	// private/local clusters with no published genesis hash still work.
 	CheckGenesisHash bool `yaml:"checkGenesisHash,omitempty" json:"checkGenesisHash"`
 
+	// StatePollerDebounce is a hard per-upstream override for the poll fan-out
+	// gate. When non-zero it short-circuits networks[*].svm.statePollerDebounce
+	// for this upstream only (same precedence shape as upstreams[*].evm.statePollerDebounce).
+	// Zero / omit inherits the network debounce after defaults. Does not disable
+	// the poller — 0 means inherit, never "off".
+	StatePollerDebounce Duration `yaml:"statePollerDebounce,omitempty" json:"statePollerDebounce" tstype:"Duration"`
+
 	// BlockAvailability is an operator restriction on the slot window this
 	// upstream may serve. Only what the operator declares is enforced; the
 	// upstream's oldest stored block (getBlocksWithLimit(0, 1)) is probed for
@@ -3194,6 +3266,9 @@ type EvmNetworkConfig struct {
 	// Nil uses the defaults: quorum 2, regression guard on, no guarantees. See
 	// EvmServedTipConfig.
 	ServedTip *EvmServedTipConfig `yaml:"servedTip,omitempty" json:"servedTip,omitempty"`
+	// ChainTracker configures the network's chain trackers: how far back they
+	// hold the chain and follow reorgs.
+	ChainTracker *EvmChainTrackerConfig `yaml:"chainTracker,omitempty" json:"chainTracker,omitempty"`
 
 	// ForwardBlockNumber sends eth_blockNumber to an upstream, as
 	// 0.3.0.5-valve did, instead of answering it from the served tip. An
@@ -3252,12 +3327,6 @@ type EvmNetworkConfig struct {
 	// `{net_peerCount: false}` routes net_peerCount to the upstreams. Every
 	// method in LocalAnswerMethods is answered by eRPC unless set false here.
 	LocalAnswers map[string]bool `yaml:"localAnswers,omitempty" json:"localAnswers,omitempty"`
-
-	// StripSubscribeFromBlockZero removes a zero `fromBlock` from eth_subscribe
-	// logs filters before forwarding upstream. fromBlock has no meaning for a
-	// live subscription, and backends that prune history reject it.
-	// DEFAULT: false.
-	StripSubscribeFromBlockZero *bool `yaml:"stripSubscribeFromBlockZero,omitempty" json:"stripSubscribeFromBlockZero,omitempty"`
 
 	// DynamicBlockTimeDebounceMultiplier scales the EMA-estimated block time to derive
 	// the debounce interval for block polling. A value of 0.7 means debounce = 70% of
@@ -3335,6 +3404,17 @@ type EvmNetworkConfig struct {
 	MaxFutureBlockRetryDistance *int64 `yaml:"maxFutureBlockRetryDistance,omitempty" json:"-"`
 }
 
+// EvmChainTrackerConfig sizes the window a chain tracker holds.
+type EvmChainTrackerConfig struct {
+	// ReorgWindow is the floor of the window in blocks, the window of group
+	// trackers, and the deepest reorg a tracker walks and replays (default
+	// 32). Raise it for deep-reorg chains (e.g. polygon 256).
+	ReorgWindow int `yaml:"reorgWindow,omitempty" json:"reorgWindow,omitempty"`
+	// MaxBackfill is how much chain time, compared on header timestamps, the
+	// network-wide tracker holds for resumable taps (default 5m).
+	MaxBackfill Duration `yaml:"maxBackfill,omitempty" json:"maxBackfill,omitempty" tstype:"Duration"`
+}
+
 // EvmServedTipConfig controls how the network derives the "latest"/"finalized"
 // block it advertises (and enforces) from its upstreams.
 //
@@ -3371,16 +3451,32 @@ type EvmServedTipConfig struct {
 	GuaranteedFor []string `yaml:"guaranteedFor,omitempty" json:"guaranteedFor,omitempty"`
 
 	// MaxRegressionBlocks is how far below the corroborated LIVE upstream head
-	// (the second-highest live head) the pick may fall before it is treated as
-	// a poisoned ballot rather than as reality. While a pick is below that
-	// bound the network keeps serving its last corroborated pick (in-process,
-	// for at most one minute, then it fails open and serves the pick as
-	// computed). 0 uses DefaultToleratedBlockHeadRollback (1024) — the same
-	// rollback tolerance the state poller and health tracker apply to a
-	// retreating head, so all three layers agree on what counts as a genuine
-	// deep correction. -1 disables the regression guard entirely; no other
-	// negative value is accepted.
+	// (the second-highest live head) the finalized pick may fall before it is
+	// treated as a poisoned ballot rather than as reality. While a pick is
+	// below that bound the network keeps serving its last corroborated pick
+	// (in-process, for at most one minute, then it fails open and serves the
+	// pick as computed). 0 uses DefaultToleratedBlockHeadRollback (1024) - the
+	// same rollback tolerance the state poller and health tracker apply to a
+	// retreating head - widened to twice the lane's typical finality step
+	// (the lower median of its last eight finalized advances), so a chain
+	// that finalizes in larger batches does not hold when one voter lags a
+	// batch. -1 disables the regression guard entirely; no other negative
+	// value is accepted.
 	MaxRegressionBlocks int64 `yaml:"maxRegressionBlocks,omitempty" json:"maxRegressionBlocks,omitempty"`
+
+	// FollowCacheHead lowers the "latest" a network-wide read takes to the
+	// cache's newest block while the cache would serve it, and keeps its
+	// "finalized" at or below it: the newest block of the first realtime
+	// cache policy, with a TTL, on a head-aware connector (the grpc driver)
+	// that serves eth_getBlockByNumber("latest") for this network, as long as
+	// that policy's realtime TTL admits its age. eth_blockNumber, latest
+	// blocks and tag interpolation then name a block the cache already holds,
+	// so follow-up reads of it hit the cache. Older or unknown: reads take
+	// the chain tracker's head. It never raises latest, and holds it at the
+	// value last served for at most one TTL rather than step back. The chain
+	// tracker, its pins and reorg handling, and every stream (newHeads, gRPC,
+	// taps) never see it.
+	FollowCacheHead bool `yaml:"followCacheHead,omitempty" json:"followCacheHead,omitempty"`
 }
 
 // ShortCircuitFutureBlocksEnabled reports whether a numbered eth_getBlockByNumber
@@ -3397,6 +3493,17 @@ func (c *EvmNetworkConfig) ServedTipQuorum() ServedTipQuorum {
 		return 0
 	}
 	return c.ServedTip.Quorum
+}
+
+// PollCadence is the head poll debounce at blockTime: blockTime ×
+// dynamicBlockTimeDebounceMultiplier, the default for an unset or
+// non-positive multiplier. Nil-receiver safe.
+func (c *EvmNetworkConfig) PollCadence(blockTime time.Duration) time.Duration {
+	mult := DefaultDynamicBlockTimeDebounceMultiplier
+	if c != nil && c.DynamicBlockTimeDebounceMultiplier != nil && *c.DynamicBlockTimeDebounceMultiplier > 0 {
+		mult = *c.DynamicBlockTimeDebounceMultiplier
+	}
+	return time.Duration(float64(blockTime) * mult)
 }
 
 // EvmIntegrityConfig is deprecated. Use DirectiveDefaultsConfig for validation settings.

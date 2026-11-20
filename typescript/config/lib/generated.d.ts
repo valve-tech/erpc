@@ -35,6 +35,103 @@ export interface AdaptiveDuration {
  */
 export type ArchitectureHandler = any;
 export declare const UpstreamTypeEvm: UpstreamType;
+/**
+ * HeadNeed is what a head Ask must produce (spec §6.8); the Ask's pace
+ * is the oldest evidence that meets it.
+ */
+export type HeadNeed = number;
+/**
+ * HeadNeedNumber: a fresh number; a shared counter whose report is
+ * younger than the pace meets it.
+ */
+export declare const HeadNeedNumber: HeadNeed;
+/**
+ * HeadNeedHash: a hash vote; only a local fetch sent within the pace
+ * meets it.
+ */
+export declare const HeadNeedHash: HeadNeed;
+/**
+ * HeadNeedFork: a hash need whose answer is fresh evidence of the
+ * node's head, whatever its earlier votes say (spec §6.3 fork poll):
+ * only a fork fetch meets it, sent after the Ask at pace 0, else
+ * within the pace.
+ */
+export declare const HeadNeedFork: HeadNeed;
+/**
+ * AskReason is a head Ask's caller, the reason label of
+ * erpc_head_ask_total (spec §6.8, §17).
+ */
+export type AskReason = string;
+/**
+ * AskClock: a lane's block clock (spec §6.8); every such fetch is a
+ * fire erpc_head_clock_total counts by kind.
+ */
+export declare const AskClock: AskReason;
+/**
+ * AskPoll: the latest part of an upstream's full poll, every
+ * statePollerInterval; a head the upstream pushed or a clock fetch
+ * within the interval meets it, within the interval plus a block, at
+ * most two intervals, while the clock has a turn of the upstream
+ * planned (ClockTurn).
+ */
+export declare const AskPoll: AskReason;
+export declare const AskRefusal: AskReason;
+export declare const AskSettle: AskReason;
+/**
+ * AskOutcome is how a head Ask was met, the outcome label of
+ * erpc_head_ask_total (spec §17).
+ */
+export type AskOutcome = string;
+/**
+ * AskFetched: the Ask started a fetch.
+ */
+export declare const AskFetched: AskOutcome;
+/**
+ * AskSharedFresh: the shared counter met a number need.
+ */
+export declare const AskSharedFresh: AskOutcome;
+/**
+ * AskInflight: a local fetch sent within the pace met it, in flight
+ * or answered.
+ */
+export declare const AskInflight: AskOutcome;
+/**
+ * AskBackoff: the upstream backs off; nothing was fetched.
+ */
+export declare const AskBackoff: AskOutcome;
+/**
+ * AskPushed: a head the upstream pushed within the pace met its
+ * poll's latest part; nothing was fetched.
+ */
+export declare const AskPushed: AskOutcome;
+/**
+ * HeadAnswer is what a head Ask gives its caller: the fetch's one
+ * outcome, the same for every waiter.
+ */
+export interface HeadAnswer {
+    outcome: AskOutcome;
+    /**
+     * Block is the upstream's latest counter after the outcome.
+     */
+    block: number;
+    /**
+     * At is when the evidence that met the Ask was taken: the meeting
+     * fetch's send, or the shared counter's report; zero with no evidence
+     * (backoff, a fork fetch queued and not yet sent).
+     */
+    at: any;
+    /**
+     * Next is when an Ask at the same pace may fetch again: the meeting
+     * fetch's send plus the pace or its backed-off cadence, the longer;
+     * zero when it may now.
+     */
+    next: any;
+}
+/**
+ * EvmHeader is a latest header past intake check 0, parsed once where it
+ * was fetched: the evm package's SourceHeader.
+ */
+export type EvmHeader = any;
 export type EvmUpstream = Upstream;
 /**
  * EvmStateProvenWriter is the OPTIONAL, separately-asserted surface the
@@ -168,6 +265,32 @@ export interface BlockTimeAdaptiveDuration {
     blockTimeMultiplier?: number;
 }
 export type CacheDAL = any;
+/**
+ * CachePurgeScope describes which cache keys an admin purge should match.
+ * Suffix must come from network config (never from API params).
+ */
+export interface CachePurgeScope {
+    networkid: string;
+    suffix: string;
+    method: string;
+    blockref: string;
+    dryrun: boolean;
+}
+/**
+ * CachePurgeResult is one connector's outcome from a purge (or dry-run).
+ */
+export interface CachePurgeResult {
+    connectorid: string;
+    driver: string;
+    matched: number;
+    deleted: number;
+    durationms: number;
+}
+/**
+ * CachePurger is an optional capability on a CacheDAL. Unsupported
+ * implementations must surface an error — never silently no-op.
+ */
+export type CachePurger = any;
 export interface MockCacheDal {
     mock: any;
 }
@@ -184,24 +307,8 @@ export interface Config {
     projects?: (ProjectConfig | undefined)[];
     rateLimiters?: RateLimiterConfig;
     metrics?: MetricsConfig;
-    indexer?: IndexerConfig;
     proxyPools?: (ProxyPoolConfig | undefined)[];
     tracing?: TracingConfig;
-}
-/**
- * IndexerConfig tunes the event-stream indexer behind eth_subscribe fan-out.
- */
-export interface IndexerConfig {
-    /**
-     * Deprecated: ignored; the indexer no longer tracks a canonical chain.
-     * Kept so configs that still set it load under strict decoding.
-     */
-    canonicalChainDepth?: number;
-    /**
-     * DedupWindowSize is the per-filter seen-set capacity for log and
-     * pending-tx fan-out across upstreams. 0 uses the default (8192).
-     */
-    dedupWindowSize?: number;
 }
 export interface ServerConfig {
     listenV4?: boolean;
@@ -413,10 +520,25 @@ export interface SharedStateConfig {
      */
     updateMaxWait?: Duration;
 }
+/**
+ * CachingStrategy controls write-side admission when combined with a response
+ * cacheability mark (see AllowsCacheWrite). Cache hits are served with zero
+ * re-validation, so modules that decide grades (consensus in v1) mark the
+ * response instead of teaching the cache policy names.
+ */
+export type CachingStrategy = string;
+export declare const CachingStrategyDefaultAllow: CachingStrategy;
+export declare const CachingStrategyDefaultIgnore: CachingStrategy;
 export interface CacheConfig {
     connectors?: TsConnectorConfig[];
     policies?: (CachePolicyConfig | undefined)[];
     compression?: CompressionConfig;
+    /**
+     * CachingStrategy is the default write posture for unmarked responses.
+     * Omit → defaultAllow (today's open write). defaultIgnore writes only when
+     * a module marks the response cacheable (true).
+     */
+    cachingStrategy?: 'defaultAllow' | 'defaultIgnore';
 }
 export interface CompressionConfig {
     enabled?: boolean;
@@ -949,13 +1071,13 @@ export interface ShadowUpstreamConfig {
         [key: string]: string[];
     };
     /**
-     * PinBlockTag rewrites a tag block selector ("latest"/"pending") in the mirrored copy to a
-     * concrete height before forwarding: the primary's resolved block number when its response
-     * carries one, else the network's tracked head at mirror time. Without it the shadow executes
-     * the tag at its OWN head wall-clock-later than the primary did, so any read of volatile state
-     * (pool reserves, oracle prices — most visibly large multicalls) diverges by construction and
-     * reports a mismatch that says nothing about correctness. Default false = mirror byte-identical
-     * requests, exactly as before.
+     * PinBlockTag rewrites a "latest" block selector (stated or omitted) of a state read in the
+     * mirrored copy to the block the primary was sent: its response's own block number when it
+     * carries one, else the request's Latest, or the serving upstream's own head when the tag
+     * reached it as is. Without it the shadow executes the tag at its OWN head wall-clock-later
+     * than the primary did, so any read of volatile state (pool reserves, oracle prices — most
+     * visibly large multicalls) diverges by construction and reports a mismatch that says nothing
+     * about correctness. Default false: the shadow is sent the primary's params as they are.
      */
     pinBlockTag?: boolean;
 }
@@ -1051,8 +1173,9 @@ export interface EvmUpstreamConfig {
     /**
      * StatePollerDebounce overrides the debounce interval for the state poller.
      * When 0 (default), the interval is dynamically inferred from the chain's
-     * observed block time, falling back to the network-level
-     * FallbackStatePollerDebounce, then to a 1s floor.
+     * observed block time; until that is known, the network-level
+     * FallbackStatePollerDebounce when set, else 0.7s (the 1s cold block
+     * time × dynamicBlockTimeDebounceMultiplier).
      */
     statePollerDebounce?: Duration;
     blockAvailability?: EvmBlockAvailabilityConfig;
@@ -1086,6 +1209,7 @@ export interface EvmUpstreamConfig {
      * upstream when its blockAvailability upper bound is below that head or the head is unknown.
      * For an upstream whose own head lags the network: it answers only blocks it holds, and a block
      * it lacks fails as missing data so the next upstream answers, instead of an older "latest".
+     * Never a request whose tag reaches upstreams as is (translateLatestTag: false, skip-interpolation).
      */
     pinLatestTag?: boolean;
     /**
@@ -1095,6 +1219,16 @@ export interface EvmUpstreamConfig {
      * See EvmRequestFormat for the values.
      */
     requestFormat?: EvmRequestFormat;
+    /**
+     * SubscriptionSource sets when this ws/wss upstream pushes newHeads to
+     * the chain tracker: off, onDemand (while a client tap needs every
+     * block: eth_subscribe newHeads or logs, a gRPC block stream; it stops
+     * 60s after the last one ends) or always (from network init). Anything
+     * but off on another endpoint is refused at load: the block clock
+     * fetches every upstream's head. Unset: onDemand for ws/wss endpoints,
+     * off otherwise.
+     */
+    subscriptionSource?: SubscriptionSourceMode;
     /**
      * Deprecated: never read at runtime. Configure data integrity via the network
      * `integrity` block instead. Retained only so existing YAML still parses.
@@ -1182,6 +1316,14 @@ export interface EvmAvailabilityBoundConfig {
     probe?: EvmAvailabilityProbeType;
     updateRate?: Duration;
 }
+/**
+ * SubscriptionSourceMode is when a ws/wss upstream pushes newHeads
+ * (evm.subscriptionSource).
+ */
+export type SubscriptionSourceMode = string;
+export declare const SubscriptionSourceOff: SubscriptionSourceMode;
+export declare const SubscriptionSourceOnDemand: SubscriptionSourceMode;
+export declare const SubscriptionSourceAlways: SubscriptionSourceMode;
 export interface FailsafeConfig {
     matchMethod?: string;
     matchFinality?: DataFinalityState[];
@@ -1195,15 +1337,11 @@ export interface FailsafeConfig {
      */
     matchCommitment?: ('none' | 'processed' | 'confirmed' | 'finalized')[];
     /**
-     * MatchRequestKind scopes this policy by who issued the request:
-     * "user" (client traffic), "internal" (erpc's own auxiliary fetches, e.g.
-     * the integrity module's canonical corroboration), or ""/"*" for both.
-     * This is what lets an operator give INTERNAL canonical fetches a
-     * consensus policy (quorum-verified ground truth, deduplicated to ~once
-     * per block by the ChainView) while user data methods rely on integrity
-     * validation instead of per-request fan-out.
+     * MatchRequestKind "user", "*" or "" matches every client request: no
+     * eRPC-own request (tracker fetch, head poll, probe) goes through a
+     * failsafe policy. "internal" is refused at load.
      */
-    matchRequestKind?: 'user' | 'internal' | '*';
+    matchRequestKind?: 'user' | '*';
     retry?: RetryPolicyConfig;
     circuitBreaker?: CircuitBreakerPolicyConfig;
     timeout?: TimeoutPolicyConfig;
@@ -1325,14 +1463,14 @@ export interface ConsensusPolicyConfig {
         [key: string]: string[];
     };
     /**
-     * BlockEvidenceFields names, per method, the response field paths that
-     * carry the winner's own block number (e.g. eth_getTransactionByHash →
-     * ["blockNumber"]). It follows the same shape as PreferHighestValueFor:
-     * "result" for the direct result, or a field name for a nested result
-     * object. This is the block proof consumed by the empty-outside-retention
-     * waiver (requiredParticipants[].waiveAgreementOnEmptyOutsideRetention):
-     * the first resolved value is taken as the winner's block. A method not
-     * listed here has no proof, so the waiver never fires for it (dispute).
+     * BlockEvidenceFields is an opt-in that weakens the empty-outside-retention
+     * waiver. It names, per method, the response field paths that carry the
+     * winning answer's own block number ("result", a flat field such as
+     * "blockNumber", or "*.field" for array results). When neither the request
+     * nor a non-winner gives the waiver a block, it trusts this one. The
+     * agreeing upstreams then vouch for their own claim: two that collude can
+     * get a fabricated hash lookup served. A non-winner that contradicts the
+     * block still fails the waiver closed.
      */
     blockEvidenceFields?: {
         [key: string]: string[];
@@ -1413,6 +1551,15 @@ export interface ConsensusPolicyConfig {
     policies?: {
         [key: string]: ConsensusPolicyConfig | undefined;
     };
+    /**
+     * CacheableResponses marks whether responses produced under this policy may
+     * be persisted by the cache. Consensus.Run stamps the winning response with
+     * this value; Cache.Set combines it with cachingStrategy (feature
+     * cacheable-responses). Omit defaults: inline / fail-closed "default" →
+     * true; named policies.* → false (stamped before extends so extends:default
+     * does not inherit the inline true).
+     */
+    cacheableResponses?: boolean;
 }
 /**
  * ConsensusDefaultPolicyName is the reserved label reported (metric +
@@ -1462,27 +1609,28 @@ export interface ConsensusRequiredParticipant {
      * WaiveAgreementOnEmptyOutsideRetention, when true, waives this entry's
      * MinAgreement quota for a round in which at least MinAgreement distinct
      * tag-matching participants returned an EMPTY result, no matching
-     * participant returned a non-empty result, AND the winning group's block
-     * (extracted via the policy's blockEvidenceFields) is older than
-     * RetentionBlocks behind the observed chain head. This is the v1.1
-     * empty-waiver: it lets an abstainer that legitimately pruned old history
-     * (e.g. post-EIP-4444) fall out of the quota when the winner proves the
-     * data is outside the abstainer's retained range, without weakening the
-     * quota for recent data — a null on a recent block still holds the quota
-     * and disputes. A matching sibling that returned data also holds the
-     * quota (that is a real vote, not a prune). Sibling errors do not block
-     * the empty count. Requires RetentionBlocks > 0 and a policy-level
-     * blockEvidenceFields entry for the method. Default false = the quota is
-     * never waived on empty (strict).
+     * participant returned a non-empty result, AND the block is older than
+     * RetentionBlocks behind the observed chain head. It lets an abstainer that
+     * legitimately pruned old history (e.g. post-EIP-4444) fall out of the
+     * quota without weakening the quota for recent data — a null on a recent
+     * block still holds the quota and disputes. The block is the one the
+     * client's request names. A hash lookup names none, so its answer's block
+     * counts only once an upstream outside the agreeing set confirms it;
+     * agreeing upstreams cannot fabricate the proof unless the policy opts
+     * into BlockEvidenceFields. Tag requests never waive.
+     * A matching sibling that returned data also holds the quota (that is a
+     * real vote, not a prune). Sibling errors do not block the empty count.
+     * Requires RetentionBlocks > 0.
+     * Default false = the quota is never waived on empty (strict).
      */
     waiveAgreementOnEmptyOutsideRetention?: boolean;
     /**
      * RetentionBlocks is the depth, in blocks behind the observed chain head,
      * that this participant is expected to retain. It defines the boundary for
-     * WaiveAgreementOnEmptyOutsideRetention: a winner block is "outside
-     * retention" when head - winnerBlock > RetentionBlocks. Only meaningful when
-     * WaiveAgreementOnEmptyOutsideRetention is set. Default 0 = no retention
-     * boundary (the empty-waiver never fires).
+     * WaiveAgreementOnEmptyOutsideRetention: a requested block is "outside
+     * retention" when head - requestedBlock > RetentionBlocks. Only meaningful
+     * when WaiveAgreementOnEmptyOutsideRetention is set. Default 0 = no
+     * retention boundary (the empty-waiver never fires).
      */
     retentionBlocks?: number;
 }
@@ -1687,9 +1835,12 @@ export interface DirectiveDefaultsConfig {
      * retained only so existing YAML still parses. At startup the flags that map
      * to a current check are translated into `integrity.checks` by
      * migrateLegacyIntegrityChecks (an explicit `integrity` block wins per check);
-     * they are NOT read at runtime. The receipt-count / expected-block /
-     * receipt-to-transaction flags have no equivalent in the new model and are
-     * accepted but ignored. See docs/pages/config/failsafe/integrity.mdx.
+     * they are NOT read at runtime, except validateTransactionsRoot: false,
+     * which also says the network's roots are not Ethereum's trie, so the
+     * chain tracker takes gasUsed 0 as an empty block. The receipt-count /
+     * expected-block / receipt-to-transaction flags have no equivalent in
+     * the new model and are accepted but ignored. See
+     * docs/pages/config/failsafe/integrity.mdx.
      */
     validateTransactionsRoot?: boolean;
     validateHeaderFieldLengths?: boolean;
@@ -1744,6 +1895,16 @@ export interface SvmNetworkConfig {
      */
     statePollerDebounce?: Duration;
     /**
+     * SkipProcessedSlotProbe skips the state poller's getSlot(processed)
+     * probe and lets the finalized probe feed LatestSlot. Default false
+     * (probe runs) — correct for any finality gap. Set true only on chains
+     * finalizing within ~1 slot of the processed tip (Alpenglow); on
+     * ~32-slot-gap chains (TowerBFT) it shifts the shred-lag cordon and
+     * availability windows by that gap. Plain bool: unset and false are the
+     * same (poll), matching the opt-in skip framing.
+     */
+    skipProcessedSlotProbe?: boolean;
+    /**
      * MaxFinalizedSlotLag bounds how many slots an upstream's FinalizedSlot may
      * trail the pool's highest FinalizedSlot before it is excluded from
      * consensus voting on finalized data. Only applied when a consensus policy
@@ -1792,6 +1953,14 @@ export interface SvmUpstreamConfig {
      */
     checkGenesisHash?: boolean;
     /**
+     * StatePollerDebounce is a hard per-upstream override for the poll fan-out
+     * gate. When non-zero it short-circuits networks[*].svm.statePollerDebounce
+     * for this upstream only (same precedence shape as upstreams[*].evm.statePollerDebounce).
+     * Zero / omit inherits the network debounce after defaults. Does not disable
+     * the poller — 0 means inherit, never "off".
+     */
+    statePollerDebounce?: Duration;
+    /**
      * BlockAvailability is an operator restriction on the slot window this
      * upstream may serve. Only what the operator declares is enforced; the
      * upstream's oldest stored block (getBlocksWithLimit(0, 1)) is probed for
@@ -1833,13 +2002,18 @@ export interface EvmNetworkConfig {
      * EvmServedTipConfig.
      */
     servedTip?: EvmServedTipConfig;
-  /**
-   * ForwardBlockNumber sends eth_blockNumber to an upstream, as
-   * 0.3.0.5-valve did, instead of answering it from the served tip. An
-   * answer below the served tip is raised to it; a fresher answer passes
-   * through. Nil or false keeps the local answer pinned to the served tip.
-   */
-  forwardBlockNumber?: boolean;
+    /**
+     * ChainTracker configures the network's chain trackers: how far back they
+     * hold the chain and follow reorgs.
+     */
+    chainTracker?: EvmChainTrackerConfig;
+    /**
+     * ForwardBlockNumber sends eth_blockNumber to an upstream, as
+     * 0.3.0.5-valve did, instead of answering it from the served tip. An
+     * answer below the served tip is raised to it; a fresher answer passes
+     * through. Nil or false keeps the local answer pinned to the served tip.
+     */
+    forwardBlockNumber?: boolean;
     getLogsMaxAllowedRange?: number;
     getLogsMaxAllowedAddresses?: number;
     getLogsMaxAllowedTopics?: number;
@@ -1901,13 +2075,6 @@ export interface EvmNetworkConfig {
     localAnswers?: {
         [key: string]: boolean;
     };
-    /**
-     * StripSubscribeFromBlockZero removes a zero `fromBlock` from eth_subscribe
-     * logs filters before forwarding upstream. fromBlock has no meaning for a
-     * live subscription, and backends that prune history reject it.
-     * DEFAULT: false.
-     */
-    stripSubscribeFromBlockZero?: boolean;
     /**
      * DynamicBlockTimeDebounceMultiplier scales the EMA-estimated block time to derive
      * the debounce interval for block polling. A value of 0.7 means debounce = 70% of
@@ -1975,6 +2142,22 @@ export interface EvmNetworkConfig {
     safeBlockSource?: string;
 }
 /**
+ * EvmChainTrackerConfig sizes the window a chain tracker holds.
+ */
+export interface EvmChainTrackerConfig {
+    /**
+     * ReorgWindow is the floor of the window in blocks, the window of group
+     * trackers, and the deepest reorg a tracker walks and replays (default
+     * 32). Raise it for deep-reorg chains (e.g. polygon 256).
+     */
+    reorgWindow?: number;
+    /**
+     * MaxBackfill is how much chain time, compared on header timestamps, the
+     * network-wide tracker holds for resumable taps (default 5m).
+     */
+    maxBackfill?: Duration;
+}
+/**
  * EvmServedTipConfig controls how the network derives the "latest"/"finalized"
  * block it advertises (and enforces) from its upstreams.
  * Both axes use one rule: among the eligible (selection-policy), non-syncing
@@ -2026,6 +2209,21 @@ export interface EvmServedTipConfig {
      * negative value is accepted.
      */
     maxRegressionBlocks?: number;
+    /**
+     * FollowCacheHead lowers the "latest" a network-wide read takes to the
+     * cache's newest block while the cache would serve it, and keeps its
+     * "finalized" at or below it: the newest block of the first realtime
+     * cache policy, with a TTL, on a head-aware connector (the grpc driver)
+     * that serves eth_getBlockByNumber("latest") for this network, as long as
+     * that policy's realtime TTL admits its age. eth_blockNumber, latest
+     * blocks and tag interpolation then name a block the cache already holds,
+     * so follow-up reads of it hit the cache. Older or unknown: reads take
+     * the chain tracker's head. It never raises latest, and holds it at the
+     * value last served for at most one TTL rather than step back. The chain
+     * tracker, its pins and reorg handling, and every stream (newHeads, gRPC,
+     * taps) never see it.
+     */
+    followCacheHead?: boolean;
 }
 /**
  * EvmIntegrityConfig is deprecated. Use DirectiveDefaultsConfig for validation settings.
@@ -2480,12 +2678,6 @@ export interface IntegritySettings {
      */
     invalidBehavior?: IntegrityInvalidBehaviorConfig;
     /**
-     * ReorgWindow is how many blocks back from the tip the integrity ChainView
-     * keeps a number→hash pin + header and tracks reorgs (default 32). Raise for
-     * deep-reorg chains (e.g. polygon 256).
-     */
-    reorgWindow?: number;
-    /**
      * ObserveOnly runs every enabled check but never lets a verdict touch the
      * response: violations that WOULD have been rejected are recorded with the
      * outcome "would_reject" and served anyway. This is the safe way to enable
@@ -2512,15 +2704,18 @@ export interface IntegritySettings {
      * rejects feed — for the selection policy to act on (e.g. the
      * misbehaviorRateAbove predicate); absence of proof has no effect at all,
      * and ObserveOnly suppresses the misbehavior recording like every other
-     * integrity effect. Requires follow to be enabled (the verified header is
-     * the trust anchor). Off by default.
+     * integrity effect. These pinned probes require follow to be enabled
+     * (the verified header is the trust anchor). Off by default. On, it also
+     * runs, from the network's first client request, the "latest" tag-state
+     * probe behind the tag-state gate, with or without follow; off, no probe
+     * runs and that gate skips no upstream.
      */
     stateProbe?: IntegrityStateProbeConfig;
     /**
-     * Follow turns the ChainView into an actual chain follower: it walks the
-     * chain forward block by block, requires each block to name its
-     * predecessor's hash, and reconciles reorgs by finding the common ancestor.
-     * Off by default — it costs one eth_getBlockByNumber per block per network.
+     * Follow opens one integrity follow tap per chain tracker at the
+     * network's first client request: it holds demand at its interval's
+     * pace, so source polls run while clients are quiet, and it drives the
+     * state prober on each new head. Off by default.
      */
     follow?: IntegrityFollowConfig;
     /**
@@ -2532,28 +2727,24 @@ export interface IntegritySettings {
     misbehaviorsDestination?: MisbehaviorsDestinationConfig;
 }
 /**
- * IntegrityFollowConfig configures the ChainView chain follower.
- * Following gives the module a CONTIGUOUS, parent-linked view of the chain
- * instead of the sparse scatter of heights that client traffic happens to
- * touch. That is what lets it answer "is this block canonical" from a verified
- * chain rather than from whichever source was observed first, and it is the
- * precondition for any check that compares consecutive headers.
+ * DefaultIntegrityFollowInterval is the follow tap's pace when its config
+ * sets none.
+ */
+export declare const DefaultIntegrityFollowInterval: typeof any;
+/**
+ * IntegrityFollowConfig configures the integrity follow tap.
  */
 export interface IntegrityFollowConfig {
     /**
-     * Enabled turns the follower on for this network. Default false.
+     * Enabled opens the follow tap for this network. Default false.
      */
     enabled?: boolean;
     /**
-     * Interval is how often to check for new blocks (default 1s). Keep it below
-     * the chain's block time or the follower will run a step behind.
+     * Interval is the pace the follow tap needs heads at (default 1s): while
+     * it is a network's only newHeads demand, the tracker asks upstreams for
+     * newer heads no more often than this.
      */
     interval?: Duration;
-    /**
-     * MaxBlocksPerTick bounds catch-up work per tick (default 16), so a
-     * follower starting far behind converges steadily instead of bursting.
-     */
-    maxBlocksPerTick?: number;
 }
 /**
  * IntegrityStateProbeConfig configures the per-upstream state-trie probes.
@@ -2845,12 +3036,158 @@ export declare const ArchitectureEvm: NetworkArchitecture;
 export declare const ArchitectureSvm: NetworkArchitecture;
 export type Network = any;
 /**
- * EvmNetwork is the EVM-specific view of a Network. Callers that need
- * block-number accessors or leader-upstream selection should go through the
- * EvmHighestLatestBlockNumber / EvmHighestFinalizedBlockNumber / EvmLeaderUpstream
- * helpers below, which type-assert and degrade to zero-value on mismatch.
+ * EvmNetwork is the EVM-specific view of a Network. Callers read the head
+ * through EvmHeadOf, which type-asserts and degrades to the zero Head.
  */
 export type EvmNetwork = Network;
+/**
+ * EvmHead is one lane's head (spec §6.4, §6.5), published as one value. The
+ * zero Head is an unknown one. Latest, LatestHash and Firm are the lane's
+ * one view, the chain tracker's; the rest is the head loop's number facts.
+ */
+export interface EvmHead {
+    /**
+     * Latest is the view's Head: the highest pin one counted hash vote
+     * holds, undisputed, within every guarantee, sticky until the pins move.
+     */
+    latest: number;
+    /**
+     * LatestHash is Latest's hash, the hash every transport sends there.
+     */
+    latesthash: string;
+    /**
+     * Firm is the highest block at or below Latest that q voters hold;
+     * routing and the refusal rule read it, nothing serves it alone.
+     */
+    firm: number;
+    /**
+     * Finalized is the q-th highest voter finalized number, at most Latest.
+     */
+    finalized: number;
+    /**
+     * Leader is the highest voter within Latest + maxRetryableBlockDistance.
+     */
+    leader: Upstream;
+    /**
+     * Ceiling is the raw max report of the lane's counted upstreams, at
+     * least Latest, which exists; 0 while any of them has none.
+     */
+    ceiling: number;
+    /**
+     * OldestReportAt is when the oldest counted report's evidence was
+     * taken: a poll's send time, a push's receive time; zero while one has
+     * none.
+     */
+    oldestreportat: any;
+    /**
+     * Reach and ReachAt are the counted report that puts the chain
+     * furthest once the blocks it made since each report are counted:
+     * Reach its head, ReachAt when its evidence was taken; zero ReachAt
+     * while a report has none. The refusal rule's near future reads them
+     * (ReachNow): no counted upstream can hold a block far above it.
+     */
+    reach: number;
+    reachat: any;
+    /**
+     * CeilingPeak is the highest Ceiling this instance published for the
+     * lane, and CeilingFellAt when Ceiling last fell below the one before
+     * it: a cursor between the two heights names a block no upstream
+     * reports any more (spec §10.1, §19 C16).
+     */
+    ceilingpeak: number;
+    ceilingfellat: any;
+    /**
+     * LatestAt is when the lane's view first stood at Latest; zero when
+     * Latest is not the view's Head (a limit, a guarantee cap, the cache
+     * head's anchor lowered it) or unknown.
+     */
+    latestat: any;
+    /**
+     * NextAt is the earliest time the lane's next block may come: LatestAt
+     * plus the shorter of half a block and the shortest recent step of the
+     * view; zero while LatestAt is, or too few steps or no block time are
+     * known.
+     */
+    nextat: any;
+}
+/**
+ * HeadRule is the refusal rule's row for block N on a request (spec §6.4).
+ */
+export type HeadRule = number;
+/**
+ * HeadServe: N ≤ Firm, or Latest or Firm unknown (tags and numbers
+ * reach upstreams unchanged).
+ */
+export declare const HeadServe: HeadRule;
+/**
+ * HeadThin: Firm < N ≤ Latest: fewer than q voters hold N yet.
+ */
+export declare const HeadThin: HeadRule;
+/**
+ * HeadBand: Latest < N ≤ ceiling, or the ceiling is unknown.
+ */
+export declare const HeadBand: HeadRule;
+/**
+ * HeadFuture: above the ceiling, every counted report younger than
+ * 1 bt: no counted upstream has N yet.
+ */
+export declare const HeadFuture: HeadRule;
+/**
+ * HeadStale: above the ceiling, a counted report 1 bt old or older:
+ * those reports are Asked before N is decided again. Never a request's
+ * verdict.
+ */
+export declare const HeadStale: HeadRule;
+/**
+ * HeadRefusal is the refusal rule's verdict for one request's block, taken
+ * once (spec §6.4), and the retryable misses its legs got since.
+ */
+export interface HeadRefusal {
+    rule: HeadRule;
+    block: number;
+    /**
+     * Latest is the Latest Block was decided against, 0 while the head
+     * was unknown: then no block was promised.
+     */
+    latest: number;
+    /**
+     * Ceiling is the ceiling Block was decided against: the one the
+     * near-future wait saw when Waited.
+     */
+    ceiling: number;
+    /**
+     * Waited: N, near the ceiling, waited up to W for it (spec §6.4 near
+     * future).
+     */
+    waited: boolean;
+    /**
+     * Held: Block is pinned in the lane's view, so it exists; only who
+     * holds it is open. Nothing Asks an upstream for it: each attempt
+     * waits for the upstream that most likely holds it soonest (spec §6.4
+     * held).
+     */
+    held: boolean;
+}
+/**
+ * RefusalLeg is one execution of a request: a consensus slot, a hedge
+ * leg, or a retry round's. One goroutine runs it.
+ */
+export interface RefusalLeg {
+}
+/**
+ * MissVerdict is what an empty or missing answer above Firm is to the leg
+ * that got it.
+ */
+export type MissVerdict = number;
+/**
+ * MissRetry: the leg's one retryable miss; the leg retries.
+ */
+export declare const MissRetry: MissVerdict;
+/**
+ * MissFinal: the answer after the leg's miss, sent as the upstream
+ * gave it.
+ */
+export declare const MissFinal: MissVerdict;
 /**
  * SvmNetwork is the SVM-specific view of a Network. Production Network
  * implementations satisfy this automatically when the underlying network is
@@ -2902,6 +3239,17 @@ export type ServedTipQuorum = number;
  * ServedTipQuorumMajority requires a strict majority of the voters.
  */
 export declare const ServedTipQuorumMajority: ServedTipQuorum;
+/**
+ * Invariant is one chain-tracking invariant (spec §15.3) counted by
+ * erpc_chain_tracker_invariant_violations_total (§17).
+ */
+export type Invariant = string;
+export declare const InvariantSentAboveHead: Invariant;
+export declare const InvariantTapGap: Invariant;
+export declare const InvariantRemovedUnsent: Invariant;
+export declare const InvariantPinsUnlinked: Invariant;
+export declare const InvariantFinalHashChanged: Invariant;
+export declare const InvariantLatestRegressed: Invariant;
 /**
  * TimeoutFunc computes the timeout for a request. Returns nil when no
  * timeout applies (caller skips context.WithTimeout).
@@ -2956,26 +3304,25 @@ export declare const CordonClassOperator: CordonClass;
  * (legacy call sites, internal probes, batch retries). Cordon/Uncordon
  * stay finality-agnostic because cordoning is an admin-level decision
  * about an entire (upstream, method) pair, not a per-finality bucket.
+ * Cordon and Uncordon stay class-less so existing tracker implementations
+ * keep compiling. Class-aware cordoning is the optional ClassedHealthTracker.
  */
 export type HealthTracker = any;
+/**
+ * ClassedHealthTracker is the optional capability for a cordon that carries a
+ * class. The consensus selector reads CordonClasses. A tracker that does not
+ * implement this still receives HealthTracker.Cordon/Uncordon; the class is
+ * not stored, and the selector does not treat that upstream as
+ * availability-only (the only class that permits a policy downgrade).
+ */
+export type ClassedHealthTracker = any;
 export type Upstream = any;
 /**
- * User is the authenticated caller. Beyond identity (Id) it carries the
- * per-caller capabilities resolved at authentication time. Capability fields
- * are populated ONLY by auth strategies; the trusted-header path
- * (NormalizedRequest.SetUserFromTrustedHeader) sets Id alone, so an
- * unvalidated header can never grant a capability.
+ * ClassedUpstream is the optional capability for an upstream that records a
+ * cordon class. In-tree upstreams implement it. Out-of-tree upstreams keep
+ * the class-less Upstream.Cordon/Uncordon methods.
  */
-export interface User {
-    id: string;
-    ratelimitbudget: string;
-    /**
-     * AllowClientDirectives is the client-directive wildcard pattern granted by
-     * the strategy that authenticated this user. Nil means "no strategy-level
-     * override" — the project-level pattern applies.
-     */
-    allowclientdirectives?: string;
-}
+export type ClassedUpstream = any;
 /**
  * MaxGrpcConnPoolSize is the upper bound accepted for a gRPC connection-pool
  * size. It guards against a fat-fingered value opening an absurd number of

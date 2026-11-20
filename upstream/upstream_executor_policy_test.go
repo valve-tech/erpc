@@ -113,7 +113,7 @@ func TestShouldRetry_CompositeRequestsAreNotRetriedAtTheUpstreamScope(t *testing
 	transport := common.NewErrEndpointTransportFailure(&url.URL{Host: "node"}, errors.New("connection reset"))
 	require.True(t, e.shouldRetry(req, nil, transport, 0), "sanity: the same error retries when not composite")
 
-	req.SetCompositeType(common.CompositeTypeLogsSplitProactive)
+	req.SetCompositeType(common.CompositeTypeLogsSplitOnError)
 	require.False(t, e.shouldRetry(req, nil, transport, 0))
 }
 
@@ -185,18 +185,16 @@ func TestComputeDelay_NoRetryPolicyMeansNoSleep(t *testing.T) {
 		newTestExecutor(t, &common.UpstreamFailsafeConfig{}).computeDelay(nil, nil, nil, 3))
 }
 
-func TestUpstreamBreakerEligible_HedgesAndProbesDoNotMoveTheBreaker(t *testing.T) {
-	// A hedge is a deliberate duplicate; the state poller's probes are not
-	// client traffic. Letting either count would cordon an upstream on the
-	// strength of requests no user ever made.
+func TestUpstreamBreakerEligible_HedgesAndCompositesDoNotMoveTheBreaker(t *testing.T) {
+	// A hedge is a deliberate duplicate, and a composite request is a fan-out
+	// of sub-calls. Letting either count would cordon an upstream on the
+	// strength of requests no user ever made. eRPC's own probes never reach
+	// this check: Run sends them past the breaker (see
+	// TestUpstreamExecutor_InternalRequestsSkipBreaker).
 	require.False(t, upstreamBreakerEligible(nil, true), "a hedge attempt must never count")
 
-	internal := requestFor(t, "eth_blockNumber")
-	internal.SetDirectives(&common.RequestDirectives{IsInternal: true})
-	require.False(t, upstreamBreakerEligible(internal, false), "an internal probe must never count")
-
 	composite := requestFor(t, "eth_getLogs")
-	composite.SetCompositeType(common.CompositeTypeLogsSplitProactive)
+	composite.SetCompositeType(common.CompositeTypeLogsSplitOnError)
 	require.False(t, upstreamBreakerEligible(composite, false), "a composite sub-call must never count")
 
 	require.True(t, upstreamBreakerEligible(requestFor(t, "eth_getBalance"), false),
@@ -271,7 +269,7 @@ func TestUpstreamExecutor_InternalRequestsBypassRetryEntirely(t *testing.T) {
 		Retry: &common.RetryPolicyConfig{MaxAttempts: 5, Delay: common.Duration(0)},
 	})
 	req := requestFor(t, "eth_blockNumber")
-	req.SetDirectives(&common.RequestDirectives{IsInternal: true})
+	req.SetDirectives(&common.RequestDirectives{UpstreamPolicies: common.UpstreamPoliciesTimeoutOnly})
 
 	attempts := 0
 	boom := common.NewErrEndpointServerSideException(errors.New("boom"), nil, 500)
@@ -341,7 +339,7 @@ func TestUpstreamExecutor_InternalProbesStillReachAnOpenBreakersUpstream(t *test
 	require.Equal(t, failsafe.StateOpen, e.Breaker().State())
 
 	probe := requestFor(t, "eth_blockNumber")
-	probe.SetDirectives(&common.RequestDirectives{IsInternal: true})
+	probe.SetDirectives(&common.RequestDirectives{UpstreamPolicies: common.UpstreamPoliciesTimeoutOnly})
 	_, err := e.Run(context.Background(), probe, inner)
 	require.Equal(t, 2, calls, "the internal probe must still reach the upstream")
 	require.True(t, errors.Is(err, boom))

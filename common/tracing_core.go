@@ -39,22 +39,10 @@ const (
 )
 
 var (
-	IsTracingEnabled bool
-
-	// IsTracingDetailed is the plain-bool view of the detailed-tracing flag.
-	// It stays for the packages that already read it directly. A plain read
-	// races with any concurrent write, so a test that must flip the flag while
-	// other goroutines run has to use SetTracingDetailed and TracingDetailed
-	// instead.
-	//
-	// Deprecated: read TracingDetailed(), write SetTracingDetailed().
-	IsTracingDetailed bool
-
-	// tracingDetailed carries the same flag in a form that a test can write
-	// while other goroutines read it. InitializeTracing and
-	// SetTracerProviderForTest write both this and IsTracingDetailed, so a
-	// process that only configures tracing at startup sees one value in both.
-	tracingDetailed atomic.Bool
+	// isTracingEnabled and isTracingDetailed are read on every span start,
+	// from request and background goroutines alike, while tests toggle them.
+	isTracingEnabled  atomic.Bool
+	isTracingDetailed atomic.Bool
 
 	tracerProvider *sdktrace.TracerProvider
 	tracer         trace.Tracer
@@ -64,23 +52,17 @@ var (
 	forceTraceMatchers []*ForceTraceMatcher
 )
 
-// TracingDetailed reports whether detailed tracing is on. It is safe to call
-// while another goroutine calls SetTracingDetailed, so a hot path that a test
-// wants to switch on and off must read the flag through this function.
-func TracingDetailed() bool {
-	return tracingDetailed.Load()
-}
+// IsTracingEnabled reports whether tracing is on.
+func IsTracingEnabled() bool { return isTracingEnabled.Load() }
 
-// SetTracingDetailed turns detailed tracing on or off and returns the previous
-// value, so the caller can restore it. It is safe to call while other
-// goroutines call TracingDetailed.
-//
-// It does NOT update the deprecated IsTracingDetailed variable, because writing
-// a plain bool is exactly the race this function exists to avoid. Code that
-// must follow a mid-flight change has to read TracingDetailed().
-func SetTracingDetailed(detailed bool) bool {
-	return tracingDetailed.Swap(detailed)
-}
+// IsTracingDetailed reports whether detailed spans and attributes are on.
+func IsTracingDetailed() bool { return isTracingDetailed.Load() }
+
+// SetTracingEnabled turns tracing on or off.
+func SetTracingEnabled(on bool) { isTracingEnabled.Store(on) }
+
+// SetTracingDetailed turns detailed tracing on or off.
+func SetTracingDetailed(on bool) { isTracingDetailed.Store(on) }
 
 func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *TracingConfig) error {
 	var err error
@@ -88,9 +70,8 @@ func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *Tracing
 	initOnce.Do(func() {
 		if cfg == nil || !cfg.Enabled {
 			logger.Info().Msg("OpenTelemetry tracing is disabled")
-			IsTracingEnabled = false
-			IsTracingDetailed = false
-			tracingDetailed.Store(false)
+			SetTracingEnabled(false)
+			SetTracingDetailed(false)
 			return
 		}
 
@@ -163,9 +144,8 @@ func InitializeTracing(ctx context.Context, logger *zerolog.Logger, cfg *Tracing
 		}))
 
 		tracer = otel.Tracer(instrumentationName)
-		IsTracingEnabled = true
-		IsTracingDetailed = cfg.Detailed
-		tracingDetailed.Store(cfg.Detailed)
+		SetTracingEnabled(true)
+		SetTracingDetailed(cfg.Detailed)
 
 		// Store force-trace matchers
 		forceTraceMatchers = cfg.ForceTraceMatchers
@@ -401,7 +381,7 @@ func matchesForceTraceMatcher(matcher *ForceTraceMatcher, network, method string
 // Call this after URL path parsing to enable network-based force-tracing for child spans.
 // Returns the updated context with network stored (always stores if non-empty, matching happens later).
 func SetForceTraceNetwork(ctx context.Context, network string) context.Context {
-	if !IsTracingEnabled || network == "" {
+	if !IsTracingEnabled() || network == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, forceTraceNetworkKey, network)

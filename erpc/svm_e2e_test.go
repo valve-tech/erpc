@@ -2,6 +2,7 @@ package erpc
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -42,6 +43,14 @@ func pollSvmUpstreams(t *testing.T, ctx context.Context, reg *upstream.Upstreams
 
 func setupTestSvmNetwork(t *testing.T, ctx context.Context, upstreams []*common.UpstreamConfig) *Network {
 	t.Helper()
+	return setupTestSvmNetworkWithConfig(t, ctx, nil, upstreams)
+}
+
+// setupTestSvmNetworkWithConfig is setupTestSvmNetwork with configure applied to
+// the network config (failsafe, directive defaults), defaulted as config
+// loading does.
+func setupTestSvmNetworkWithConfig(t *testing.T, ctx context.Context, configure func(*common.NetworkConfig), upstreams []*common.UpstreamConfig) *Network {
+	t.Helper()
 
 	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -77,10 +86,15 @@ func setupTestSvmNetwork(t *testing.T, ctx context.Context, upstreams []*common.
 			Commitment: "confirmed",
 		},
 	}
+	if configure != nil {
+		configure(networkConfig)
+		require.NoError(t, networkConfig.SetDefaults(upstreams, nil))
+	}
 	network, err := NewNetwork(
 		ctx, &log.Logger, "test", networkConfig,
 		rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil,
 	)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 
 	_ = upstreamsRegistry.BootstrapAndWait(ctx)
@@ -152,6 +166,7 @@ func setupTestSvmNetworkWithConsensus(
 		ctx, &log.Logger, "test", netCfg,
 		rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil,
 	)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 
 	upstreamsRegistry.Bootstrap(ctx)
@@ -196,7 +211,7 @@ func svmProjectForward(ctx context.Context, net *Network, req *common.Normalized
 // architectureHandler dispatch).
 func TestSvm_GetSlot_BasicProxy(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForSvmStatePoller("svm-basic-rpc1.localhost", 1000, 990)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,7 +244,7 @@ func TestSvm_GetSlot_BasicProxy(t *testing.T) {
 // call is made. A pending gock mock would leak if the upstream were hit.
 func TestSvm_GetGenesisHash_ShortCircuitForKnownCluster(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForSvmStatePoller("svm-genesis-rpc1.localhost", 1000, 990)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -260,7 +275,7 @@ func TestSvm_GetGenesisHash_ShortCircuitForKnownCluster(t *testing.T) {
 // secondary's result.
 func TestSvm_Failover(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForSvmStatePoller("svm-failover-rpc1.localhost", 1000, 990)
 	util.SetupMocksForSvmStatePoller("svm-failover-rpc2.localhost", 1000, 990)
 
@@ -322,7 +337,7 @@ func TestSvm_Failover(t *testing.T) {
 // propagated).
 func TestSvm_SendTransaction_NotRetriedAcrossUpstreams(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForSvmStatePoller("svm-sendtx-rpc1.localhost", 1000, 990)
 	util.SetupMocksForSvmStatePoller("svm-sendtx-rpc2.localhost", 1000, 990)
 
@@ -385,7 +400,7 @@ func TestSvm_SendTransaction_NotRetriedAcrossUpstreams(t *testing.T) {
 // but is listed under mainnet-beta.
 func TestSvm_GenesisHashMismatch_FailsBootstrap(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	// getGenesisHash returns the devnet hash even though the config says mainnet-beta.
 	// KnownGenesisHash("mainnet-beta") returns the Solana mainnet genesis; we return
@@ -469,7 +484,7 @@ func TestSvm_GenesisHashMismatch_FailsBootstrap(t *testing.T) {
 // gock mock and either fail or fall through to a real HTTP request.
 func TestSvm_CacheHit_ServedFromCacheOnSecondRequest(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForSvmStatePoller("svm-cache-rpc1.localhost", 1000, 990)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -532,6 +547,59 @@ func TestSvm_CacheHit_ServedFromCacheOnSecondRequest(t *testing.T) {
 		"second identical request must be served from cache")
 }
 
+// TestSvm_ConfigLessRead_ReachesUpstreamWithConfig: some providers answer
+// -32602 "missing value for required argument 1" to getBlock/getTransaction
+// sent without the optional config object, so eRPC never forwards those
+// config-less. With no network default it appends `{}` (agave's defaults);
+// with one it appends the commitment, as before. The mock matches only the
+// expected params, so a config-less forward fails the request.
+func TestSvm_ConfigLessRead_ReachesUpstreamWithConfig(t *testing.T) {
+	cases := []struct {
+		name, commitment, method, params, wantParams string
+	}{
+		{"getBlock/no-default", "", "getBlock", `[42]`, `"params":[42,{}]`},
+		{"getTransaction/no-default", "", "getTransaction", `["sig1"]`, `"params":["sig1",{}]`},
+		{"getBlock/default", "finalized", "getBlock", `[42]`, `"params":[42,{"commitment":"finalized"}]`},
+		{"getTransaction/default", "finalized", "getTransaction", `["sig1"]`, `"params":["sig1",{"commitment":"finalized"}]`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			util.ResetGock()
+			t.Cleanup(util.ResetGock)
+			host := fmt.Sprintf("svm-configless-%d.localhost", i)
+			util.SetupMocksForSvmStatePoller(host, 1000, 990)
+
+			var sent string
+			gock.New("http://" + host).
+				Post("").
+				Times(1).
+				Filter(func(r *http.Request) bool {
+					body := util.SafeReadBody(r)
+					if r.URL.Host != host || !strings.Contains(body, `"method":"`+tc.method+`"`) {
+						return false
+					}
+					sent = body
+					return strings.Contains(body, tc.wantParams)
+				}).
+				Reply(200).
+				BodyString(`{"jsonrpc":"2.0","id":1,"result":{"answered":true}}`)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			net, _ := setupTestSvmNetworkWithCommitment(t, ctx, tc.commitment, []*common.UpstreamConfig{
+				svmUpstreamConfig("rpc1", host),
+			})
+
+			body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":%q,"params":%s}`, tc.method, tc.params)
+			resp, err := svmProjectForward(ctx, net, common.NewNormalizedRequest([]byte(body)))
+			require.NoError(t, err, "upstream saw %s", sent)
+			jrr, err := resp.JsonRpcResponse()
+			require.NoError(t, err)
+			assert.Contains(t, string(jrr.GetResultBytes()), `"answered":true`, "upstream saw %s", sent)
+		})
+	}
+}
+
 // TestSvm_MixedProjectWithEvm verifies that a single PreparedProject can route
 // traffic for both an EVM network and an SVM network without the two paths
 // contaminating each other. Regression guard for the ArchitectureHandler
@@ -540,7 +608,7 @@ func TestSvm_CacheHit_ServedFromCacheOnSecondRequest(t *testing.T) {
 // partitioned by Host and by method namespace.
 func TestSvm_MixedProjectWithEvm(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	// Boot both architectures' state pollers against isolated hosts.
 	util.SetupMocksForEvmStatePoller() // EVM poller uses rpc1.localhost
@@ -667,7 +735,7 @@ func TestSvm_MixedProjectWithEvm(t *testing.T) {
 // asserts t.Errorf.
 func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	const (
 		freshHostA = "svm-cons-fresh-a.localhost"
@@ -776,6 +844,7 @@ func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 	require.NoError(t, netCfg.SetDefaults(upCfgs, nil))
 
 	net, err := NewNetwork(ctx, &log.Logger, "test", netCfg, rateLimiters, upsReg, mt, nil)
+	stopAtEnd(t, net)
 	require.NoError(t, err)
 
 	_ = upsReg.BootstrapAndWait(ctx)
@@ -790,7 +859,7 @@ func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 	//   fresh-a, fresh-b: 10_000   (manual advance via SuggestFinalizedSlot)
 	//   stale:            ~990     (poller-published, unchanged)
 	//
-	// HighestFinalizedSlot over the pool → 10000.
+	// ReferenceFinalizedSlot over the pool → 10000.
 	// Lag: fresh=0, stale = 10000 - 990 = 9010 → far beyond MaxFinalizedSlotLag=100.
 	// The filter must exclude `stale` from the consensus pool.
 	for _, u := range upsReg.GetNetworkUpstreams(ctx, util.SvmNetworkId("", "mainnet-beta")) {
@@ -840,7 +909,7 @@ func TestSvm_GetSlot_FinalizedIndexingLag_BlockFetchable(t *testing.T) {
 	)
 
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	// State poller: latestSlot=10100, finalizedSlot=10064, shredInsertSlot=10032.
 	// shredInsertSlot (10032) < finalizedSlot (10064) simulates the devnet case where
 	// the provider's indexer is behind the consensus tip. The hook must use the
@@ -940,7 +1009,7 @@ func TestSvm_GetSlot_FinalizedIndexingLag_BlockFetchable(t *testing.T) {
 // Only min(poolMaxFinalized, indexed) serves 1050 and rejects 1195.
 func TestSvm_GetBlock_UnpinnedCommitment_SkewedRoots_ServedByLeadingUpstream(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	const (
 		lagHost  = "svm-skew-lag.localhost"
@@ -1035,6 +1104,19 @@ func setupTestSvmNetworkFinalized(t *testing.T, ctx context.Context, upstreams [
 // of every SDK call that omits the field.
 func setupTestSvmNetworkWithCommitment(t *testing.T, ctx context.Context, commitment string, upstreams []*common.UpstreamConfig) (*Network, *upstream.UpstreamsRegistry) {
 	t.Helper()
+	return setupTestSvmNetworkFromConfig(t, ctx, &common.NetworkConfig{
+		Architecture: common.ArchitectureSvm,
+		Svm: &common.SvmNetworkConfig{
+			Cluster:    "mainnet-beta",
+			Commitment: commitment,
+		},
+	}, upstreams)
+}
+
+// setupTestSvmNetworkFromConfig builds the SVM network from a caller-owned
+// config, e.g. one carrying a production-shaped failsafe policy.
+func setupTestSvmNetworkFromConfig(t *testing.T, ctx context.Context, networkConfig *common.NetworkConfig, upstreams []*common.UpstreamConfig) (*Network, *upstream.UpstreamsRegistry) {
+	t.Helper()
 
 	rateLimitersRegistry, _ := upstream.NewRateLimitersRegistry(context.Background(), &common.RateLimiterConfig{}, &log.Logger)
 	metricsTracker := health.NewTracker(&log.Logger, "test", time.Minute)
@@ -1061,18 +1143,11 @@ func setupTestSvmNetworkWithCommitment(t *testing.T, ctx context.Context, commit
 		upstreams, ssr, rateLimitersRegistry, vr, pr,
 		nil, metricsTracker, nil,
 	)
-
-	networkConfig := &common.NetworkConfig{
-		Architecture: common.ArchitectureSvm,
-		Svm: &common.SvmNetworkConfig{
-			Cluster:    "mainnet-beta",
-			Commitment: commitment,
-		},
-	}
 	network, err := NewNetwork(
 		ctx, &log.Logger, "test", networkConfig,
 		rateLimitersRegistry, upstreamsRegistry, metricsTracker, nil,
 	)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 
 	_ = upstreamsRegistry.BootstrapAndWait(ctx)

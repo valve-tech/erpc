@@ -146,9 +146,11 @@ func TestEvmNetworkConfig_Validate_RequiredNumbers(t *testing.T) {
 	e.FallbackFinalityDepth = 0
 	require.ErrorContains(t, e.Validate(), "fallbackFinalityDepth must be greater than 0")
 
+	// fallbackStatePollerDebounce 0 is valid since #1335: the poller falls
+	// back to the cold block time at the poll cadence.
 	e = validEvmNetwork()
 	e.FallbackStatePollerDebounce = 0
-	require.ErrorContains(t, e.Validate(), "fallbackStatePollerDebounce is required")
+	require.NoError(t, e.Validate())
 
 	e = validEvmNetwork()
 	e.GetLogsMaxAllowedRange = 0

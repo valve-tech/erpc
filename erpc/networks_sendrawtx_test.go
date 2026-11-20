@@ -46,7 +46,7 @@ const expectedEIP1559TxHash = "0xb9f61197f9c6c63a6981ba69fb22308469d03a4e013b10b
 func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	t.Run("AlreadyKnownReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -90,7 +90,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("NonceTooLowWithMatchingTxReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -156,7 +156,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("NonceTooLowWithNoMatchingTxReturnsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -222,7 +222,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// instead of failing over to ErrUpstreamsExhausted or treating as already-known.
 	t.Run("HyperEVMCode10055WithMatchingTxReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -282,7 +282,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("HyperEVMCode10055WithNoMatchingTxReturnsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -331,7 +331,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("ExecutionRevertedIsRetryableAcrossUpstreams", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -392,7 +392,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("AllUpstreamsRevertReturnsRevertError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -450,7 +450,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("HedgeWorksForSendRawTransaction", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -512,7 +512,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("ReplacementUnderpricedRemainsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -549,7 +549,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("IdempotentBroadcastDisabledReturnsRawError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -589,7 +589,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// This is a regression test for typed transactions not being decoded correctly
 	t.Run("EIP1559AlreadyKnownReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleEIP1559SignedTx + `"]}`)
@@ -635,7 +635,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Some upstreams return -32003 (transaction rejected) with "already known" or "nonce too low" messages
 	t.Run("AlreadyKnownWith32003CodeReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -679,7 +679,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 
 	t.Run("NonceTooLowWith32003CodeAndMatchingTxReturnsSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -753,7 +753,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Happy path: First upstream succeeds immediately (most common case)
 	t.Run("FirstUpstreamSucceedsImmediately", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -791,7 +791,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Geth-style "known transaction: <hash>" message
 	t.Run("GethStyleKnownTransactionWithHash", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -833,7 +833,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Insufficient funds should fail fast instead of retrying across upstreams.
 	t.Run("InsufficientFundsIsNotRetriedAcrossUpstreams", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -895,7 +895,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Verification call returns error (not null) - should return original nonce error
 	t.Run("NonceTooLowVerificationReturnsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -950,7 +950,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// User sends same tx twice: first succeeds, second gets "already known" - both should succeed
 	t.Run("SameTransactionSentTwice", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1014,7 +1014,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Format: 0x01 || rlp([chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s])
 	t.Run("EIP2930AccessListTransaction", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// EIP-2930 transaction (type 1) - access list transaction
@@ -1062,7 +1062,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Invalid transaction hex - should return error gracefully
 	t.Run("InvalidTransactionHex", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Invalid hex (not a valid transaction)
@@ -1102,7 +1102,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Alternative message: "nonce has already been used" (Alchemy format)
 	t.Run("AlchemyStyleNonceAlreadyUsed", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1156,7 +1156,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Base fee error - should NOT be converted to success (not idempotent)
 	t.Run("MaxFeePerGasLessThanBaseFeeRemainsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleEIP1559SignedTx + `"]}`)
@@ -1194,7 +1194,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// HTTP 500 from upstream - should be retryable
 	t.Run("HTTP500IsRetryable", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1246,7 +1246,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Contract deployment transaction (to = null) - should work with idempotency
 	t.Run("ContractDeploymentAlreadyKnown", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Contract deployment transaction (legacy type-0, to field is empty)
@@ -1293,7 +1293,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Retry + Hedge combined policies
 	t.Run("RetryAndHedgeCombined", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1360,7 +1360,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// First upstream returns connection error, second succeeds
 	t.Run("FirstUpstreamConnectionErrorSecondSucceeds", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1411,7 +1411,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// "tx underpriced" (not replacement) - should be retryable, not idempotent
 	t.Run("TxUnderpricedIsRetryable", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1472,7 +1472,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// upstreams: pool contents/policies are node-local.
 	t.Run("MempoolPriorityRejectionFailsOverToNextUpstream", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1533,7 +1533,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// ServerSideException (which would count toward the circuit breaker).
 	t.Run("MempoolPolicyRejectionTerminalWhenAllUpstreamsReject", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1580,7 +1580,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// "transaction type not supported" - should return error (not idempotent)
 	t.Run("TransactionTypeNotSupportedRemainsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleEIP1559SignedTx + `"]}`)
@@ -1618,7 +1618,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Empty params array - should return error gracefully
 	t.Run("EmptyParamsReturnsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Request with empty params
@@ -1657,7 +1657,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// Non-string first param - should return error gracefully
 	t.Run("NonStringParamReturnsError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Request with non-string param (number instead of hex string)
@@ -1696,7 +1696,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 	// "already imported" message variation (Besu format)
 	t.Run("BesuStyleAlreadyImported", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -1756,7 +1756,7 @@ func TestNetwork_SendRawTransaction_Idempotency(t *testing.T) {
 func TestNetwork_SendRawTransaction_NetworkPostForwardIntegration(t *testing.T) {
 	t.Run("AllUpstreams500_TxInNetwork_ReturnsSyntheticSuccess", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Use the EIP-1559 fixture: its expectedEIP1559TxHash constant is the
@@ -1864,7 +1864,7 @@ func TestNetwork_SendRawTransaction_NetworkPostForwardIntegration(t *testing.T) 
 
 	t.Run("AllUpstreams500_TxNotInNetwork_PropagatesOriginalError", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Same EIP-1559 fixture as the sibling subtest (matching pair of
@@ -1937,7 +1937,7 @@ func TestNetwork_SendRawTransaction_NetworkPostForwardIntegration(t *testing.T) 
 func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 	t.Run("FireAndForgetBroadcastsToAllUpstreams", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2022,7 +2022,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 
 	t.Run("FireAndForgetReturnsFirstSuccessWhileOthersComplete", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2100,7 +2100,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 
 	t.Run("FireAndForgetHandlesSlowUpstreams", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2182,7 +2182,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 
 	t.Run("FireAndForgetWithMixedResponses", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2268,7 +2268,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 	// context.WithCancel(ctx) would inherit parent cancellation, defeating fire-and-forget.
 	t.Run("FireAndForgetSurvivesParentContextCancellation", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2379,7 +2379,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 	// This tests the ctx.Done() branch in executor.go, not the short-circuit branch.
 	t.Run("FireAndForgetSurvivesParentCancellationBeforeShortCircuit", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		requestBytes := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`)
@@ -2467,7 +2467,7 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 
 	t.Run("AllUpstreamsRejectReturnsWithoutWaitingOnHedges", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		var upstreamConfigs []*common.UpstreamConfig
@@ -2548,11 +2548,12 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 		assert.Less(t, elapsed, 3*time.Second)
 	})
 
-	for _, message := range []string{"transaction underpriced", "replacement transaction underpriced"} {
+	for _, message := range []string{"transaction underpriced", "replacement transaction underpriced", "nonce too high"} {
 		message := message
-		t.Run("UnderpricedFromEveryUpstreamIsNotRetried/"+message, func(t *testing.T) {
-			// Minimum gas price and mempool contents are node-local, so each
-			// upstream gets one try; once all refuse, the broadcast ends.
+		t.Run("NodeLocalRefusalFromEveryUpstreamIsNotRetried/"+message, func(t *testing.T) {
+			// Minimum gas price, mempool contents and the head a node has
+			// applied are node-local, so each upstream gets one try; once all
+			// refuse, the broadcast ends.
 			calls, elapsed, err := forwardSendEveryUpstreamRefuses(t, -32000, message)
 
 			require.Error(t, err)
@@ -2565,6 +2566,233 @@ func TestNetwork_SendRawTransaction_FireAndForget(t *testing.T) {
 			assert.LessOrEqual(t, totalCalls(calls), int64(sendBroadcastParticipants),
 				"an upstream that refused must not be asked again: %v", calls)
 			assert.Less(t, elapsed, 3*time.Second)
+		})
+	}
+
+	// A nonce gap ("nonce too high") on every upstream is a verdict on the
+	// sender's nonce, not an upstream fault: the client must get the node's
+	// message once each upstream refused, no upstream is retried in place, and
+	// a stream of them must not open the upstream breakers, which would also
+	// refuse the reads (eth_getTransactionCount) a relayer needs to repair its
+	// nonce.
+	for _, refusal := range []struct {
+		code    int
+		message string
+	}{
+		{-32000, "nonce too high"},
+		{-32006, "Nonce too high"},
+		{-32000, "Transaction nonce is too distant from current sender nonce"},
+		{-32000, "nonce gap too large: transaction nonce is too far ahead of sender's on-chain nonce"},
+	} {
+		code, message := refusal.code, refusal.message
+		t.Run("NonceTooHighEverywhereKeepsBreakersClosed/"+message, func(t *testing.T) {
+			util.ResetGock()
+			t.Cleanup(util.ResetGock)
+			util.SetupMocksForEvmStatePoller()
+
+			sends := map[string]*atomic.Int64{}
+			for _, endpoint := range []string{"http://rpc1.localhost", "http://rpc2.localhost"} {
+				sent := &atomic.Int64{}
+				sends[endpoint] = sent
+				gock.New(endpoint).
+					Post("").
+					Persist().
+					Filter(func(r *http.Request) bool {
+						if !strings.Contains(util.SafeReadBody(r), "eth_sendRawTransaction") {
+							return false
+						}
+						sent.Add(1)
+						return true
+					}).
+					Reply(200).
+					JSON(map[string]interface{}{
+						"jsonrpc": "2.0",
+						"id":      1,
+						"error":   map[string]interface{}{"code": code, "message": message},
+					})
+				gock.New(endpoint).
+					Post("").
+					Persist().
+					Filter(func(r *http.Request) bool {
+						return strings.Contains(util.SafeReadBody(r), "eth_getTransactionCount")
+					}).
+					Reply(200).
+					JSON(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": "0x9"})
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			breaker := []*common.FailsafeConfig{{
+				CircuitBreaker: &common.CircuitBreakerPolicyConfig{
+					FailureThresholdCount:    2,
+					FailureThresholdCapacity: 2,
+					HalfOpenAfter:            common.Duration(5 * time.Minute),
+				},
+			}}
+			network := setupTwoUpstreamNetworkForSkip(t, ctx, breaker, breaker, nil, nil,
+				[]*common.FailsafeConfig{{Retry: &common.RetryPolicyConfig{MaxAttempts: 3}}},
+				nil, nil,
+			)
+			t.Cleanup(cancel)
+
+			const broadcasts = 4
+			for range broadcasts {
+				req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
+				_, err := network.Forward(ctx, req)
+				require.Error(t, err)
+				assert.True(t, common.HasErrorCode(err, common.ErrCodeEndpointExecutionException),
+					"client must get the node's refusal, got: %v", err)
+				assert.Contains(t, err.Error(), message)
+			}
+			// The network retry (3 attempts) may revisit an upstream after
+			// all have refused; an in-place upstream retry would exceed it.
+			var total int64
+			for endpoint, sent := range sends {
+				assert.GreaterOrEqual(t, sent.Load(), int64(broadcasts),
+					"each broadcast must ask %s", endpoint)
+				total += sent.Load()
+			}
+			assert.LessOrEqual(t, total, int64(broadcasts*3),
+				"a broadcast must not retry the upstream that refused")
+
+			req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":2,"method":"eth_getTransactionCount","params":["0x3535353535353535353535353535353535353535","pending"]}`))
+			resp, err := network.Forward(ctx, req)
+			require.NoError(t, err, "nonce refusals must not open the breakers that serve reads")
+			jrr, err := resp.JsonRpcResponse()
+			require.NoError(t, err)
+			assert.Equal(t, `"0x9"`, string(jrr.GetResultBytes()))
+		})
+	}
+
+	// An upstream whose head lags has not applied the sender's last mined
+	// transaction, so it reads the next nonce as a gap and refuses with
+	// "nonce too high" while up-to-date upstreams accept the transaction.
+	// That refusal must never be the client's answer while another upstream
+	// accepts.
+	const acceptedTxHash = "0x0a8c6b4a9d1e1f0d6b3c9e2f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7"
+	mockLaggingAndFreshUpstreams := func(lagging string, fresh []string, freshDelay time.Duration) (refusals *atomic.Int64) {
+		refusals = &atomic.Int64{}
+		gock.New("http://" + lagging + ".localhost").
+			Post("").
+			Persist().
+			Filter(func(r *http.Request) bool {
+				if !strings.Contains(util.SafeReadBody(r), "eth_sendRawTransaction") {
+					return false
+				}
+				refusals.Add(1)
+				return true
+			}).
+			Reply(200).
+			JSON(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"error":   map[string]interface{}{"code": -32000, "message": "nonce too high"},
+			})
+		for _, id := range fresh {
+			gock.New("http://" + id + ".localhost").
+				Post("").
+				Persist().
+				Filter(func(r *http.Request) bool {
+					return strings.Contains(util.SafeReadBody(r), "eth_sendRawTransaction")
+				}).
+				Reply(200).
+				Delay(freshDelay).
+				JSON(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": acceptedTxHash})
+		}
+		return refusals
+	}
+
+	for _, tc := range []struct {
+		name     string
+		failsafe []*common.FailsafeConfig
+	}{
+		// The sweep itself must fail over: a project that sets no network
+		// failsafe has no retry round to fall back on.
+		{"NoNetworkRetry", nil},
+		{"NetworkRetry", []*common.FailsafeConfig{{Retry: &common.RetryPolicyConfig{MaxAttempts: 3}}}},
+	} {
+		t.Run("NonceTooHighFromLaggingUpstreamFailsOverToFreshUpstream/"+tc.name, func(t *testing.T) {
+			util.ResetGock()
+			t.Cleanup(util.ResetGock)
+			util.SetupMocksForEvmStatePoller()
+			refusals := mockLaggingAndFreshUpstreams("rpc1", []string{"rpc2"}, 0)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			network := setupTwoUpstreamNetworkForSkip(t, ctx, nil, nil, nil, nil, tc.failsafe, nil, nil)
+			t.Cleanup(cancel)
+
+			for range 4 {
+				req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
+				resp, err := network.Forward(ctx, req)
+				require.NoError(t, err, "a fresh upstream accepts the transaction")
+				jrr, err := resp.JsonRpcResponse()
+				require.NoError(t, err)
+				assert.Equal(t, `"`+acceptedTxHash+`"`, string(jrr.GetResultBytes()))
+			}
+			assert.Positive(t, refusals.Load(), "the lagging upstream must be asked at least once")
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		failsafe *common.FailsafeConfig
+	}{
+		{"ProductionBroadcast", &common.FailsafeConfig{
+			MatchMethod: "eth_sendRawTransaction",
+			Hedge: &common.HedgePolicyConfig{
+				MaxCount: 2,
+				Delay:    common.NewStaticDuration(500 * time.Millisecond),
+			},
+			Retry: &common.RetryPolicyConfig{MaxAttempts: 6},
+			Consensus: &common.ConsensusPolicyConfig{
+				MaxParticipants:    sendBroadcastParticipants,
+				AgreementThreshold: 1,
+				FireAndForget:      true,
+			},
+		}},
+		// With no retry or hedge, the refusal alone meets the agreement
+		// threshold; it must not end the round while acceptances are pending.
+		{"ConsensusOnly", &common.FailsafeConfig{
+			MatchMethod: "eth_sendRawTransaction",
+			Consensus: &common.ConsensusPolicyConfig{
+				MaxParticipants:    4,
+				AgreementThreshold: 1,
+				FireAndForget:      true,
+			},
+		}},
+	} {
+		t.Run("NonceTooHighFromLaggingUpstreamDoesNotEndBroadcast/"+tc.name, func(t *testing.T) {
+			util.ResetGock()
+			t.Cleanup(util.ResetGock)
+			util.SetupMocksForEvmStatePoller()
+			ids := []string{"rpc1", "rpc2", "rpc3", "rpc4"}
+			// The lagging upstream answers first, so the consensus round sees its
+			// refusal before any acceptance.
+			refusals := mockLaggingAndFreshUpstreams("rpc1", ids[1:], 150*time.Millisecond)
+			var upstreamConfigs []*common.UpstreamConfig
+			for _, id := range ids {
+				upstreamConfigs = append(upstreamConfigs, &common.UpstreamConfig{
+					Type:     common.UpstreamTypeEvm,
+					Id:       id,
+					Endpoint: "http://" + id + ".localhost",
+					Evm:      &common.EvmUpstreamConfig{ChainId: 123},
+				})
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			network := setupSendRawTxNetwork(t, ctx, upstreamConfigs, &common.NetworkConfig{
+				Architecture: common.ArchitectureEvm,
+				Evm:          &common.EvmNetworkConfig{ChainId: 123},
+				Failsafe:     []*common.FailsafeConfig{tc.failsafe},
+			})
+			t.Cleanup(cancel)
+
+			req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
+			resp, err := network.Forward(ctx, req)
+			require.NoError(t, err, "fresh upstreams accept the transaction")
+			jrr, err := resp.JsonRpcResponse()
+			require.NoError(t, err)
+			assert.Equal(t, `"`+acceptedTxHash+`"`, string(jrr.GetResultBytes()))
+			assert.Positive(t, refusals.Load(), "the lagging upstream must be asked")
 		})
 	}
 }
@@ -2619,7 +2847,6 @@ func forwardSendEveryUpstreamRefuses(t *testing.T, code int, message string) (ma
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 
 	network := setupSendRawTxNetwork(t, ctx, upstreamConfigs, &common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
@@ -2638,6 +2865,9 @@ func forwardSendEveryUpstreamRefuses(t *testing.T, code int, message string) (ma
 			},
 		}},
 	})
+	// After setup: cleanups run last-in first-out, so the app ctx ends
+	// before stopAtEnd's check (test_lifetime_test.go).
+	t.Cleanup(cancel)
 
 	start := time.Now()
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":["` + sampleSignedTx + `"]}`))
@@ -2918,6 +3148,7 @@ func setupSendRawTxNetwork(t *testing.T, ctx context.Context, upstreamConfigs []
 		metricsTracker,
 		nil,
 	)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 
 	_ = upstreamsRegistry.BootstrapAndWait(ctx)

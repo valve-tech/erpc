@@ -191,7 +191,7 @@ func TestArchitectureByName_ResolvesAKnownFamilyAndRefusesAnUnknownOne(t *testin
 		if !ok {
 			t.Fatalf("chain %d names family %q, which ArchitectureByName cannot resolve", chainId, spec.Architecture)
 		}
-		if a.Header == nil && a.Fee == nil && len(a.Disable) == 0 && a.StateContext == nil {
+		if a.Header == nil && a.Fee == nil && len(a.Disable) == 0 {
 			t.Fatalf("family %q resolved to an entirely empty profile", spec.Architecture)
 		}
 		return

@@ -35,7 +35,7 @@ func lagNetwork(project string, head int64) *mockNetwork {
 	n := new(mockNetwork)
 	n.On("ProjectId").Return(project).Maybe()
 	n.On("Id").Return("evm:1").Maybe()
-	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(head).Maybe()
+	n.On("HeadLatest", mock.Anything).Return(head).Maybe()
 	return n
 }
 
@@ -45,9 +45,9 @@ func TestNetworkPostForward_GetBlockByNumber_PublishesTheLatestBlockAge(t *testi
 
 	// Detailed tracing adds the block-number and timestamp span attributes.
 	// Turn it on so the whole lag block runs, and put it back afterwards.
-	prev := common.IsTracingDetailed
-	common.IsTracingDetailed = true
-	defer func() { common.IsTracingDetailed = prev }()
+	prev := common.IsTracingDetailed()
+	common.SetTracingDetailed(true)
+	defer func() { common.SetTracingDetailed(prev) }()
 
 	blockTs := time.Now().Add(-90 * time.Second).Unix()
 	n := lagNetwork(project, 110)

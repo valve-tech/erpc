@@ -25,7 +25,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 	t.Run("DebugSkipBehavior", func(t *testing.T) {
 		// This test logs the actual behavior to understand what's happening
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
@@ -77,6 +77,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			rlr, upsReg, mt,
 			nil,
 		)
+		stopAtEnd(t, ntw)
 		ntw.Bootstrap(ctx)
 
 		req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x1234",false]}`))
@@ -111,7 +112,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 
 	t.Run("UseUpstream_SingleMatch_AllSkip_ShouldExhaustNotTimeout", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
@@ -161,6 +162,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			rlr, upr, mt,
 			nil,
 		)
+		stopAtEnd(t, ntw)
 		require.NoError(t, err)
 		require.NoError(t, ntw.Bootstrap(ctx))
 
@@ -182,7 +184,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 
 	t.Run("AllUpstreamsReturnSkipError_ShouldNotInfiniteLoop", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 
@@ -296,6 +298,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			mt,
 			nil,
 		)
+		stopAtEnd(t, ntw)
 		require.NoError(t, err)
 
 		// Bootstrap network
@@ -352,7 +355,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 
 	t.Run("MixedUpstreams_SomeSkipSomeWork", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Setup a successful response for the upstream that doesn't skip
@@ -464,6 +467,7 @@ func TestNetwork_Forward_InfiniteLoopWithAllUpstreamsSkipping(t *testing.T) {
 			mt,
 			nil,
 		)
+		stopAtEnd(t, ntw)
 		require.NoError(t, err)
 
 		err = ntw.Bootstrap(ctx)
@@ -542,6 +546,7 @@ func TestNetwork_Forward_UseUpstreamTagSelector(t *testing.T) {
 			},
 			rlr, upr, mt, nil,
 		)
+		stopAtEnd(t, ntw)
 		require.NoError(t, err)
 		require.NoError(t, ntw.Bootstrap(ctx))
 		return ntw
@@ -549,7 +554,7 @@ func TestNetwork_Forward_UseUpstreamTagSelector(t *testing.T) {
 
 	t.Run("TagSelector_RoutesWithinFamily", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 
 		// Only the systx endpoint (rpc1) is allowed to serve the forward; if
@@ -581,7 +586,7 @@ func TestNetwork_Forward_UseUpstreamTagSelector(t *testing.T) {
 
 	t.Run("TagSelector_NoMatch_FailsFast", func(t *testing.T) {
 		util.ResetGock()
-		defer util.ResetGock()
+		t.Cleanup(util.ResetGock)
 		util.SetupMocksForEvmStatePoller()
 		defer util.AssertNoPendingMocks(t, 0)
 

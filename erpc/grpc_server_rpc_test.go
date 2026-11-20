@@ -333,8 +333,10 @@ func TestGrpcGetLogs_SendsASingleAddressAsAScalar(t *testing.T) {
 
 	filter := h.node.lastParams("eth_getLogs")[0].(map[string]interface{})
 	assert.Equal(t, addr, filter["address"], "one address goes out as a scalar, not a list")
-	assert.NotContains(t, filter, "fromBlock", "an unset bound must not be invented")
-	assert.NotContains(t, filter, "toBlock")
+	// The gRPC layer sets no bound; the network spells an absent bound out as
+	// the request's Head (upstream #1335, spec §7; TestInterpolation_EveryForm),
+	// so both bounds reach the node as one number.
+	assert.Equal(t, filter["fromBlock"], filter["toBlock"], "absent bounds are filled with the one Head number")
 	assert.NotContains(t, filter, "topics")
 }
 

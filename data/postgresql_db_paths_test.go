@@ -122,9 +122,9 @@ func TestPostgreSQLConnector_DatabasePaths(t *testing.T) {
 		// Only the detail flag is raised. No tracer is installed in this
 		// binary, so the spans stay no-ops; the flag alone is what decides
 		// whether the connector builds the attributes at all.
-		prevDetailed := common.IsTracingDetailed
-		common.IsTracingDetailed = true
-		t.Cleanup(func() { common.IsTracingDetailed = prevDetailed })
+		prevDetailed := common.IsTracingDetailed()
+		common.SetTracingDetailed(true)
+		t.Cleanup(func() { common.SetTracingDetailed(prevDetailed) })
 
 		lg := zerolog.New(io.Discard)
 		c := newConnector(t, ctx, &lg, "pg-traced", uri, "traced_items", false)

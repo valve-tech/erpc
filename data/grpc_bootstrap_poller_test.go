@@ -31,9 +31,8 @@ func newPollerConnector(t *testing.T, networkId string, cli clients.GrpcBdsClien
 		appCtx:             context.Background(),
 		clientByNetwork:    map[string]clients.GrpcBdsClient{networkId: cli},
 		earliestByNetwork:  map[string]uint64{},
-		latestByNetwork:    map[string]uint64{},
+		latestByNetwork:    map[string]latestBlock{},
 		finalizedByNetwork: map[string]uint64{},
-		latestTsByNetwork:  map[string]int64{},
 	}
 }
 
@@ -330,7 +329,7 @@ func TestNewGrpcConnector_RegistersOneClientPerChain(t *testing.T) {
 	g.pollBlockHeadsOnce(ctx)
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	assert.Equal(t, uint64(777), g.latestByNetwork["evm:42161"])
+	assert.Equal(t, uint64(777), g.latestByNetwork["evm:42161"].number)
 }
 
 // A configured header must reach the wire on every call the connector makes.
@@ -379,29 +378,29 @@ func TestPollBlockHeadsOnce_RefreshesAllThreeTags(t *testing.T) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	assert.Equal(t, uint64(10), g.earliestByNetwork["evm:1"])
-	assert.Equal(t, uint64(900), g.latestByNetwork["evm:1"])
+	assert.Equal(t, uint64(900), g.latestByNetwork["evm:1"].number)
 	assert.Equal(t, uint64(880), g.finalizedByNetwork["evm:1"])
-	assert.Equal(t, int64(1700000000), g.latestTsByNetwork["evm:1"])
+	assert.Equal(t, int64(1700000000), g.latestByNetwork["evm:1"].timestamp)
 }
 
 // The head timestamp the poller stores is what CacheHeadReporter serves to the
 // realtime cache-age guard. Before the first successful poll it must report
 // "unknown" so the guard fails open instead of judging freshness by zero.
-func TestCacheLatestBlockTimestamp_UnknownUntilThePollerRuns(t *testing.T) {
+func TestCacheLatestBlock_UnknownUntilThePollerRuns(t *testing.T) {
 	t.Parallel()
 	addr, fake, _ := startFakeBdsServer(t, 1)
 	fake.SetBlock("latest", 900, 1700000000)
 
 	g := newPollerConnector(t, "evm:1", dialFake(t, addr))
 
-	_, known := g.CacheLatestBlockTimestamp("evm:1")
+	_, _, known := g.CacheLatestBlock("evm:1")
 	assert.False(t, known, "no poll has run yet, so the head time must be unknown")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	g.pollBlockHeadsOnce(ctx)
 
-	ts, known := g.CacheLatestBlockTimestamp("evm:1")
+	_, ts, known := g.CacheLatestBlock("evm:1")
 	assert.True(t, known)
 	assert.Equal(t, int64(1700000000), ts)
 }
@@ -431,7 +430,7 @@ func TestPollBlockHeadsOnce_ATransientFailureKeepsThePreviousValues(t *testing.T
 	defer g.mu.RUnlock()
 	assert.Equal(t, uint64(10), g.earliestByNetwork["evm:1"], "a failed earliest must not zero the known value")
 	assert.Equal(t, uint64(880), g.finalizedByNetwork["evm:1"], "a failed finalized must not zero the known value")
-	assert.Equal(t, uint64(950), g.latestByNetwork["evm:1"], "the tag that did answer must still advance")
+	assert.Equal(t, uint64(950), g.latestByNetwork["evm:1"].number, "the tag that did answer must still advance")
 }
 
 // A server that answers with no block at all is also a non-answer. It must not
@@ -451,7 +450,7 @@ func TestPollBlockHeadsOnce_AnEmptyBlockAnswerKeepsThePreviousValue(t *testing.T
 
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	assert.Equal(t, uint64(900), g.latestByNetwork["evm:1"], "an empty answer must not be read as block 0")
+	assert.Equal(t, uint64(900), g.latestByNetwork["evm:1"].number, "an empty answer must not be read as block 0")
 }
 
 // The head timestamp moves in lockstep with the head number. A latest block
@@ -471,13 +470,13 @@ func TestPollBlockHeadsOnce_AnAdvancedHeadWithNoTimestampReportsUnknown(t *testi
 	fake.SetBlock("latest", 950, 0)
 	g.pollBlockHeadsOnce(ctx)
 
-	ts, known := g.CacheLatestBlockTimestamp("evm:1")
+	_, ts, known := g.CacheLatestBlock("evm:1")
 	assert.False(t, known, "the head advanced with no time, so the reported head time must be unknown")
 	assert.Zero(t, ts)
 
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	assert.Equal(t, uint64(950), g.latestByNetwork["evm:1"])
+	assert.Equal(t, uint64(950), g.latestByNetwork["evm:1"].number)
 }
 
 // The poller speaks EVM. A Solana network must be skipped outright: the three
@@ -497,7 +496,7 @@ func TestPollBlockHeadsOnce_SkipsANonEvmNetwork(t *testing.T) {
 	assert.Zero(t, fake.BlockCalls(), "an SVM network must cost the poller no round trips")
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	assert.Zero(t, g.latestByNetwork["svm:mainnet"])
+	assert.Zero(t, g.latestByNetwork["svm:mainnet"].number)
 }
 
 // The earliest block the poller learns is what makes Get reject a request for

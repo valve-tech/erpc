@@ -105,10 +105,11 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cleanups run last-in first-out: cancel the network (and so its
-	// pollers) first, then reset gock. Resetting gock while a poller is
-	// still inside a mocked call is a data race in gock.
+	// pollers) first, then wait for it to stop (the fixture's stopAtEnd),
+	// then reset gock. Resetting gock while a poller is still inside a
+	// mocked call is a data race in gock. cancel is registered after the
+	// fixture below, so it runs first.
 	t.Cleanup(util.ResetGock)
-	t.Cleanup(cancel)
 
 	var p1, p2, f1, f2 *atomic.Int32
 	acceptList := []string{}
@@ -181,9 +182,22 @@ func runEmptyFinalCase(t *testing.T, c emptyFinalCase) emptyFinalResult {
 		},
 	})
 
+	t.Cleanup(cancel)
+
 	// Pin the routed order in the policy only. The registry keeps all four
 	// upstreams, so the escape can still find the fallbacks.
 	policy.OverrideOrderForTest(network.policyEngine, network.networkId, "primary-1", "primary-2")
+
+	// Each poller's head is a number without a hash, and a number alone
+	// never moves the chain tracker's view (#1335). Vote each upstream's
+	// head as its hashed poll would, so the network serves Latest 1002 as
+	// in production. Without it Latest is 0, and an omitted toBlock has no
+	// range end to check.
+	var heads []int64
+	for _, u := range network.upstreamsRegistry.GetNetworkUpstreams(ctx, network.networkId) {
+		heads = append(heads, u.EvmStatePoller().LatestBlock())
+	}
+	voteChain(t, network, heads...)
 
 	if c.beforeForward != nil {
 		c.beforeForward()
@@ -229,6 +243,10 @@ const (
 	balanceAt1001  = `["0x00000000000000000000000000000000000000bb","0x3e9"]`
 	zeroBalance    = `{"jsonrpc":"2.0","id":1,"result":"0x0"}`
 	someBalance    = `{"jsonrpc":"2.0","id":1,"result":"0x64"}`
+	// unavailable is primary-2's answer in the cases that must reach
+	// primary-1 although routing may ask primary-2 first: it fails, so
+	// primary-1 is asked next.
+	unavailable = `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"unavailable"}}`
 )
 
 // An empty answer from an upstream that lists the method, for a block at or
@@ -268,8 +286,10 @@ func TestEmptyFinal_AuthoritativeAtOrBelowHeadIsFinal(t *testing.T) {
 // confident about the block. primary-1's empty answer may only mean it has
 // not imported the block yet, so it is not final.
 func TestEmptyFinal_AuthoritativeAboveHeadEscalates(t *testing.T) {
-	// The loop moves on to primary-2, which has the data.
-	t.Run("EthGetLogsNextPrimaryAnswers", func(t *testing.T) {
+	// Routing asks the upstreams whose head reaches the block first
+	// (preferUpstreams, splitHolders; #1335). primary-2 holds 1002 and
+	// answers, and primary-1 is never asked.
+	t.Run("EthGetLogsHolderAnswersFirst", func(t *testing.T) {
 		r := runEmptyFinalCase(t, emptyFinalCase{
 			method: "eth_getLogs", params: logsAt1002, marker: logAddress,
 			primaryBody: emptyLogs, fallbackBody: oneLog,
@@ -279,18 +299,18 @@ func TestEmptyFinal_AuthoritativeAboveHeadEscalates(t *testing.T) {
 		require.NoError(t, r.err)
 		assert.Contains(t, resultString(t, r.resp), `"logIndex"`)
 		assert.Equal(t, "primary-2", r.resp.UpstreamId())
-		assert.GreaterOrEqual(t, r.primary1Calls, int32(1), "primary-1 must be asked first")
+		assert.Equal(t, int32(0), r.primary1Calls, "the holder goes first")
 		assert.Equal(t, int32(0), r.fallbackCalls)
 	})
 
-	// primary-2 fails, so the request escapes to the fallback tier.
+	// primary-2 fails, so routing falls back to primary-1. Its [] is not
+	// final, and the request escapes to the fallback tier.
 	t.Run("EthGetLogsEscapesToFallback", func(t *testing.T) {
 		r := runEmptyFinalCase(t, emptyFinalCase{
 			method: "eth_getLogs", params: logsAt1002, marker: logAddress,
 			primaryBody: emptyLogs, fallbackBody: oneLog,
 			authoritative: true, primaryLatest: "0x3e8",
-			primary2Latest: "0x3ea",
-			primary2Body:   `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"unavailable"}}`,
+			primary2Latest: "0x3ea", primary2Body: unavailable,
 		})
 		require.NoError(t, r.err)
 		assert.Contains(t, resultString(t, r.resp), `"logIndex"`)
@@ -355,35 +375,42 @@ func ethCallParams(block string) string {
 // methods (eth_getLogs, trace_filter). An empty answer from an upstream whose
 // head is below the range end is not final: the request moves on to an
 // upstream that has the block. No upstream lists the method in
-// emptyResultAuthoritativeMethods here.
+// emptyResultAuthoritativeMethods here. Routing asks primary-2 (the holder)
+// first; it fails, so primary-1 is asked, and the fallback tier answers.
+// Block 1002 is the network's Firm, so upstream's refusal rule (above Firm
+// only) does not judge it: the head check does.
 func TestEmptyFinal_AcceptListAboveHeadIsNotFinal(t *testing.T) {
 	t.Run("EthGetLogs", func(t *testing.T) {
 		r := runEmptyFinalCase(t, emptyFinalCase{
 			method: "eth_getLogs", params: logsAt1002, marker: logAddress,
 			primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
-			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneLog,
+			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: unavailable,
 		})
 		require.NoError(t, r.err)
 		assert.Contains(t, resultString(t, r.resp), `"logIndex"`)
-		assert.Equal(t, "primary-2", r.resp.UpstreamId())
-		assert.GreaterOrEqual(t, r.primary1Calls, int32(1), "primary-1 must be asked first")
+		assert.Contains(t, []string{"fallback-1", "fallback-2"}, r.resp.UpstreamId())
+		assert.GreaterOrEqual(t, r.primary1Calls, int32(1), "primary-1 must be asked")
+		assert.Equal(t, float64(1), r.escapes)
 	})
 
 	t.Run("TraceFilter", func(t *testing.T) {
 		r := runEmptyFinalCase(t, emptyFinalCase{
 			method: "trace_filter", params: traceFilterAt1002, marker: logAddress,
 			primaryBody: emptyLogs, fallbackBody: oneTrace, defaultAccept: true,
-			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneTrace,
+			primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: unavailable,
 		})
 		require.NoError(t, r.err)
 		assert.Contains(t, resultString(t, r.resp), `"action"`)
-		assert.Equal(t, "primary-2", r.resp.UpstreamId())
+		assert.Contains(t, []string{"fallback-1", "fallback-2"}, r.resp.UpstreamId())
 		assert.GreaterOrEqual(t, r.primary1Calls, int32(1))
+		assert.Equal(t, float64(1), r.escapes)
 	})
 }
 
 // At or below the answering upstream's head, an accepted empty answer stays
-// final: one call, no sweep, no escape.
+// final: one call, no escape. Both primaries hold 1002, and a read of the
+// head's block goes to the fastest holder first (byRoundTrip), so primary-2
+// fails: whichever primary routing asks first, primary-1 answers.
 func TestEmptyFinal_AcceptListAtOrBelowHeadIsFinal(t *testing.T) {
 	cases := map[string]emptyFinalCase{
 		"EthGetLogs": {method: "eth_getLogs", params: logsAt1001, marker: logAddress,
@@ -396,15 +423,12 @@ func TestEmptyFinal_AcceptListAtOrBelowHeadIsFinal(t *testing.T) {
 	for name, c := range cases {
 		c.defaultAccept = true
 		c.primaryLatest = "0x3ea" // 1002
-		c.primary2Body = someCall
-		if c.method == "eth_getLogs" {
-			c.primary2Body = oneLog
-		}
+		c.primary2Body = unavailable
 		t.Run(name, func(t *testing.T) {
 			r := runEmptyFinalCase(t, c)
 			require.NoError(t, r.err)
 			assert.Equal(t, "primary-1", r.resp.UpstreamId())
-			assert.Equal(t, int32(1), r.primaryCalls, "no sweep to primary-2")
+			assert.Equal(t, int32(1), r.primary1Calls, "primary-1's answer is final")
 			assert.Equal(t, int32(0), r.fallbackCalls)
 			assert.Equal(t, float64(0), r.escapes)
 		})
@@ -414,7 +438,8 @@ func TestEmptyFinal_AcceptListAtOrBelowHeadIsFinal(t *testing.T) {
 // Value reads are not head-checked: their empty answer stays final, by tag
 // or by number, from the accept list or the authoritative list, even when
 // the answering upstream's known head is below the block. Each case passes
-// on the merge base and on this code alike.
+// on the merge base and on this code alike. Routing asks primary-2 (the
+// holder) first, so primary-2 fails and primary-1 is asked next.
 func TestEmptyFinal_ValueReadsUnchanged(t *testing.T) {
 	const addr = `"0x00000000000000000000000000000000000000cc"`
 	cases := map[string]emptyFinalCase{
@@ -439,6 +464,7 @@ func TestEmptyFinal_ValueReadsUnchanged(t *testing.T) {
 	for name, c := range cases {
 		c.marker = callTarget
 		c.fallbackBody = c.primary2Body
+		c.primary2Body = unavailable
 		c.defaultAccept = !c.authoritative
 		c.primaryLatest = "0x3e8" // 1000 < 1002
 		c.primary2Latest = "0x3ea"
@@ -446,7 +472,7 @@ func TestEmptyFinal_ValueReadsUnchanged(t *testing.T) {
 			r := runEmptyFinalCase(t, c)
 			require.NoError(t, r.err)
 			assert.Equal(t, "primary-1", r.resp.UpstreamId())
-			assert.Equal(t, int32(1), r.primaryCalls, "no sweep to primary-2")
+			assert.Equal(t, int32(1), r.primary1Calls, "primary-1's empty value is final")
 			assert.Equal(t, int32(0), r.fallbackCalls)
 			assert.Equal(t, float64(0), r.escapes)
 		})
@@ -455,10 +481,12 @@ func TestEmptyFinal_ValueReadsUnchanged(t *testing.T) {
 
 // primary-1's head is unknown: its state poller never got a latest block.
 // The refresh cannot find one either, so its [] is not final and primary-2,
-// which has the block, answers.
+// which has the block, answers. The block is 1001, below the head: a read
+// of the head's own block goes to the fastest holder first (byRoundTrip),
+// and an upstream with no known head counts as a holder (mayHold).
 func TestEmptyFinal_UnknownHeadIsNotFinal(t *testing.T) {
 	r := runEmptyFinalCase(t, emptyFinalCase{
-		method: "eth_getLogs", params: logsAt1002, marker: logAddress,
+		method: "eth_getLogs", params: logsAt1001, marker: logAddress,
 		primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
 		primaryLatest: "0x3ea", primary2Latest: "0x3ea", primary2Body: oneLog,
 		primary1Mocks: func() {
@@ -482,7 +510,10 @@ func TestEmptyFinal_UnknownHeadIsNotFinal(t *testing.T) {
 
 // primary-1 has block 1002, but its poller last saw 1000 and polls only
 // once an hour. The refresh before judging asks the poller for a fresh head,
-// finds 1002, and primary-1's true [] is final: primary-2 is never asked.
+// finds 1002, and primary-1's true [] is final: no fallback is asked.
+// Routing reads the poller's 1000 and asks primary-2 first, so primary-2
+// fails. In production a credited head (creditedHead) can route primary-1
+// first in the same way.
 func TestEmptyFinal_LaggingPollerRefreshMakesFinal(t *testing.T) {
 	var nodeAt1002 atomic.Bool
 	var headPolls atomic.Int32
@@ -502,7 +533,7 @@ func TestEmptyFinal_LaggingPollerRefreshMakesFinal(t *testing.T) {
 	r := runEmptyFinalCase(t, emptyFinalCase{
 		method: "eth_getLogs", params: logsAt1002, marker: logAddress,
 		primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
-		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneLog,
+		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: unavailable,
 		primary1Mocks: func() {
 			gock.New("http://rpc1.localhost").Post("").Persist().Filter(latestFrom(false)).
 				Reply(200).JSON([]byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x3e8","timestamp":"0x6702a8f0"}}`))
@@ -518,24 +549,27 @@ func TestEmptyFinal_LaggingPollerRefreshMakesFinal(t *testing.T) {
 	require.NoError(t, r.err)
 	assert.Equal(t, "[]", resultString(t, r.resp))
 	assert.Equal(t, "primary-1", r.resp.UpstreamId())
-	assert.Equal(t, int32(1), r.primaryCalls, "the refreshed head makes primary-1's answer final")
+	assert.Equal(t, int32(1), r.primary1Calls, "the refreshed head makes primary-1's answer final")
 	assert.Equal(t, int32(0), r.fallbackCalls)
 	assert.GreaterOrEqual(t, headPolls.Load(), int32(1), "the refresh must poll primary-1's head")
 }
 
 // An explicit empty evm.emptyResultHeadCheckMethods turns the check off:
-// the above-head [] is final again.
+// the above-head [] is final again. This is the control for
+// AcceptListAboveHeadIsNotFinal/EthGetLogs: the same case, and only the
+// head check makes the difference.
 func TestEmptyFinal_HeadCheckOffByConfig(t *testing.T) {
 	r := runEmptyFinalCase(t, emptyFinalCase{
 		method: "eth_getLogs", params: logsAt1002, marker: logAddress,
 		primaryBody: emptyLogs, fallbackBody: oneLog, defaultAccept: true,
-		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: oneLog,
+		primaryLatest: "0x3e8", primary2Latest: "0x3ea", primary2Body: unavailable,
 		headCheckMethods: []string{},
 	})
 	require.NoError(t, r.err)
 	assert.Equal(t, "[]", resultString(t, r.resp))
 	assert.Equal(t, "primary-1", r.resp.UpstreamId())
-	assert.Equal(t, int32(1), r.primaryCalls)
+	assert.Equal(t, int32(1), r.primary1Calls)
+	assert.Equal(t, int32(0), r.fallbackCalls)
 }
 
 // eth_getLogs with no toBlock runs to latest. primary-1's head (1000)

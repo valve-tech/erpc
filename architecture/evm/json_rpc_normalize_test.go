@@ -28,10 +28,9 @@ type tagTestNetwork struct {
 	highestFinalize int64
 }
 
-func (n *tagTestNetwork) EvmRefreshLatestBlock(context.Context) {}
-func (n *tagTestNetwork) Id() string                            { return "evm:123" }
-func (n *tagTestNetwork) Label() string                         { return "evm:123" }
-func (n *tagTestNetwork) ProjectId() string                     { return "test-project" }
+func (n *tagTestNetwork) Id() string        { return "evm:123" }
+func (n *tagTestNetwork) Label() string     { return "evm:123" }
+func (n *tagTestNetwork) ProjectId() string { return "test-project" }
 func (n *tagTestNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }
@@ -47,13 +46,12 @@ func (n *tagTestNetwork) Forward(context.Context, *common.NormalizedRequest) (*c
 func (n *tagTestNetwork) GetFinality(context.Context, *common.NormalizedRequest, *common.NormalizedResponse) common.DataFinalityState {
 	return common.DataFinalityStateUnknown
 }
-func (n *tagTestNetwork) EvmHighestLatestBlockNumber(context.Context) int64 {
-	return n.highestLatest
+func (n *tagTestNetwork) EvmHead(context.Context, *common.NormalizedRequest) common.EvmHead {
+	return common.EvmHead{Latest: n.highestLatest, Finalized: n.highestFinalize}
 }
-func (n *tagTestNetwork) EvmHighestFinalizedBlockNumber(context.Context) int64 {
-	return n.highestFinalize
+func (n *tagTestNetwork) EvmLaneHead(string, string) common.EvmHead {
+	return n.EvmHead(context.Background(), nil)
 }
-func (n *tagTestNetwork) EvmLeaderUpstream(context.Context) common.Upstream { return nil }
 
 var _ common.EvmNetwork = (*tagTestNetwork)(nil)
 
@@ -234,14 +232,19 @@ func TestNormalizeHttpJsonRpc_CanonicalisesNonCanonicalHexHeights(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			net := &tagTestNetwork{highestLatest: 0x99999}
+			// Both bounds carry the height: since #1335 an absent toBlock is
+			// "latest", and the request's block number is its toBlock.
 			nrq, jrq := newTagRequest(t, net, "eth_getLogs", map[string]interface{}{
 				"fromBlock": tc.in,
+				"toBlock":   tc.in,
 			})
 
 			NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
-			if got := testParamAt(t, jrq, 0, "fromBlock"); got != tc.want {
-				t.Fatalf("fromBlock = %#v, want %q", got, tc.want)
+			for _, key := range []string{"fromBlock", "toBlock"} {
+				if got := testParamAt(t, jrq, 0, key); got != tc.want {
+					t.Fatalf("%s = %#v, want %q", key, got, tc.want)
+				}
 			}
 			if got := nrq.EvmBlockNumber(); got != tc.num {
 				t.Fatalf("EvmBlockNumber = %v, want %d", got, tc.num)
@@ -253,22 +256,22 @@ func TestNormalizeHttpJsonRpc_CanonicalisesNonCanonicalHexHeights(t *testing.T) 
 func TestNormalizeHttpJsonRpc_HonoursTheMethodOptOutFromTagTranslation(t *testing.T) {
 	t.Parallel()
 
-	// eth_getBlockByNumber sets translateLatestTag/translateFinalizedTag to
-	// false: it is the method that DISCOVERS the head. Interpolating its tag
-	// would freeze the head at whatever eRPC already believed and the poller
-	// could never learn the chain advanced.
+	// The fork's defaults set translateLatestTag/translateFinalizedTag to
+	// false for eth_call, so the upstream executes at its own head. A method
+	// that opts out must reach the upstream with the literal tag. (This test
+	// used eth_getBlockByNumber until #1335 removed that method's opt-out.)
 	net := &tagTestNetwork{highestLatest: 0x1234, highestFinalize: 0x1000}
-	jrq := common.NewJsonRpcRequest("eth_getBlockByNumber", []interface{}{"latest", false})
+	jrq := common.NewJsonRpcRequest("eth_call", []interface{}{map[string]interface{}{"to": "0xabc"}, "latest"})
 	nrq := common.NewNormalizedRequestFromJsonRpcRequest(jrq)
 	nrq.SetNetwork(net)
 
 	NormalizeHttpJsonRpc(normalizeCtx(t), nrq, jrq)
 
 	jrq.RLock()
-	got := jrq.Params[0]
+	got := jrq.Params[1]
 	jrq.RUnlock()
 	if got != "latest" {
-		t.Fatalf("params[0] = %v, want the untranslated tag \"latest\"", got)
+		t.Fatalf("params[1] = %v, want the untranslated tag \"latest\"", got)
 	}
 	// The tag is still RECORDED even though it is not rewritten — the cache
 	// layer needs to know this answer is head-relative.
@@ -400,27 +403,44 @@ func TestNormalizeHttpJsonRpc_DoesNotMutateTheCallersOriginalParams(t *testing.T
 	}
 }
 
-func TestResolveBlockTagToHex_ReportsFailureRatherThanGuessing(t *testing.T) {
+func TestTagBlockNumber_ReportsFailureRatherThanGuessing(t *testing.T) {
 	t.Parallel()
 
 	ctx := normalizeCtx(t)
+	on := true
+	cfg := &common.CacheMethodConfig{TranslateLatestTag: &on, TranslateFinalizedTag: &on}
+	resolve := func(network common.Network, tag string) int64 {
+		nrq := common.NewNormalizedRequestFromJsonRpcRequest(common.NewJsonRpcRequest("eth_getBalance", []interface{}{"0x1", tag}))
+		if network != nil {
+			nrq.SetNetwork(network)
+		}
+		return tagBlockNumber(ctx, nrq, cfg, tag)
+	}
 
-	// No network, or a head eRPC has not learned yet. Returning a bogus "0x0"
-	// here would rewrite every request to the genesis block.
-	if hx, ok := resolveBlockTagToHex(ctx, nil, "latest"); ok {
-		t.Fatalf("resolveBlockTagToHex(nil network) = %q, true; want a refusal", hx)
+	// No network, or a head eRPC has not learned yet. Returning a bogus 0x0
+	// here would rewrite every request to the genesis block, so 0 must mean
+	// "leave the tag as is".
+	if bn := resolve(nil, "latest"); bn != 0 {
+		t.Fatalf("tagBlockNumber(nil network) = %d; want 0 (a refusal)", bn)
 	}
-	if hx, ok := resolveBlockTagToHex(ctx, &tagTestNetwork{}, "latest"); ok {
-		t.Fatalf("resolveBlockTagToHex(head 0) = %q, true; want a refusal until a head is known", hx)
+	if bn := resolve(&tagTestNetwork{}, "latest"); bn != 0 {
+		t.Fatalf("tagBlockNumber(head 0) = %d; want a refusal until a head is known", bn)
 	}
-	if hx, ok := resolveBlockTagToHex(ctx, &tagTestNetwork{highestLatest: 5}, "finalized"); ok {
-		t.Fatalf("resolveBlockTagToHex(finalized, no finalized head) = %q, true; the latest head must not stand in", hx)
+	if bn := resolve(&tagTestNetwork{highestLatest: 5}, "finalized"); bn != 0 {
+		t.Fatalf("tagBlockNumber(finalized, no finalized head) = %d; the latest head must not stand in", bn)
 	}
 	// Tags eRPC does not track are refused, not approximated.
 	for _, tag := range []string{"safe", "pending", "earliest", "nonsense"} {
-		if hx, ok := resolveBlockTagToHex(ctx, &tagTestNetwork{highestLatest: 5, highestFinalize: 3}, tag); ok {
-			t.Fatalf("resolveBlockTagToHex(%q) = %q, true; want a refusal", tag, hx)
+		if bn := resolve(&tagTestNetwork{highestLatest: 5, highestFinalize: 3}, tag); bn != 0 {
+			t.Fatalf("tagBlockNumber(%q) = %d; want a refusal", tag, bn)
 		}
+	}
+	// The tracked tags resolve to their own axis.
+	if bn := resolve(&tagTestNetwork{highestLatest: 5, highestFinalize: 3}, "latest"); bn != 5 {
+		t.Fatalf("tagBlockNumber(latest) = %d; want 5", bn)
+	}
+	if bn := resolve(&tagTestNetwork{highestLatest: 5, highestFinalize: 3}, "finalized"); bn != 3 {
+		t.Fatalf("tagBlockNumber(finalized) = %d; want 3", bn)
 	}
 }
 
@@ -441,7 +461,9 @@ func TestSetByPath_RefusesToInventStructure(t *testing.T) {
 	}{
 		{name: "index past the end", path: []interface{}{5, "fromBlock"}},
 		{name: "negative index", path: []interface{}{-1, "fromBlock"}},
-		{name: "key that does not exist", path: []interface{}{0, "toBlock"}},
+		// A missing leaf of an existing map IS set since #1335 (an absent
+		// selector is interpolated); a missing container never is.
+		{name: "key that does not exist below a missing container", path: []interface{}{0, "toBlock", "x"}},
 		{name: "string key into a slice", path: []interface{}{"fromBlock"}},
 		{name: "int index into a map", path: []interface{}{0, "fromBlock", 0}},
 		{name: "unsupported key type", path: []interface{}{true}},

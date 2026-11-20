@@ -102,6 +102,11 @@ type consensusAnalysis struct {
 	cachedBestByCount  *responseGroup
 	cachedBestBySize   *responseGroup
 	cachedValidGroups  []*responseGroup
+
+	// waiverBlocks memoizes waiverBlock per winning group: confirming a hash
+	// lookup's block is a network probe, and one determineWinner can ask
+	// for the same group more than once.
+	waiverBlocks map[*responseGroup]waiverBlockProof
 }
 
 func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *config, responses []*execResult) *consensusAnalysis {
@@ -117,8 +122,8 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *confi
 			analysis.method = method
 		}
 		if net := req.Network(); net != nil && net.Architecture() == common.ArchitectureEvm {
-			// Use the executor context; leader selection is read-only and fast
-			analysis.leaderUpstream = common.EvmLeaderUpstream(net, ctx)
+			// The request's Head.Leader: within reach of its Latest (#1154).
+			analysis.leaderUpstream = common.EvmHeadOf(net, ctx, req).Leader
 		}
 	}
 

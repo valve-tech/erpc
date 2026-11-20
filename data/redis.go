@@ -326,7 +326,7 @@ func (r *RedisConnector) Set(ctx context.Context, partitionKey, rangeKey string,
 	ctx, span := common.StartSpan(ctx, "RedisConnector.Set")
 	defer span.End()
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.String("partition_key", partitionKey),
 			attribute.String("range_key", rangeKey),
@@ -461,7 +461,7 @@ func (r *RedisConnector) Get(ctx context.Context, index, partitionKey, rangeKey 
 		r.logger.Debug().Str("key", key).Int("len", len(value)).Msg("received item from Redis")
 	}
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.Int("value_size", len(value)),
 		)
@@ -605,7 +605,7 @@ func (r *RedisConnector) PublishCounterInt64(ctx context.Context, key string, va
 	)
 	defer span.End()
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.Int64("value", value.Value),
 			attribute.Int64("updated_at", value.UpdatedAt),
@@ -679,7 +679,7 @@ func (r *RedisConnector) Delete(ctx context.Context, partitionKey, rangeKey stri
 	ctx, span := common.StartSpan(ctx, "RedisConnector.Delete")
 	defer span.End()
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.String("partition_key", partitionKey),
 			attribute.String("range_key", rangeKey),
@@ -724,7 +724,7 @@ func (r *RedisConnector) List(ctx context.Context, index string, limit int, pagi
 	ctx, span := common.StartSpan(ctx, "RedisConnector.List")
 	defer span.End()
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.String("index", index),
 			attribute.Int("limit", limit),

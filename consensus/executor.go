@@ -161,21 +161,15 @@ func (e *executor) Run(
 	}
 
 	// Gate hedge empty-as-slot-vote on the selected policy's empty-waiver
-	// opt-in AND a blockEvidenceFields entry for THIS method. The waiver can
-	// only prove outside-retention for methods with evidence; keeping empty
-	// hedge winners for every other method would change prior recovery
-	// behavior when the waiver can never fire.
+	// opt-in AND a block the waiver can judge: one the request names, one a
+	// hash lookup's answer names for a non-winner to confirm, or one the
+	// method's blockEvidenceFields read. Keeping empty hedge winners for every
+	// other request would change prior recovery behavior when the waiver can
+	// never fire.
 	if st := originalReq.ExecState(); st != nil {
 		keep := false
 		if anyEmptyOutsideRetentionOptIn(e.config.requiredParticipants) {
-			if method, err := originalReq.Method(); err == nil {
-				// An existing key with an empty list cannot yield proof
-				// (winnerBlockEvidence returns nil), so it must not keep
-				// empty hedge-slot votes either.
-				if fields, ok := methodFields(e.config.blockEvidenceFields, method); ok && len(fields) > 0 {
-					keep = true
-				}
-			}
+			keep = e.emptyWaiverHasBlock(ctx, originalReq)
 		}
 		st.SetKeepEmptyConsensusSlot(keep)
 	}
@@ -1021,7 +1015,7 @@ func (e *executor) enforceWinnerComposition(ctx context.Context, lg *zerolog.Log
 	// its minAgreement for THIS round under one of two abstention signals:
 	// missing-data (≥ minAgreement tag-matching participants returned
 	// ErrEndpointMissingData) or empty-outside-retention (≥ minAgreement
-	// tag-matching participants returned empty AND the winner's block is
+	// tag-matching participants returned empty AND the requested block is
 	// older than the entry's retained range, proving those abstainers
 	// legitimately pruned it). Both are round-complete by design and only
 	// change the outcome when releasing them makes the winner decisive, so
@@ -1069,9 +1063,10 @@ func (e *executor) enforceWinnerComposition(ctx context.Context, lg *zerolog.Log
 		}
 	}
 	// When the empty-outside-retention waiver is opted in but did NOT fire, the
-	// two silent fail-closed branches are a zero chain head (network tip and
-	// participant pollers both unknown) or a nil winner block (blockEvidenceFields
-	// missing/unmatched for this method) — both leave the waiver without proof.
+	// silent fail-closed branches are a zero chain head (network tip and
+	// participant pollers both unknown) or no block to judge (the request
+	// names none and no non-winner confirmed the answer's) — each leaves the
+	// waiver without proof.
 	// Surface them so a dispute on a supposedly-pruned block is diagnosable
 	// without code changes, rather than looking like an unexplained composition
 	// failure.
@@ -1326,8 +1321,10 @@ const (
 // entry qualifies for both, since it is the stronger explicit abstention signal.
 func (e *executor) waivedQuotas(ctx context.Context, analysis *consensusAnalysis, g *responseGroup) map[*common.ConsensusRequiredParticipant]string {
 	reasons := make(map[*common.ConsensusRequiredParticipant]string)
-	for req := range emptyOutsideRetentionWaivedQuotas(analysis, e.config.requiredParticipants, e.winnerBlockEvidence(analysis, g), e.chainHead(ctx, analysis)) {
-		reasons[req] = waiverReasonEmptyOutsideRetention
+	if p := e.waiverBlock(ctx, analysis, g); p.block != nil {
+		for req := range emptyOutsideRetentionWaivedQuotas(analysis, e.config.requiredParticipants, p.block, e.chainHead(ctx, analysis, g)) {
+			reasons[req] = waiverReasonEmptyOutsideRetention
+		}
 	}
 	for req := range missingDataWaivedQuotas(analysis, e.config.requiredParticipants) {
 		reasons[req] = waiverReasonMissingData
@@ -1336,29 +1333,33 @@ func (e *executor) waivedQuotas(ctx context.Context, analysis *consensusAnalysis
 }
 
 // chainHead returns the observed EVM "latest" block for the round, or 0 when
-// unknown. The network served tip is used only when servedTip.quorum is
-// "majority" — that value is majority-corroborated across eligible upstreams,
-// including ones that did not participate in this round. Default quorum (2)
-// can still be a plain MAX of self-reported poller latests on small pools, so
-// a single inflator can raise it; trusting that for this proof would reopen
-// the fabrication hole the poller fallback closes. When majority quorum is
-// off, or the majority tip is still 0, fall back to the MIN poller latest
-// among this round's own EVM participants (at least two distinct upstreams
-// with a positive latest). A zero head from both sources means the
-// empty-outside-retention waiver cannot prove a block is outside range, so
-// it holds the quota — fail closed.
-func (e *executor) chainHead(ctx context.Context, analysis *consensusAnalysis) int64 {
+// unknown. The request's Head.Latest is used only when servedTip.quorum is
+// "majority" — that value is majority-corroborated across the request's
+// voters, including ones that did not participate in this round. Default
+// quorum (2) can still be a single voter's report on small pools, so one
+// inflator can raise it; trusting that for this proof would reopen the
+// fabrication hole the poller fallback closes. When majority quorum is off,
+// or the Head is still unknown, fall back to the MIN poller latest among
+// this round's own EVM participants (at least two distinct upstreams with a
+// positive latest, at least one outside the winning group). A zero head from
+// both sources means the empty-outside-retention waiver cannot prove a block
+// is outside range, so it holds the quota — fail closed.
+func (e *executor) chainHead(ctx context.Context, analysis *consensusAnalysis, winner *responseGroup) int64 {
 	if analysis == nil {
 		return 0
 	}
-	if analysis.originalRequest != nil {
-		if net := analysis.originalRequest.Network(); net != nil && majorityServedLatestEnabled(net) {
-			if head := common.EvmHighestLatestBlockNumber(net, ctx); head > 0 {
+	if req := analysis.originalRequest; req != nil {
+		if net := req.Network(); net != nil && majorityServedLatestEnabled(net) {
+			if head := common.EvmHeadOf(net, ctx, req).Latest; head > 0 {
 				return head
 			}
 		}
 	}
-	return participantLatestBlock(analysis)
+	var agreeing []*execResult
+	if winner != nil {
+		agreeing = e.agreeingResults(analysis, winner)
+	}
+	return participantLatestBlock(analysis, agreeing)
 }
 
 // majorityServedLatestEnabled reports whether this network's served tip uses
@@ -1376,8 +1377,9 @@ func majorityServedLatestEnabled(net common.Network) bool {
 
 // logEmptyWaiverUnproven emits the fail-closed diagnostic when the
 // empty-outside-retention waiver is opted in but could not be evaluated
-// (unknown head, no finite abstainer availability lower bound, or no
-// extractable winner block). Shared by the backed-group composition-dispute
+// (unknown head, no finite abstainer availability lower bound, or no block:
+// the request names none and no upstream outside the winners confirmed the
+// answer's). Shared by the backed-group composition-dispute
 // path and the synthesized-tie path so a silent hold is diagnosable on both.
 func (e *executor) logEmptyWaiverUnproven(ctx context.Context, lg *zerolog.Logger, analysis *consensusAnalysis, g *responseGroup) {
 	if !anyEmptyOutsideRetentionOptIn(e.config.requiredParticipants) {
@@ -1405,30 +1407,43 @@ func (e *executor) logEmptyWaiverUnproven(ctx context.Context, lg *zerolog.Logge
 			Msg("empty-outside-retention waiver deferred — responses still outstanding")
 		return
 	}
-	head := e.chainHead(ctx, analysis)
-	winnerBlock := e.winnerBlockEvidence(analysis, g)
+	head := e.chainHead(ctx, analysis, g)
+	proof := e.waiverBlock(ctx, analysis, g)
+	reqBlock := proof.block
+	// Claimed answer block is already inside every opted-in retention window
+	// (and avail bounds cannot prove outside either): we skipped the confirmer
+	// probe on purpose. That is an evaluated hold, not missing proof.
+	if proof.reason == waiverUnprovenReasonBlockInsideRetention {
+		return
+	}
 	finiteBounds, matchingEmpties := countFiniteAvailLowerBounds(analysis, e.config.requiredParticipants)
-	// Proven evaluation paths: winner block + (finite avail bounds for every
+	// Proven evaluation paths: requested block + (finite avail bounds for every
 	// matching empty OR a known chain head). Inside-retention holds are not
 	// "unproven" — only missing proof inputs are.
-	availProofReady := winnerBlock != nil && matchingEmpties > 0 && finiteBounds == matchingEmpties
-	headProofReady := winnerBlock != nil && head > 0
+	availProofReady := reqBlock != nil && matchingEmpties > 0 && finiteBounds == matchingEmpties
+	headProofReady := reqBlock != nil && head > 0
 	if availProofReady || headProofReady {
 		return
 	}
 	reason := waiverUnprovenReasonNoHead
 	switch {
-	case winnerBlock == nil:
-		reason = waiverUnprovenReasonNoWinnerBlock
+	case reqBlock == nil:
+		reason = proof.reason
 	case matchingEmpties == 0 || finiteBounds < matchingEmpties:
 		reason = waiverUnprovenReasonNoAvailBound
 	case head <= 0:
 		reason = waiverUnprovenReasonNoHead
 	}
-	lg.Info().
+	// A non-winner holding a different block than the winners describe is
+	// evidence against the winners, not a missing input.
+	ev := lg.Info()
+	if reason == waiverUnprovenReasonBlockContradicted {
+		ev = lg.Warn()
+	}
+	ev.
 		Str("method", method).
 		Int64("chainHead", head).
-		Bool("winnerBlockKnown", winnerBlock != nil).
+		Bool("requestBlockKnown", reqBlock != nil).
 		Int("availBoundFiniteCount", finiteBounds).
 		Int("matchingEmpties", matchingEmpties).
 		Str("reason", reason).
@@ -1480,29 +1495,36 @@ func countFiniteAvailLowerBounds(analysis *consensusAnalysis, reqs []*common.Con
 }
 
 const (
-	waiverUnprovenReasonNoWinnerBlock   = "no_winner_block"
-	waiverUnprovenReasonNoAvailBound    = "no_avail_bound"
-	waiverUnprovenReasonNoHead          = "no_head"
-	waiverUnprovenReasonRoundIncomplete = "round_incomplete"
+	waiverUnprovenReasonNoRequestBlock       = "no_request_block"
+	waiverUnprovenReasonBlockUnconfirmed     = "block_unconfirmed"
+	waiverUnprovenReasonBlockContradicted    = "block_contradicted"
+	waiverUnprovenReasonBlockInsideRetention = "block_inside_retention"
+	waiverUnprovenReasonNoAvailBound         = "no_avail_bound"
+	waiverUnprovenReasonNoHead               = "no_head"
+	waiverUnprovenReasonRoundIncomplete      = "round_incomplete"
 )
 
 // participantLatestBlock is the chain-head fallback when the network served
 // tip is 0. It requires at least two distinct EVM participants to have reported
-// a positive latest (corroboration), then takes the MIN — a single misbehaving
-// upstream cannot inflate the head to make a recent winner look outside
-// retention. Returns 0 (fail closed) when fewer than two pollers have spoken.
-//
-// The two sources can still be the winning group's own upstreams: excluding
-// them would leave only the pruned internals, whose poller latest is often 0
-// and would make this fallback unusable on the mixed-node shape it exists for.
-// Two colluders reporting the same inflated latest can still raise the min.
-// When majority served-tip is enabled for "latest", chainHead prefers that
-// network-wide majority instead; default max-mode served tip is not trusted.
-func participantLatestBlock(analysis *consensusAnalysis) int64 {
+// a positive latest, at least one of them outside the winning group, then takes
+// the MIN. Neither a single inflator nor the winning group alone can raise the
+// head the winner's own block is judged against. Returns 0 (fail closed)
+// otherwise, e.g. when the only non-winners are pruned internals without a
+// poller; operators then need servedTip quorum "majority" or a finite
+// blockAvailability lower bound on those internals.
+func participantLatestBlock(analysis *consensusAnalysis, agreeing []*execResult) int64 {
 	if analysis == nil {
 		return 0
 	}
-	var heads []int64
+	winners := make(map[string]struct{}, len(agreeing))
+	for _, r := range agreeing {
+		if r != nil && r.Upstream != nil {
+			winners[r.Upstream.Id()] = struct{}{}
+		}
+	}
+	var min int64
+	pollers := 0
+	outside := false
 	seen := make(map[string]struct{})
 	for _, g := range analysis.groups {
 		if g == nil {
@@ -1521,52 +1543,39 @@ func participantLatestBlock(analysis *consensusAnalysis) int64 {
 			if !ok {
 				continue
 			}
-			if b := eu.EvmEffectiveLatestBlock(); b > 0 {
-				heads = append(heads, b)
+			b := eu.EvmEffectiveLatestBlock()
+			if b <= 0 {
+				continue
 			}
+			if _, in := winners[id]; !in {
+				outside = true
+			}
+			if pollers == 0 || b < min {
+				min = b
+			}
+			pollers++
 		}
 	}
-	if len(heads) < 2 {
+	if pollers < 2 || !outside {
 		return 0
-	}
-	min := heads[0]
-	for _, h := range heads[1:] {
-		if h < min {
-			min = h
-		}
 	}
 	return min
 }
 
-// winnerBlockEvidence extracts the winning group's own block number using the
-// policy's blockEvidenceFields entry for the round's method. It returns nil
-// when the method has no configured evidence field, the winner has no result,
-// or no evidence field resolves to a non-negative number — every one of which
-// leaves the empty-outside-retention waiver without proof (dispute). The first
-// independently parseable field wins (feature §7.1 — "first resolved value").
-func (e *executor) winnerBlockEvidence(analysis *consensusAnalysis, g *responseGroup) *big.Int {
-	if analysis == nil || g == nil || g.LargestResult == nil {
+// requestBlock is the block number the client's own request names. It never
+// reads a participant's answer: upstreams that agree on a fabricated block
+// number could otherwise prove the data is old. It returns nil when the
+// request names no concrete block (a hash lookup, a tag, an omitted range
+// bound); waiverBlock then needs a non-winner to confirm the answer's block.
+func requestBlock(ctx context.Context, analysis *consensusAnalysis) *big.Int {
+	if analysis == nil || analysis.originalRequest == nil {
 		return nil
 	}
-	fields, ok := methodFields(e.config.blockEvidenceFields, analysis.method)
-	if !ok || len(fields) == 0 {
+	bn, ok := common.EvmRequestedBlockNumber(ctx, analysis.originalRequest)
+	if !ok {
 		return nil
 	}
-	for _, field := range fields {
-		values := extractFieldValues(g.LargestResult, []string{field})
-		if len(values) == 0 || values[0] == nil {
-			continue
-		}
-		n := values[0]
-		// Block numbers cannot be negative. A malformed "-1" is still a
-		// resolved value — fail closed rather than falling through to a
-		// later field that might vacuously prove outside retention.
-		if n.Sign() < 0 {
-			return nil
-		}
-		return n
-	}
-	return nil
+	return big.NewInt(bn)
 }
 
 // emptyOutsideRetentionWaivedQuotas returns the requiredParticipants entries
@@ -1575,74 +1584,48 @@ func (e *executor) winnerBlockEvidence(analysis *consensusAnalysis, g *responseG
 // (waiveAgreementOnEmptyOutsideRetention), carries a real quota
 // (minAgreement > 0), at least minAgreement distinct tag-matching participants
 // this round returned an EMPTY result, no matching participant returned a
-// non-empty result, and the winner's block is proven outside retention.
+// non-empty result, and the requested block is proven outside retention.
 // Sibling errors do not block the empty count; a matching non-empty result
 // does — that is a real vote, not a prune, and waiving would mask it.
 //
 // Proof (prefer first that succeeds), evaluated over the empty matches only:
 //  1. Availability lower bound — every counted empty upstream exposes a finite
-//     EvmBlockAvailabilityBounds lower bound and winnerBlock < that bound
+//     EvmBlockAvailabilityBounds lower bound and reqBlock < that bound
 //     (typically poller.latest − latestBlockMinus). No network served tip needed.
-//  2. Chain head — head - winnerBlock > retentionBlocks, with head from
+//  2. Chain head — head - reqBlock > retentionBlocks, with head from
 //     majority served tip / corroborated participant pollers.
 //
 // The block proof is the anti-fabrication guard: a null on a recent block
 // (inside retention / bounds) fails the proof and holds the quota, so
 // correlated externals cannot outvote an internal on data the internal should
-// still have.
+// still have. The block comes from the client's request or, for a hash
+// lookup, from an upstream outside the winners (waiverBlock), so the externals
+// cannot move it.
 //
 // Round-complete by design (mirrors missingDataWaivedQuotas): while any
 // response can still arrive, a slower tagged upstream could still return data,
 // so this reports no waivers. Wait-cap cancel alone does not clear
-// hasRemaining. Without a winner block and neither proof source, it reports
+// hasRemaining. Without a requested block and neither proof source, it reports
 // none — fail closed.
-func emptyOutsideRetentionWaivedQuotas(analysis *consensusAnalysis, reqs []*common.ConsensusRequiredParticipant, winnerBlock *big.Int, head int64) map[*common.ConsensusRequiredParticipant]struct{} {
+func emptyOutsideRetentionWaivedQuotas(analysis *consensusAnalysis, reqs []*common.ConsensusRequiredParticipant, reqBlock *big.Int, head int64) map[*common.ConsensusRequiredParticipant]struct{} {
 	if analysis == nil || analysis.hasRemaining() {
 		return nil
 	}
-	if winnerBlock == nil {
+	if reqBlock == nil {
 		return nil
 	}
 	var waived map[*common.ConsensusRequiredParticipant]struct{}
 	for _, req := range reqs {
-		if req == nil || !req.WaiveAgreementOnEmptyOutsideRetention || req.MinAgreement <= 0 || req.RetentionBlocks <= 0 {
-			continue
-		}
-		var empties []*execResult
-		var seen map[string]struct{}
-		nonEmptyMatch := false
-		for _, g := range analysis.groups {
-			for _, r := range g.Results {
-				if r == nil || r.Upstream == nil || !upstreamMatchesTag(r.Upstream, req.Tag) {
-					continue
-				}
-				id := r.Upstream.Id()
-				if seen == nil {
-					seen = make(map[string]struct{}, req.MinAgreement)
-				}
-				if _, dup := seen[id]; dup {
-					continue
-				}
-				seen[id] = struct{}{}
-				if r.Err == nil && r.CachedResponseType == ResponseTypeNonEmpty {
-					nonEmptyMatch = true
-					continue
-				}
-				if r.Err != nil || r.CachedResponseType != ResponseTypeEmpty {
-					continue
-				}
-				empties = append(empties, r)
-			}
-		}
-		if nonEmptyMatch || len(empties) < req.MinAgreement {
+		empties := abstainingEmpties(analysis, req)
+		if empties == nil {
 			continue
 		}
 		// Feature §7.1: prefer finite availability lower bounds; only fall
 		// back to chain-head depth when that preferred evidence is unavailable.
-		// A finite bound that places the winner inside the served range is
-		// positive contradictory evidence — never override it with head depth.
-		proves, contradicts := availabilityBoundProofState(empties, winnerBlock)
-		if proves || (!contradicts && chainHeadProvesOutsideRetention(winnerBlock, head, req.RetentionBlocks)) {
+		// A finite bound that places the requested block inside the served range
+		// is positive contradictory evidence — never override it with head depth.
+		proves, contradicts := availabilityBoundProofState(empties, reqBlock)
+		if proves || (!contradicts && chainHeadProvesOutsideRetention(reqBlock, head, req.RetentionBlocks)) {
 			if waived == nil {
 				waived = make(map[*common.ConsensusRequiredParticipant]struct{}, len(reqs))
 			}
@@ -1652,14 +1635,61 @@ func emptyOutsideRetentionWaivedQuotas(analysis *consensusAnalysis, reqs []*comm
 	return waived
 }
 
+// abstainingEmpties returns the distinct tag-matching participants that
+// returned EMPTY for an opted-in entry with a real quota and a retention
+// range, or nil when the entry cannot be waived this round: fewer than
+// minAgreement empties, or a matching participant returned a non-empty
+// result (a real vote, not a prune).
+func abstainingEmpties(analysis *consensusAnalysis, req *common.ConsensusRequiredParticipant) []*execResult {
+	if req == nil || !req.WaiveAgreementOnEmptyOutsideRetention || req.MinAgreement <= 0 || req.RetentionBlocks <= 0 {
+		return nil
+	}
+	var empties []*execResult
+	seen := make(map[string]struct{}, req.MinAgreement)
+	for _, g := range analysis.groups {
+		for _, r := range g.Results {
+			if r == nil || r.Upstream == nil || !upstreamMatchesTag(r.Upstream, req.Tag) {
+				continue
+			}
+			id := r.Upstream.Id()
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			if r.Err == nil && r.CachedResponseType == ResponseTypeNonEmpty {
+				return nil
+			}
+			if r.Err != nil || r.CachedResponseType != ResponseTypeEmpty {
+				continue
+			}
+			empties = append(empties, r)
+		}
+	}
+	if len(empties) < req.MinAgreement {
+		return nil
+	}
+	return empties
+}
+
+// anyEmptyOutsideRetentionAbstention reports whether some entry has the
+// abstainers the empty-outside-retention waiver could release this round.
+func anyEmptyOutsideRetentionAbstention(analysis *consensusAnalysis, reqs []*common.ConsensusRequiredParticipant) bool {
+	for _, req := range reqs {
+		if abstainingEmpties(analysis, req) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // availabilityBoundProofState classifies preferred empty-waiver proof from
 // abstainers' blockAvailability lower bounds (feature §7.1):
-//   - proves: every matching empty has a finite lower and winnerBlock < lower
-//   - contradicts: at least one finite lower has winnerBlock >= lower (in range)
+//   - proves: every matching empty has a finite lower and reqBlock < lower
+//   - contradicts: at least one finite lower has reqBlock >= lower (in range)
 //
 // When neither (bounds unavailable), the caller may fall back to chain-head depth.
-func availabilityBoundProofState(matching []*execResult, winnerBlock *big.Int) (proves, contradicts bool) {
-	if winnerBlock == nil || len(matching) == 0 {
+func availabilityBoundProofState(matching []*execResult, reqBlock *big.Int) (proves, contradicts bool) {
+	if reqBlock == nil || len(matching) == 0 {
 		return false, false
 	}
 	allFiniteProve := true
@@ -1678,7 +1708,7 @@ func availabilityBoundProofState(matching []*execResult, winnerBlock *big.Int) (
 			continue
 		}
 		anyFinite = true
-		if winnerBlock.Cmp(big.NewInt(lower)) >= 0 {
+		if reqBlock.Cmp(big.NewInt(lower)) >= 0 {
 			return false, true
 		}
 	}
@@ -1688,21 +1718,13 @@ func availabilityBoundProofState(matching []*execResult, winnerBlock *big.Int) (
 	return false, false
 }
 
-// availabilityBoundProvesOutsideRetention is true when every matching empty
-// participant has a finite availability lower bound and the winner block is
-// strictly below each bound (pruned / outside retained range for that upstream).
-func availabilityBoundProvesOutsideRetention(matching []*execResult, winnerBlock *big.Int) bool {
-	proves, _ := availabilityBoundProofState(matching, winnerBlock)
-	return proves
-}
-
 // chainHeadProvesOutsideRetention is the original v1.1 head-depth proof:
-// outside iff head - winnerBlock > retentionBlocks.
-func chainHeadProvesOutsideRetention(winnerBlock *big.Int, head int64, retentionBlocks int64) bool {
-	if winnerBlock == nil || head <= 0 || retentionBlocks <= 0 {
+// outside iff head - reqBlock > retentionBlocks.
+func chainHeadProvesOutsideRetention(reqBlock *big.Int, head int64, retentionBlocks int64) bool {
+	if reqBlock == nil || head <= 0 || retentionBlocks <= 0 {
 		return false
 	}
-	depth := new(big.Int).Sub(big.NewInt(head), winnerBlock)
+	depth := new(big.Int).Sub(big.NewInt(head), reqBlock)
 	return depth.Cmp(big.NewInt(retentionBlocks)) > 0
 }
 

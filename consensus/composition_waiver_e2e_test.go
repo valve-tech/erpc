@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,26 +16,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// headNetwork is a minimal EvmNetwork test double reporting a fixed "latest"
-// head, so the empty-outside-retention waiver's block proof can be exercised
+// headNetwork is a minimal EvmNetwork test double whose Head reports a fixed
+// Latest, so the empty-outside-retention waiver's block proof can be exercised
 // end-to-end through determineWinner — the path chainHead actually reads
-// (common.EvmHighestLatestBlockNumber). The unit tests inject head/winnerBlock
-// directly; these drive the whole determineWinner pipeline the way a live
-// round does, which is what the reviewer asked to see proven.
+// (the request's Head through common.EvmHeadOf). The unit tests inject
+// head/requestedBlock directly; these drive the whole determineWinner pipeline
+// the way a live round does, which is what the reviewer asked to see proven.
 type headNetwork struct {
 	common.Network
 	latest  int64
 	maxMode bool // true → Config has no served-tip majority; chainHead must not trust latest
 }
 
-func (n *headNetwork) Id() string                                           { return "evm:1" }
-func (n *headNetwork) Label() string                                        { return "evm:1" }
-func (n *headNetwork) ProjectId() string                                    { return "test-project" }
-func (n *headNetwork) Architecture() common.NetworkArchitecture             { return common.ArchitectureEvm }
-func (n *headNetwork) EvmHighestLatestBlockNumber(context.Context) int64    { return n.latest }
-func (n *headNetwork) EvmHighestFinalizedBlockNumber(context.Context) int64 { return 0 }
-func (n *headNetwork) EvmLeaderUpstream(context.Context) common.Upstream    { return nil }
-func (n *headNetwork) EvmRefreshLatestBlock(context.Context)                {}
+func (n *headNetwork) Id() string                               { return "evm:1" }
+func (n *headNetwork) Label() string                            { return "evm:1" }
+func (n *headNetwork) ProjectId() string                        { return "test-project" }
+func (n *headNetwork) Architecture() common.NetworkArchitecture { return common.ArchitectureEvm }
+func (n *headNetwork) EvmHead(context.Context, *common.NormalizedRequest) common.EvmHead {
+	return common.EvmHead{Latest: n.latest}
+}
+func (n *headNetwork) EvmLaneHead(string, string) common.EvmHead {
+	return n.EvmHead(context.Background(), nil)
+}
 
 // Without this, a new EvmNetwork method makes the fake silently stop being an
 // EvmNetwork and chainHead falls back to participant pollers (fail-closed).
@@ -53,23 +56,40 @@ func (n *headNetwork) Config() *common.NetworkConfig {
 
 // winnerWithHead runs the full determineWinner pipeline with a network that
 // reports `head` as its latest block, so both the tie-dispute rule and the
-// waiver enforcement (chainHead + winnerBlockEvidence) see production-shaped
-// inputs.
-func winnerWithHead(t *testing.T, cfg *config, method string, head int64, results []*execResult) *slotResult {
+// waiver enforcement (chainHead + requestBlock) see production-shaped inputs.
+// block > 0 makes the client request name that block; 0 sends no params.
+func winnerWithHead(t *testing.T, cfg *config, method string, block, head int64, results []*execResult) *slotResult {
 	t.Helper()
-	return winnerOnNetwork(t, cfg, method, &headNetwork{latest: head}, results)
+	return winnerOnNetwork(t, cfg, method, block, &headNetwork{latest: head}, results)
 }
 
-func winnerOnNetwork(t *testing.T, cfg *config, method string, net *headNetwork, results []*execResult) *slotResult {
+func winnerOnNetwork(t *testing.T, cfg *config, method string, block int64, net *headNetwork, results []*execResult) *slotResult {
+	t.Helper()
+	return winnerForRequest(t, cfg, blockRequest(method, block), net, results)
+}
+
+func winnerForRequest(t *testing.T, cfg *config, rpc *common.JsonRpcRequest, net *headNetwork, results []*execResult) *slotResult {
 	t.Helper()
 	lg := zerolog.Nop()
-	req := common.NewNormalizedRequestFromJsonRpcRequest(&common.JsonRpcRequest{Method: method})
-	req.SetNetwork(net)
-	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+	ctx := requestCtx(rpc, net)
 	analysis := newConsensusAnalysis(&lg, ctx, cfg, results)
 	require.False(t, analysis.hasRemaining(), "test must present a complete round")
 	e := &executor{consensusPolicy: &consensusPolicy{logger: &lg, config: cfg}}
 	return e.determineWinner(ctx, &lg, analysis)
+}
+
+func blockRequest(method string, block int64) *common.JsonRpcRequest {
+	rpc := &common.JsonRpcRequest{Method: method}
+	if block > 0 {
+		rpc.Params = []interface{}{fmt.Sprintf("0x%x", block), false}
+	}
+	return rpc
+}
+
+func requestCtx(rpc *common.JsonRpcRequest, net *headNetwork) context.Context {
+	req := common.NewNormalizedRequestFromJsonRpcRequest(rpc)
+	req.SetNetwork(net)
+	return context.WithValue(context.Background(), common.RequestContextKey, req)
 }
 
 // waivedMetricValue reads the current empty_outside_retention waiver counter
@@ -83,10 +103,10 @@ func waivedMetricValue() float64 {
 }
 
 // TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty is the end-to-end proof
-// the reviewer gated the merge on: driven through determineWinner with a live
-// EvmNetwork head + configured blockEvidenceFields, the empty-outside-retention
-// waiver must actually promote the agreeing archives over pruned internals and
-// emit erpc_consensus_composition_waived_total{reason=empty_outside_retention}.
+// that, driven through determineWinner with a live EvmNetwork head and a
+// request naming its block, the empty-outside-retention waiver promotes the
+// agreeing archives over pruned internals and emits
+// erpc_consensus_composition_waived_total{reason=empty_outside_retention}.
 func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 	internal1 := taggedUpstream("internal-1", "type:internal")
 	internal2 := taggedUpstream("internal-2", "type:internal")
@@ -94,16 +114,18 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 	ext2 := taggedUpstream("external-2", "type:external")
 
 	head := int64(20_000_000)
-	// A tx mined at block 46147 (0xb443) — depth ~20M, far past retention 100.
-	tx := map[string]interface{}{"blockNumber": "0xb443"}
-	method := "eth_getTransactionByHash"
+	// Block 46147 — depth ~20M, far past retention 100.
+	oldBlock := int64(46_147)
+	// Block 19_999_920: depth 80 <= retention 100 → inside range.
+	recentBlock := int64(19_999_920)
+	tx := map[string]interface{}{"number": "0xb443"}
+	method := "eth_getBlockByNumber"
 
 	newCfg := func() *config {
 		return &config{
 			maxParticipants:      4,
 			agreementThreshold:   2,
 			requiredParticipants: emptyWaiverQuota(),
-			blockEvidenceFields:  map[string][]string{method: {"blockNumber"}},
 		}
 	}
 
@@ -115,7 +137,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		cfg.maxParticipants = 3
 		before := waivedMetricValue()
 
-		winner := winnerWithHead(t, cfg, method, head, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, head, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			objResultFrom(t, ext1, tx, 1),
 			objResultFrom(t, ext2, tx, 2),
@@ -135,7 +157,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		cfg.maxParticipants = 4
 		before := waivedMetricValue()
 
-		winner := winnerWithHead(t, cfg, method, head, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, head, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			errorFrom(internal2, common.NewErrEndpointTransportFailure(&url.URL{Host: "internal-2"}, fmt.Errorf("connection refused")), 1),
 			objResultFrom(t, ext1, tx, 2),
@@ -158,9 +180,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		before := waivedMetricValue()
 
 		lg := zerolog.Nop()
-		req := common.NewNormalizedRequestFromJsonRpcRequest(&common.JsonRpcRequest{Method: method})
-		req.SetNetwork(&headNetwork{latest: head})
-		ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+		ctx := requestCtx(blockRequest(method, oldBlock), &headNetwork{latest: head})
 		analysis := newConsensusAnalysis(&lg, ctx, cfg, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			objResultFrom(t, ext1, tx, 1),
@@ -189,7 +209,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		cfg := newCfg()
 		before := waivedMetricValue()
 
-		winner := winnerWithHead(t, cfg, method, head, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, head, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			emptyResultFrom(t, internal2, 1),
 			objResultFrom(t, ext1, tx, 2),
@@ -208,18 +228,15 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 	// internals could legitimately be right — the data may simply not exist yet
 	// — so the tie must stand as a dispute. This is the anti-fabrication floor
 	// that stops correlated externals outvoting an internal on live data.
-	t.Run("balanced tie holds when winner block is inside retention", func(t *testing.T) {
+	t.Run("balanced tie holds when requested block is inside retention", func(t *testing.T) {
 		cfg := newCfg()
-		recentHead := int64(20_000_000) // 0x1312d00
-		// Block 19_999_920 (0x1312cb0): depth 80 <= retention 100 → inside range.
-		recentTx := map[string]interface{}{"blockNumber": "0x1312cb0"}
 		before := waivedMetricValue()
 
-		winner := winnerWithHead(t, cfg, method, recentHead, []*execResult{
+		winner := winnerWithHead(t, cfg, method, recentBlock, head, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			emptyResultFrom(t, internal2, 1),
-			objResultFrom(t, ext1, recentTx, 2),
-			objResultFrom(t, ext2, recentTx, 3),
+			objResultFrom(t, ext1, tx, 2),
+			objResultFrom(t, ext2, tx, 3),
 		})
 
 		require.NotNil(t, winner)
@@ -229,26 +246,23 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		assert.Equal(t, 0.0, waivedMetricValue()-before, "no waiver may fire inside retention")
 	})
 
-	// Live mixed-node rounds can have a working poller latest on the archives
-	// even when the network served tip is still 0 (cold start, or the request
-	// selector scoped the gather away from the tip). The waiver must still
-	// prove "outside retention" from that participant poller signal rather
-	// than fail-closed on an unknown network head — that's the 1-empty +
-	// 2-archive shape that composition-disputed in smokebox with the metric
-	// absent, because v1.1 needs a head and v1 (MissingData) does not.
-	t.Run("1 empty + 2 archives fires when head comes from participant pollers", func(t *testing.T) {
+	// Live mixed-node rounds can have working poller latests even when the
+	// network served tip is still 0 (cold start, or the request selector scoped
+	// the gather away from the tip). The waiver proves "outside retention" from
+	// participant pollers when at least one non-winner (here the empty
+	// internal) corroborates the head.
+	t.Run("1 empty + 2 archives fires when a non-winner poller corroborates the head", func(t *testing.T) {
 		cfg := newCfg()
 		cfg.maxParticipants = 3
 		before := waivedMetricValue()
 
 		poller := common.NewFakeEvmStatePoller(head, head)
-		internal := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
+		internal := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"), common.WithEvmStatePoller(poller))
 		ext1 := common.NewFakeUpstream("external-1", common.WithTags("type:external"), common.WithEvmStatePoller(poller))
 		ext2 := common.NewFakeUpstream("external-2", common.WithTags("type:external"), common.WithEvmStatePoller(poller))
 
-		// Network reports 0 — the served tip is unknown. The poller latest on
-		// the archives is the only proof source.
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		// Network reports 0 — the served tip is unknown.
+		winner := winnerWithHead(t, cfg, method, oldBlock, 0, []*execResult{
 			emptyResultFrom(t, internal, 0),
 			objResultFrom(t, ext1, tx, 1),
 			objResultFrom(t, ext2, tx, 2),
@@ -256,10 +270,34 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 
 		require.NotNil(t, winner)
 		require.Nil(t, winner.Error,
-			"poller latest on the archives must supply the head when the network tip is unknown, got: %v", winner.Error)
+			"participant pollers must supply the head when the network tip is unknown, got: %v", winner.Error)
 		require.NotNil(t, winner.Result)
 		assert.Equal(t, 1.0, waivedMetricValue()-before,
 			"exactly one empty_outside_retention waiver must be recorded")
+	})
+
+	// Guard (issue 1363): two colluding archives inflate their poller latest
+	// to 50M while the empty internal has no poller. Their MIN is still 50M,
+	// so without a non-winner source a recent tx would look 30M deep.
+	t.Run("head reported only by the winning group fails closed", func(t *testing.T) {
+		cfg := newCfg()
+		cfg.maxParticipants = 3
+		before := waivedMetricValue()
+
+		inflated := common.NewFakeEvmStatePoller(50_000_000, 50_000_000)
+		internal := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
+		ext1 := common.NewFakeUpstream("external-1", common.WithTags("type:external"), common.WithEvmStatePoller(inflated))
+		ext2 := common.NewFakeUpstream("external-2", common.WithTags("type:external"), common.WithEvmStatePoller(inflated))
+
+		winner := winnerOnNetwork(t, cfg, method, recentBlock, &headNetwork{latest: 50_000_000, maxMode: true}, []*execResult{
+			emptyResultFrom(t, internal, 0),
+			objResultFrom(t, ext1, tx, 1),
+			objResultFrom(t, ext2, tx, 2),
+		})
+
+		require.NotNil(t, winner)
+		require.NotNil(t, winner.Error, "a head only the winners report must not prove outside retention")
+		assert.Equal(t, 0.0, waivedMetricValue()-before, "no waiver may fire on winner-only head evidence")
 	})
 
 	// Guard: a single archive inflating its poller latest must not raise the
@@ -275,12 +313,11 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		internal := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
 		ext1 := common.NewFakeUpstream("external-1", common.WithTags("type:external"), common.WithEvmStatePoller(honest))
 		ext2 := common.NewFakeUpstream("external-2", common.WithTags("type:external"), common.WithEvmStatePoller(inflated))
-		recentTx := map[string]interface{}{"blockNumber": "0x1312cb0"} // depth 80 from 20M
 
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		winner := winnerWithHead(t, cfg, method, recentBlock, 0, []*execResult{
 			emptyResultFrom(t, internal, 0),
-			objResultFrom(t, ext1, recentTx, 1),
-			objResultFrom(t, ext2, recentTx, 2),
+			objResultFrom(t, ext1, tx, 1),
+			objResultFrom(t, ext2, tx, 2),
 		})
 
 		require.NotNil(t, winner)
@@ -303,7 +340,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		ext1 := common.NewFakeUpstream("external-1", common.WithTags("type:external"), common.WithEvmStatePoller(poller))
 		ext2 := common.NewFakeUpstream("external-2", common.WithTags("type:external")) // no poller
 
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, 0, []*execResult{
 			emptyResultFrom(t, internal, 0),
 			objResultFrom(t, ext1, tx, 1),
 			objResultFrom(t, ext2, tx, 2),
@@ -328,12 +365,11 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		internal := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
 		ext1 := common.NewFakeUpstream("external-1", common.WithTags("type:external"), common.WithEvmStatePoller(honest))
 		ext2 := common.NewFakeUpstream("external-2", common.WithTags("type:external"), common.WithEvmStatePoller(honest))
-		recentTx := map[string]interface{}{"blockNumber": "0x1312cb0"} // depth 80 from 20M
 
-		winner := winnerOnNetwork(t, cfg, method, &headNetwork{latest: 50_000_000, maxMode: true}, []*execResult{
+		winner := winnerOnNetwork(t, cfg, method, recentBlock, &headNetwork{latest: 50_000_000, maxMode: true}, []*execResult{
 			emptyResultFrom(t, internal, 0),
-			objResultFrom(t, ext1, recentTx, 1),
-			objResultFrom(t, ext2, recentTx, 2),
+			objResultFrom(t, ext1, tx, 1),
+			objResultFrom(t, ext2, tx, 2),
 		})
 
 		require.NotNil(t, winner)
@@ -369,7 +405,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		e1 := taggedUpstream("external-1", "type:external")
 		e2 := taggedUpstream("external-2", "type:external")
 
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, 0, []*execResult{
 			emptyResultFrom(t, in1, 0),
 			emptyResultFrom(t, in2, 1),
 			objResultFrom(t, e1, tx, 2),
@@ -405,14 +441,12 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		)
 		e1 := taggedUpstream("external-1", "type:external")
 		e2 := taggedUpstream("external-2", "type:external")
-		// depth 80 from 20M — inside latestBlockMinus 100.
-		recentTx := map[string]interface{}{"blockNumber": "0x1312cb0"}
 
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		winner := winnerWithHead(t, cfg, method, recentBlock, 0, []*execResult{
 			emptyResultFrom(t, in1, 0),
 			emptyResultFrom(t, in2, 1),
-			objResultFrom(t, e1, recentTx, 2),
-			objResultFrom(t, e2, recentTx, 3),
+			objResultFrom(t, e1, tx, 2),
+			objResultFrom(t, e2, tx, 3),
 		})
 
 		require.NotNil(t, winner)
@@ -430,7 +464,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 		e1 := taggedUpstream("external-1", "type:external")
 		e2 := taggedUpstream("external-2", "type:external")
 
-		winner := winnerWithHead(t, cfg, method, 0, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, 0, []*execResult{
 			emptyResultFrom(t, in1, 0),
 			emptyResultFrom(t, in2, 1),
 			objResultFrom(t, e1, tx, 2),
@@ -451,7 +485,7 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 			{Tag: "type:external", MinParticipants: 1, MinAgreement: 1},
 		}
 
-		winner := winnerWithHead(t, cfg, method, head, []*execResult{
+		winner := winnerWithHead(t, cfg, method, oldBlock, head, []*execResult{
 			emptyResultFrom(t, internal1, 0),
 			emptyResultFrom(t, internal2, 1),
 			objResultFrom(t, ext1, tx, 2),
@@ -460,6 +494,101 @@ func TestEmptyOutsideRetentionWaiver_PromotesLoneNonEmpty(t *testing.T) {
 
 		require.NotNil(t, winner)
 		require.NotNil(t, winner.Error, "without opt-in the tie must remain unresolved")
+	})
+
+	// Guard (issue 1363): a hash lookup names no block, and the archives'
+	// claim of where the data sits is theirs, so it proves nothing alone. The
+	// waiver may judge that block only once an upstream outside the winners
+	// holds it at that number, under that hash, with the requested tx in it.
+	// The first upstream that returns the block decides; a disagreeing one
+	// fails closed rather than letting the waiver ask the next. The
+	// blockEvidenceFields opt-in trusts an unconfirmed block, never a
+	// contradicted one.
+	t.Run("hash lookup block needs a confirmer outside the winners", func(t *testing.T) {
+		txHash := "0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"
+		block16 := "0x" + strings.Repeat("ab", 32)
+		otherHash := "0x" + strings.Repeat("cd", 32)
+		held := func(txs ...string) map[string]interface{} {
+			return map[string]interface{}{"number": "0x10", "hash": block16, "transactions": txs}
+		}
+		tx := map[string]interface{}{"hash": txHash, "blockNumber": "0x10", "blockHash": block16}
+		receipt := map[string]interface{}{"transactionHash": txHash, "blockNumber": "0x10", "blockHash": block16}
+		evidence := map[string][]string{"eth_getTransactionByHash": {"blockNumber"}, "eth_getTransactionReceipt": {"blockNumber"}}
+
+		cases := []struct {
+			name     string
+			method   string
+			subject  string
+			answer   map[string]interface{}
+			int1     map[string]interface{} // block 16 as internal-1 holds it; nil = pruned
+			int2     map[string]interface{}
+			fires    bool
+			probesTo []string
+			evidence map[string][]string
+		}{
+			{"tx confirmed by the first abstainer", "eth_getTransactionByHash", txHash, tx, held(txHash), held(txHash), true, []string{"internal-1"}, nil},
+			{"receipt confirmed past a pruned abstainer", "eth_getTransactionReceipt", txHash, receipt, nil, held(txHash), true, []string{"internal-1", "internal-2"}, nil},
+			{"block by hash confirmed", "eth_getBlockByHash", block16, map[string]interface{}{"number": "0x10", "hash": block16}, held(), nil, true, []string{"internal-1"}, nil},
+			{"fabricated tx is not in the block", "eth_getTransactionByHash", txHash, tx, held(), held(txHash), false, []string{"internal-1"}, nil},
+			{"fabricated block hash", "eth_getTransactionByHash", txHash, map[string]interface{}{"hash": txHash, "blockNumber": "0x10", "blockHash": otherHash}, held(txHash), held(txHash), false, []string{"internal-1"}, nil},
+			{"no upstream outside the winners holds the block", "eth_getTransactionByHash", txHash, tx, nil, nil, false, []string{"internal-1", "internal-2"}, nil},
+			{"answer names no block", "eth_getTransactionByHash", txHash, map[string]interface{}{"hash": txHash}, held(txHash), held(txHash), false, nil, nil},
+			{"opt-in trusts a block no one else holds", "eth_getTransactionReceipt", txHash, receipt, nil, nil, true, []string{"internal-1", "internal-2"}, evidence},
+			{"opt-in still refuses a contradicted block", "eth_getTransactionByHash", txHash, tx, held(), held(txHash), false, []string{"internal-1"}, evidence},
+			// Answer names a recent block (depth 80 <= retention 100). Confirming
+			// it cannot release the quota, so the probe must not run.
+			{"inside-retention hash lookup skips the confirmer probe", "eth_getTransactionByHash", txHash,
+				map[string]interface{}{"hash": txHash, "blockNumber": "0x1312cff0", "blockHash": block16}, // 19_999_920
+				held(txHash), held(txHash), false, nil, nil},
+			// RespRefs is recent (skip probe) but a divergent blockEvidenceFields
+			// path names an ancient number. Without the skip→no-BEF rule that
+			// path would waive; it must not.
+			{"inside-retention skip does not trust divergent evidence", "eth_getTransactionByHash", txHash,
+				map[string]interface{}{"hash": txHash, "blockNumber": "0x1312cff0", "blockHash": block16, "ancientBlock": "0x10"},
+				nil, nil, false, nil, map[string][]string{"eth_getTransactionByHash": {"ancientBlock"}}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var probes []string
+				holder := func(id string, blk map[string]interface{}) common.Upstream {
+					return common.NewFakeUpstream(id, common.WithTags("type:internal"), common.WithForward(
+						func(ctx context.Context, r *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+							probes = append(probes, id)
+							jrq, err := r.JsonRpcRequest(ctx)
+							require.NoError(t, err)
+							require.Equal(t, "eth_getBlockByNumber", jrq.Method)
+							require.Equal(t, []interface{}{"0x10", false}, jrq.Params)
+							var result interface{}
+							if blk != nil {
+								result = blk
+							}
+							jrr, err := common.NewJsonRpcResponse(1, result, nil)
+							require.NoError(t, err)
+							return common.NewNormalizedResponse().WithJsonRpcResponse(jrr), nil
+						}))
+				}
+				before := waivedMetricValue()
+				cfg := newCfg()
+				cfg.blockEvidenceFields = tc.evidence
+
+				winner := winnerForRequest(t, cfg, &common.JsonRpcRequest{Method: tc.method, Params: []interface{}{tc.subject}}, &headNetwork{latest: head}, []*execResult{
+					emptyResultFrom(t, holder("internal-1", tc.int1), 0),
+					emptyResultFrom(t, holder("internal-2", tc.int2), 1),
+					objResultFrom(t, ext1, tc.answer, 2),
+					objResultFrom(t, ext2, tc.answer, 3),
+				})
+
+				require.NotNil(t, winner)
+				assert.Equal(t, tc.probesTo, probes, "probes must go to non-winners in order and stop at the first block returned")
+				if tc.fires {
+					require.Nil(t, winner.Error, "a block outside retention must release the internal quota")
+					assert.Equal(t, 1.0, waivedMetricValue()-before)
+					return
+				}
+				require.NotNil(t, winner.Error, "an unconfirmed answer block must never prove itself outside retention")
+				assert.Equal(t, 0.0, waivedMetricValue()-before)
+			})
+		}
 	})
 }
 
@@ -472,7 +601,7 @@ func missingDataWaivedMetricValue() float64 {
 
 // TestMissingDataWaiver_StgEthGetBalanceE2E is the determineWinner + metric
 // proof for the stg eth_getBalance miss: PreferNonEmpty+ReturnError (no
-// AcceptMostCommon), both waiver flags on internal, no blockEvidenceFields,
+// AcceptMostCommon), both waiver flags on internal, a request naming no block,
 // wrapped ErrUpstreamRequest/ErrEndpointMissingData from both internals, two
 // agreeing externals. Must return the external value and increment
 // erpc_consensus_composition_waived_total{reason=missing_data}.
@@ -509,7 +638,7 @@ func TestMissingDataWaiver_StgEthGetBalanceE2E(t *testing.T) {
 	}
 
 	before := missingDataWaivedMetricValue()
-	winner := winnerWithHead(t, cfg, "eth_getBalance", 26_090_571, []*execResult{
+	winner := winnerWithHead(t, cfg, "eth_getBalance", 0, 26_090_571, []*execResult{
 		errorFrom(int1, wrap(int1), 0),
 		errorFrom(int2, wrap(int2), 1),
 		resultFrom(t, ext1, "0x1234", 2),

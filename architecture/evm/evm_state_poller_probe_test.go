@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func headerScript(t *testing.T, has func(block int64) bool) forwardHandler {
 func TestCheckProbe_EmptyProbeDefaultsToBlockHeader(t *testing.T) {
 	up := newForwardingUpstream(123)
 	up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return true }))
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	ok, unsupported, err := p.checkProbe(context.Background(), "", 100)
 
@@ -55,7 +56,7 @@ func TestCheckProbe_EmptyProbeDefaultsToBlockHeader(t *testing.T) {
 
 func TestCheckProbe_UnknownProbeIsUnsupportedWithoutForwarding(t *testing.T) {
 	up := newForwardingUpstream(123)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	ok, unsupported, err := p.checkProbe(context.Background(), common.EvmAvailabilityProbeType("magic"), 100)
 
@@ -96,14 +97,21 @@ func TestCheckProbe_RoutesEachProbeToItsOwnMethod(t *testing.T) {
 			up.on("eth_call", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 				return jsonResult(req, `"0x64"`)
 			})
-			p := newGateTestPoller(t, up)
+			p := newUpstreamTestPoller(t, up, nil)
 
 			ok, unsupported, err := p.checkProbe(context.Background(), tc.probe, 100)
 
 			require.NoError(t, err)
 			assert.True(t, ok)
 			assert.False(t, unsupported)
-			assert.Equal(t, tc.wantAll, up.allCalls())
+			got := up.allCalls()
+			if tc.probe == common.EvmProbeCallState {
+				// The first callState probe discovers which canary the
+				// network takes (ArbSys or Multicall3, spec §6.11), so it may
+				// send more than one eth_call. It must send nothing else.
+				got = slices.Compact(got)
+			}
+			assert.Equal(t, tc.wantAll, got)
 		})
 	}
 }
@@ -113,7 +121,7 @@ func TestCheckProbe_RoutesEachProbeToItsOwnMethod(t *testing.T) {
 func TestCheckBlockHeaderProbe(t *testing.T) {
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), -1)
 
@@ -125,7 +133,7 @@ func TestCheckBlockHeaderProbe(t *testing.T) {
 	t.Run("HeaderPresentMeansAvailable", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= 1000 }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), 1000)
 		require.NoError(t, err)
@@ -139,7 +147,7 @@ func TestCheckBlockHeaderProbe(t *testing.T) {
 	t.Run("NullResultMeansUnavailable", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= 1000 }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), 999)
 		require.NoError(t, err)
@@ -153,7 +161,7 @@ func TestCheckBlockHeaderProbe(t *testing.T) {
 		up.on("eth_getBlockByNumber", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, errors.New("connection reset")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), 500)
 		require.NoError(t, err, "a transport error must be swallowed, not surfaced")
@@ -165,7 +173,7 @@ func TestCheckBlockHeaderProbe(t *testing.T) {
 		up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonRpcError(req, -32000, "missing trie node")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), 500)
 		require.NoError(t, err)
@@ -182,7 +190,7 @@ func TestCheckBlockHeaderProbe(t *testing.T) {
 		up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResultBesideError(req, blockHeader(500), -32000, "missing trie node")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, err := p.checkBlockHeaderProbe(context.Background(), 500)
 		require.NoError(t, err)
@@ -196,7 +204,7 @@ func TestFetchBlockHashByNumber(t *testing.T) {
 	t.Run("ReturnsHashFromHeader", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return true }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		hash, ok, err := p.fetchBlockHashByNumber(context.Background(), 7)
 		require.NoError(t, err)
@@ -213,7 +221,7 @@ func TestFetchBlockHashByNumber(t *testing.T) {
 		up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `{"number":"0x7","hash":""}`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		hash, ok, err := p.fetchBlockHashByNumber(context.Background(), 7)
 		require.NoError(t, err)
@@ -226,7 +234,7 @@ func TestFetchBlockHashByNumber(t *testing.T) {
 		up.on("eth_getBlockByNumber", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `{"number":"0x7"}`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		_, ok, err := p.fetchBlockHashByNumber(context.Background(), 7)
 		require.NoError(t, err)
@@ -235,7 +243,7 @@ func TestFetchBlockHashByNumber(t *testing.T) {
 
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		_, ok, err := p.fetchBlockHashByNumber(context.Background(), -5)
 		require.NoError(t, err)
@@ -254,7 +262,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), -1)
 		require.NoError(t, err)
@@ -266,7 +274,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 	t.Run("MissingBlockHashSkipsTheLogsCall", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return false }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -281,7 +289,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `[{"address":"0xdead"}]`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -300,7 +308,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `[]`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -313,7 +321,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `{"unexpected":"shape"}`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -326,7 +334,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, common.NewErrEndpointUnsupported(errors.New("no logs index"))
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -339,7 +347,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, common.NewErrUpstreamMethodIgnored("eth_getLogs", "fwd-ups")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		_, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -351,7 +359,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, errors.New("i/o timeout")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -364,7 +372,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonRpcError(req, -32601, "the method eth_getLogs does not exist")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -377,7 +385,7 @@ func TestCheckEventLogsProbe(t *testing.T) {
 		up.on("eth_getLogs", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonRpcError(req, -32000, "query returned more than 10000 results")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkEventLogsProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -403,7 +411,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 	// not on the balance fallback, so this case stays with the outer probe.
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkCallStateProbe(context.Background(), -1)
 		require.NoError(t, err)
@@ -419,7 +427,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 		up.on("eth_getBalance", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `"0x0"`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
@@ -436,7 +444,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 		up.on("eth_getBalance", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `null`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
@@ -451,7 +459,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 		up.on("eth_getBalance", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonRpcError(req, -32000, "missing trie node")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
@@ -464,7 +472,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 		up.on("eth_getBalance", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, common.NewErrEndpointUnsupported(errors.New("eth_getBalance disabled"))
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
@@ -477,7 +485,7 @@ func TestCheckBalanceStateProbe(t *testing.T) {
 		up.on("eth_getBalance", func(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return nil, errors.New("connection refused")
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkBalanceStateProbe(context.Background(), 4096)
 		require.NoError(t, err)
@@ -504,7 +512,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 	t.Run("MissingBlockHashSkipsEveryTraceCall", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return false }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -518,7 +526,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_block", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `[{"type":"call"}]`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -534,7 +542,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("debug_traceBlockByHash", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `[{"gas":"0x1"}]`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, _, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -551,7 +559,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_replayBlockTransactions", func(_ context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 			return jsonResult(req, `[{"trace":[]}]`)
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -568,7 +576,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_block", notFound)
 		up.on("debug_traceBlockByHash", notFound)
 		up.on("trace_replayBlockTransactions", notFound)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -585,7 +593,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_block", notFound)
 		up.on("debug_traceBlockByHash", emptyArray)
 		up.on("trace_replayBlockTransactions", notFound)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -601,7 +609,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_block", skip)
 		up.on("debug_traceBlockByHash", skip)
 		up.on("trace_replayBlockTransactions", skip)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		_, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -616,7 +624,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 		up.on("trace_block", boom)
 		up.on("debug_traceBlockByHash", boom)
 		up.on("trace_replayBlockTransactions", boom)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), 10)
 		require.NoError(t, err)
@@ -626,7 +634,7 @@ func TestCheckTraceDataProbe(t *testing.T) {
 
 	t.Run("NegativeBlockShortCircuits", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		ok, unsupported, err := p.checkTraceDataProbe(context.Background(), -3)
 		require.NoError(t, err)
@@ -642,7 +650,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 	t.Run("GenesisAvailableReturnsZeroAfterOneProbe", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return true }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, 1_000_000)
 		require.NoError(t, err)
@@ -654,7 +662,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 	t.Run("BlockOneFastPath", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= 1 }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, 1_000_000)
 		require.NoError(t, err)
@@ -666,7 +674,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 		const boundary = int64(4_000_037)
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= boundary }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, 9_000_000)
 		require.NoError(t, err)
@@ -678,7 +686,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 
 	t.Run("NegativeHighReturnsZeroWithoutProbing", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, -1)
 		require.NoError(t, err)
@@ -689,7 +697,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 	t.Run("EmptyProbeTypeDefaultsToBlockHeader", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= 500 }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), "", 0, 100_000)
 		require.NoError(t, err)
@@ -702,7 +710,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 	t.Run("NothingAvailableIsAnError", func(t *testing.T) {
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(int64) bool { return false }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, 1024)
 		require.ErrorIs(t, err, errEarliestBlockUnavailable)
@@ -720,7 +728,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 		const tip = int64(1024)
 		up := newForwardingUpstream(123)
 		up.on("eth_getBlockByNumber", headerScript(t, func(b int64) bool { return b >= tip }))
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeBlockHeader, 0, tip)
 		require.NoError(t, err)
@@ -739,7 +747,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 		up.on("trace_block", notFound)
 		up.on("debug_traceBlockByHash", notFound)
 		up.on("trace_replayBlockTransactions", notFound)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmProbeTraceData, 0, 2048)
 		require.ErrorIs(t, err, errEarliestProbeUnsupported)
@@ -752,7 +760,7 @@ func TestBinarySearchEarliest(t *testing.T) {
 
 	t.Run("AnUnknownProbeTypeIsUnsupported", func(t *testing.T) {
 		up := newForwardingUpstream(123)
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.binarySearchEarliest(context.Background(), common.EvmAvailabilityProbeType("magic"), 0, 2048)
 		require.ErrorIs(t, err, errEarliestProbeUnsupported)
@@ -795,10 +803,10 @@ func TestPollEarliestBlockNumber(t *testing.T) {
 			return jsonResult(req, `[{"address":"0xdead"}]`)
 		})
 
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 		// Seed latest so the poll does not have to fetch it. The seed and any
 		// later poll agree, because "latest" resolves to this same tip.
-		p.SuggestLatestBlock(9_000)
+		p.SuggestLatestBlock(9_000, time.Now())
 
 		gotHeader, err := p.PollEarliestBlockNumber(context.Background(), common.EvmProbeBlockHeader, time.Millisecond)
 		require.NoError(t, err)
@@ -830,7 +838,7 @@ func TestPollEarliestBlockNumber(t *testing.T) {
 			}
 			return jsonResult(req, blockHeader(block))
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		got, err := p.PollEarliestBlockNumber(context.Background(), common.EvmProbeBlockHeader, time.Millisecond)
 		require.NoError(t, err)
@@ -853,7 +861,7 @@ func TestPollEarliestBlockNumber(t *testing.T) {
 			}
 			return jsonResult(req, blockHeader(1))
 		})
-		p := newGateTestPoller(t, up)
+		p := newUpstreamTestPoller(t, up, nil)
 
 		_, err := p.PollEarliestBlockNumber(context.Background(), common.EvmProbeBlockHeader, time.Millisecond)
 		require.Error(t, err)

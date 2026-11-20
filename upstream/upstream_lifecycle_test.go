@@ -262,7 +262,11 @@ func TestUpstream_IgnoreMethodNeedsAutoIgnoreEnabled(t *testing.T) {
 		allowed, err = u.ShouldHandleMethod("eth_getLogs")
 		require.NoError(t, err)
 		assert.False(t, allowed)
-		assert.Contains(t, u.config.IgnoreMethods, "eth_getLogs")
+		// The ignore is a timed entry, not a config edit: it must not leak
+		// into the operator's IgnoreMethods.
+		_, timed := u.autoIgnored.Load("eth_getLogs")
+		assert.True(t, timed, "the ignore must be recorded as an expiring auto-ignore")
+		assert.NotContains(t, u.config.IgnoreMethods, "eth_getLogs")
 
 		// Other methods are untouched.
 		allowed, err = u.ShouldHandleMethod("eth_call")

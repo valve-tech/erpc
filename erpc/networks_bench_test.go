@@ -24,7 +24,7 @@ import (
 func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 	util.ConfigureTestLogger()
 	util.ResetGock()
-	defer util.ResetGock()
+	b.Cleanup(util.ResetGock)
 
 	// Mock upstream always succeeds quickly
 	gock.New("http://rpc-success.localhost").
@@ -103,6 +103,7 @@ func BenchmarkNetworkForward_SimpleSuccess(b *testing.B) {
 		mt,
 		nil,
 	)
+	stopAtEnd(b, ntw)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -146,14 +147,13 @@ func BenchmarkServedTip_EthCallLatest(b *testing.B) {
 			})
 			req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x0000000000000000000000000000000000000001","data":"0x"},"latest"]}`))
 			req.SetNetwork(ntw)
-			rctx := context.WithValue(ctx, common.RequestContextKey, req)
-			if ntw.EvmHighestLatestBlockNumber(rctx) <= 0 {
+			if ntw.headFor(ntw.requestScope(ctx, req)).Latest <= 0 {
 				b.Fatal("no served tip")
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				ntw.EvmHighestLatestBlockNumber(rctx)
+				ntw.headFor(ntw.requestScope(ctx, req))
 			}
 		})
 	}
@@ -165,7 +165,7 @@ func BenchmarkServedTip_EthCallLatest(b *testing.B) {
 func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 	util.ConfigureTestLogger()
 	util.ResetGock()
-	defer util.ResetGock()
+	b.Cleanup(util.ResetGock)
 
 	// Upstream replies with a "method not supported" error code for the tested method
 	gock.New("http://rpc-unsupported.localhost").
@@ -244,6 +244,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 		mt,
 		nil,
 	)
+	stopAtEnd(b, ntw)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -270,7 +271,7 @@ func BenchmarkNetworkForward_MethodIgnoreCase(b *testing.B) {
 func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 	util.ConfigureTestLogger()
 	util.ResetGock()
-	defer util.ResetGock()
+	b.Cleanup(util.ResetGock)
 
 	// Upstream sometimes returning 503
 	gock.New("http://rpc-flaky.localhost").
@@ -355,6 +356,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 		mt,
 		nil,
 	)
+	stopAtEnd(b, ntw)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -375,7 +377,7 @@ func BenchmarkNetworkForward_RetryFailures(b *testing.B) {
 func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) {
 	util.ConfigureTestLogger()
 	util.ResetGock()
-	defer util.ResetGock()
+	b.Cleanup(util.ResetGock)
 
 	gock.New("http://rpc1.localhost").
 		Persist().
@@ -473,6 +475,7 @@ func BenchmarkNetworkForward_ConcurrentEthGetLogsIntegrityEnabled(b *testing.B) 
 		mt,
 		nil,
 	)
+	stopAtEnd(b, ntw)
 	if err != nil {
 		b.Fatal(err)
 	}

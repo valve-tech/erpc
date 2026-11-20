@@ -30,7 +30,7 @@ func newClientIPServer(t *testing.T, forwarders, headers []string) *HttpServer {
 	srv, err := NewHttpServer(ctx, &logger, &common.ServerConfig{
 		TrustedIPForwarders: forwarders,
 		TrustedIPHeaders:    headers,
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil)
 	require.NoError(t, err)
 	return srv
 }

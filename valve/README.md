@@ -13,6 +13,8 @@ Next.js documentation site, and it changes on most merges.
 | [fork-reconcile.md](fork-reconcile.md) | The commit triage that brought the fork up to current upstream. |
 | [merge-review.md](merge-review.md) | Review of that merge. Carries a correction: the first pass recorded the `erpc` package as green when the run had been truncated by Go's default 600s timeout. |
 | [fallback-escape-decision.md](fallback-escape-decision.md) | Why the per-request fallback escape belongs in the selection policy, not in Go. |
+| [sync-2026-11-19.md](sync-2026-11-19.md) | The 2026-11-19 upstream sync: what #1335 replaced, what the fork dropped and kept, and the order to ship it. |
+| [conflict-minimization.md](conflict-minimization.md) | Where the fork's edits to upstream files cost conflicts, and the five cheapest ways to cut them. |
 | [billing-module.md](billing-module.md) | The design of `valvebilling/` — the valve billing path as a flag-gated Go package with a zero-file diff against upstream. Why the metering decision stays in Lua inside Redis and is never reimplemented in Go, and what can still break quietly. |
 | [periodic-enforcement.md](periodic-enforcement.md) | Serving billing from state eRPC refreshes on a timer, instead of from a blocking call. Quantifies what a cache TTL costs in overdraft, and finds that eRPC already ships the enforcement machinery — the blocker is that its key strategy looks up by the raw credential. |
 | [polyglot-live-run.md](polyglot-live-run.md) | One binary serving EVM, SVM and BTC at once against live public endpoints. Tests the "a chain is configuration, not Go" claim end to end. Config: [polyglot-live-pool.yaml](polyglot-live-pool.yaml). |

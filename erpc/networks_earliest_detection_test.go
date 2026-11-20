@@ -27,7 +27,7 @@ import (
 // when no earliestBlockPlus config is set (baseline fail-open behavior).
 func TestEarliestDetection_FailOpenWhenNoEarliestConfigured(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -82,6 +82,7 @@ func TestEarliestDetection_FailOpenWhenNoEarliestConfigured(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -100,7 +101,7 @@ func TestEarliestDetection_FailOpenWhenNoEarliestConfigured(t *testing.T) {
 // succeeds, requests below the earliest bound are properly blocked.
 func TestEarliestDetection_BlocksRequestAfterSuccessfulDetection(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,6 +196,7 @@ func TestEarliestDetection_BlocksRequestAfterSuccessfulDetection(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -215,7 +217,7 @@ func TestEarliestDetection_BlocksRequestAfterSuccessfulDetection(t *testing.T) {
 // detection always runs on instance bootstrap, regardless of existing shared state value.
 func TestEarliestDetection_InitialDetectionAlwaysRunsOnBootstrap(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -282,7 +284,7 @@ func TestEarliestDetection_InitialDetectionAlwaysRunsOnBootstrap(t *testing.T) {
 	// The key format matches what evm_state_poller uses (version-namespaced)
 	presetKey := data.CounterValueSchemaVersion + "/earliestBlock/evm:123:rpc1/blockHeader"
 	presetCounter := ssr.GetCounterInt64(presetKey, 0)
-	presetCounter.TryUpdate(ctx, 50) // Pre-set to 50
+	presetCounter.TryUpdate(ctx, 50, time.Now()) // Pre-set to 50
 
 	// Now bootstrap - detection should still run despite existing shared state value
 	upr := upstream.NewUpstreamsRegistry(ctx, &log.Logger, "prjA", []*common.UpstreamConfig{upCfg}, ssr, rlr, vr, pr, nil, mt, nil)
@@ -290,6 +292,7 @@ func TestEarliestDetection_InitialDetectionAlwaysRunsOnBootstrap(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -303,7 +306,7 @@ func TestEarliestDetection_InitialDetectionAlwaysRunsOnBootstrap(t *testing.T) {
 // handles periodic updates after initial detection.
 func TestEarliestDetection_SchedulerHandlesPeriodicUpdates(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -371,6 +374,7 @@ func TestEarliestDetection_SchedulerHandlesPeriodicUpdates(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -391,7 +395,7 @@ func TestEarliestDetection_SchedulerHandlesPeriodicUpdates(t *testing.T) {
 // range (min > max) is created which triggers fail-open behavior, allowing any request.
 func TestEarliestDetection_InvalidRangeTriggersFailOpen(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -470,6 +474,7 @@ func TestEarliestDetection_InvalidRangeTriggersFailOpen(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -496,7 +501,7 @@ func TestEarliestDetection_InvalidRangeTriggersFailOpen(t *testing.T) {
 // 4. New code: 13M < 46M, but with ignoreRollbackOf=0 decreases are allowed → block 30M succeeds
 func TestEarliestDetection_StaleHighValueInSharedState(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -622,7 +627,7 @@ func TestEarliestDetection_StaleHighValueInSharedState(t *testing.T) {
 	// Simulate Redis having 46M (latest block mistakenly stored as earliest)
 	// This is the exact bug scenario from production
 	staleCounter := ssr.GetCounterInt64(presetKey, 0)
-	staleCounter.TryUpdate(ctx, 46_000_000) // WRONG: 46M is the latest, not earliest!
+	staleCounter.TryUpdate(ctx, 46_000_000, time.Now()) // WRONG: 46M is the latest, not earliest!
 	require.Equal(t, int64(46_000_000), staleCounter.GetValue(), "stale value should be set before bootstrap")
 	t.Logf("Set stale value BEFORE bootstrap: %d", staleCounter.GetValue())
 
@@ -636,6 +641,7 @@ func TestEarliestDetection_StaleHighValueInSharedState(t *testing.T) {
 	// Create network and bootstrap
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -679,10 +685,10 @@ func TestEarliestDetection_DecreaseNotAllowedWithHighRollbackThreshold(t *testin
 
 	// Counter with ignoreRollbackOf = 1024 (like latestBlock/finalizedBlock)
 	counter := ssr.GetCounterInt64("test-counter", 1024)
-	counter.TryUpdate(ctx, 100)
+	counter.TryUpdate(ctx, 100, time.Now())
 
 	// Try to decrease - should be REJECTED (existing behavior preserved)
-	counter.TryUpdate(ctx, 50)
+	counter.TryUpdate(ctx, 50, time.Now())
 
 	assert.Equal(t, int64(100), counter.GetValue(),
 		"counters with ignoreRollbackOf > 0 should still reject decreases")
@@ -705,10 +711,10 @@ func TestEarliestDetection_DecreaseAllowedWithZeroRollbackThreshold(t *testing.T
 
 	// Counter with ignoreRollbackOf = 0 (like earliestBlock)
 	counter := ssr.GetCounterInt64("test-counter", 0)
-	counter.TryUpdate(ctx, 100)
+	counter.TryUpdate(ctx, 100, time.Now())
 
 	// Try to decrease - should be ACCEPTED with ignoreRollbackOf = 0
-	counter.TryUpdate(ctx, 50)
+	counter.TryUpdate(ctx, 50, time.Now())
 
 	assert.Equal(t, int64(50), counter.GetValue(),
 		"counters with ignoreRollbackOf = 0 should accept decreases")

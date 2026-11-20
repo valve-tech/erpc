@@ -513,6 +513,52 @@ func (e *ErrInvalidRequest) WithRetryableTowardNetwork(r bool) RetryableError {
 	return e
 }
 
+// ErrClientBatchTooLarge rejects a client batch that addresses more requests
+// to one network than its maxClientBatchSize allows. None of the batch runs.
+type ErrClientBatchTooLarge struct{ BaseError }
+
+const ErrCodeClientBatchTooLarge ErrorCode = "ErrClientBatchTooLarge"
+
+var NewErrClientBatchTooLarge = func(networkId string, batchSize, maxBatchSize int) error {
+	return &ErrClientBatchTooLarge{
+		BaseError{
+			Code:    ErrCodeClientBatchTooLarge,
+			Message: fmt.Sprintf("batch of %d requests to network %s exceeds the limit of %d (maxClientBatchSize)", batchSize, networkId, maxBatchSize),
+			Details: map[string]interface{}{
+				"networkId":          networkId,
+				"batchSize":          batchSize,
+				"maxClientBatchSize": maxBatchSize,
+			},
+		},
+	}
+}
+
+func (e *ErrClientBatchTooLarge) ErrorStatusCode() int {
+	return http.StatusBadRequest
+}
+
+// ErrRequestBodyTooLarge rejects an HTTP request body longer than
+// server.maxRequestBodySize. Reading stops just past the limit; none of it runs.
+type ErrRequestBodyTooLarge struct{ BaseError }
+
+const ErrCodeRequestBodyTooLarge ErrorCode = "ErrRequestBodyTooLarge"
+
+var NewErrRequestBodyTooLarge = func(maxBytes int64) error {
+	return &ErrRequestBodyTooLarge{
+		BaseError{
+			Code:    ErrCodeRequestBodyTooLarge,
+			Message: fmt.Sprintf("request body exceeds the limit of %d bytes (maxRequestBodySize)", maxBytes),
+			Details: map[string]interface{}{
+				"maxRequestBodySize": maxBytes,
+			},
+		},
+	}
+}
+
+func (e *ErrRequestBodyTooLarge) ErrorStatusCode() int {
+	return http.StatusRequestEntityTooLarge
+}
+
 type ErrInvalidUrlPath struct{ BaseError }
 
 const ErrCodeInvalidUrlPath ErrorCode = "ErrInvalidUrlPath"
@@ -1197,7 +1243,7 @@ func (e *ErrUpstreamsExhausted) SummarizeCauses() string {
 			} else if HasErrorCode(e, ErrCodeFailsafeCircuitBreakerOpen) {
 				cbOpen++
 				continue
-			} else if errors.Is(e, context.DeadlineExceeded) || HasErrorCode(e, ErrCodeEndpointRequestTimeout, ErrCodeNetworkRequestTimeout, ErrCodeFailsafeTimeoutExceeded) {
+			} else if IsTimeout(e) {
 				timeout++
 				continue
 			} else if HasErrorCode(e, ErrCodeEndpointServerSideException) {
@@ -1304,6 +1350,12 @@ func (e *ErrUpstreamsExhausted) SummarizeCauses() string {
 	}
 
 	return ""
+}
+
+// IsTimeout reports whether err is a deadline that ran out: the request's,
+// the network's, or a failsafe timeout.
+func IsTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || HasErrorCode(err, ErrCodeEndpointRequestTimeout, ErrCodeNetworkRequestTimeout, ErrCodeFailsafeTimeoutExceeded)
 }
 
 func (e *ErrUpstreamsExhausted) Errors() []error {
@@ -1616,6 +1668,29 @@ var NewErrUpstreamBlockUnavailable = func(upstreamId string, blockNumber int64, 
 }
 
 func (e *ErrUpstreamBlockUnavailable) ErrorStatusCode() int {
+	return http.StatusServiceUnavailable
+}
+
+// ErrUpstreamTagStateStale: the tag-state gate skipped the upstream for a
+// tag request, its "latest" state being stale (spec §6.11). Its own code,
+// never ErrUpstreamBlockUnavailable, so it never makes an answer -32014.
+type ErrUpstreamTagStateStale struct{ BaseError }
+
+const ErrCodeUpstreamTagStateStale ErrorCode = "ErrUpstreamTagStateStale"
+
+var NewErrUpstreamTagStateStale = func(upstreamId string) error {
+	return &ErrUpstreamTagStateStale{
+		BaseError{
+			Code:    ErrCodeUpstreamTagStateStale,
+			Message: "upstream executes \"latest\" in stale state",
+			Details: map[string]interface{}{
+				"upstreamId": upstreamId,
+			},
+		},
+	}
+}
+
+func (e *ErrUpstreamTagStateStale) ErrorStatusCode() int {
 	return http.StatusServiceUnavailable
 }
 
@@ -2766,6 +2841,22 @@ func IsRetryableTowardNetwork(err error) bool {
 	return true
 }
 
+// IsRetryableExecutionException reports whether err is an execution exception
+// its normalizer marked WithRetryableTowardNetwork(true): a verdict only as
+// fresh as the node's state (eth_sendRawTransaction "nonce too high"), so
+// another upstream may still accept the request.
+func IsRetryableExecutionException(err error) bool {
+	if !HasErrorCode(err, ErrCodeEndpointExecutionException) {
+		return false
+	}
+	se, ok := err.(StandardError)
+	if !ok {
+		return false
+	}
+	retryable, ok := se.DeepSearch("retryableTowardNetwork").(bool)
+	return ok && retryable
+}
+
 // isUpstreamMethodVerdict reports whether err's single-cause chain says the
 // upstream does not serve the method (-32601 or ignoreMethods). Alone it
 // stays retryable toward the network, so a sweep moves on to an upstream
@@ -3335,6 +3426,30 @@ func (e *ErrSubscriptionNotFound) ErrorStatusCode() int {
 	return http.StatusNotFound
 }
 
+type ErrNoSubscriptionSource struct{ BaseError }
+
+const ErrCodeNoSubscriptionSource ErrorCode = "ErrNoSubscriptionSource"
+
+var NewErrNoSubscriptionSource = func(networkId, subType string) error {
+	return &ErrNoSubscriptionSource{
+		BaseError{
+			Code:    ErrCodeNoSubscriptionSource,
+			Message: fmt.Sprintf("eth_subscribe %s needs a subscription source, none configured for network %s", subType, networkId),
+			Details: map[string]interface{}{
+				"networkId": networkId,
+				"subType":   subType,
+			},
+		},
+	}
+}
+
+func (e *ErrNoSubscriptionSource) ErrorStatusCode() int {
+	return http.StatusBadRequest
+}
+
+// ErrNoWsUpstreamAvailable rejects a passthrough subscription (a non-eth
+// *_subscribe method) on a network with no WebSocket upstream to carry it.
+// Valve fork: erpc/passthrough_subscription.go raises it.
 type ErrNoWsUpstreamAvailable struct{ BaseError }
 
 const ErrCodeNoWsUpstreamAvailable ErrorCode = "ErrNoWsUpstreamAvailable"
@@ -3380,6 +3495,20 @@ var NewErrInstanceSubscriptionLimitExceeded = func(max int) error {
 			Message: "maximum subscriptions per instance exceeded",
 			Details: map[string]interface{}{
 				"maxPerInstance": max,
+			},
+		},
+	}
+}
+
+// NewErrPendingVariantLimitExceeded refuses a newPendingTransactions
+// subscribe whose params would open more than max variants on a network.
+var NewErrPendingVariantLimitExceeded = func(max int) error {
+	return &ErrSubscriptionLimitExceeded{
+		BaseError{
+			Code:    ErrCodeSubscriptionLimitExceeded,
+			Message: "maximum distinct newPendingTransactions params per network exceeded",
+			Details: map[string]interface{}{
+				"maxVariantsPerNetwork": max,
 			},
 		},
 	}

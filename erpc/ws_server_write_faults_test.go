@@ -117,25 +117,25 @@ func TestWsWriteNormalizedResponse_WritesNothingOnAClosedConnection(t *testing.T
 	require.Empty(t, sock.Bytes())
 }
 
-// TestWsWriteNormalizedResponse_SendsAnEmptyFrameWhenItCannotSerialise records
-// what the client actually gets when the response cannot be written: a complete
-// text frame with an empty payload.
+// TestWsWriteNormalizedResponse_SendsNothingWhenItCannotSerialise records
+// what the client actually gets when the response cannot be written: nothing.
+// Upstream's writer encodes the whole message before it queues it, so an
+// encode failure never reaches the socket. (Before the 2026-11-19 sync the
+// client got a text frame with an empty payload; this test was
+// ..._SendsAnEmptyFrameWhenItCannotSerialise.)
 //
-// This is a defect, characterised here rather than endorsed. The client reads a
-// message that is not JSON and carries no id, so the call it belongs to never
-// resolves — it hangs until the client's own timeout. The HTTP path answers the
-// same failure with a JSON-RPC error envelope. See the upstream bug log.
-func TestWsWriteNormalizedResponse_SendsAnEmptyFrameWhenItCannotSerialise(t *testing.T) {
+// This is still a defect, characterised here rather than endorsed. The call
+// gets no answer and no id, so it hangs until the client's own timeout. The
+// HTTP path answers the same failure with a JSON-RPC error envelope. See the
+// upstream bug log.
+func TestWsWriteNormalizedResponse_SendsNothingWhenItCannotSerialise(t *testing.T) {
 	wsc, sock := newFaultWsConnection(t)
 
 	// A response that was never populated cannot be streamed.
 	wsc.writeNormalizedResponse(common.NewNormalizedResponse())
 
-	frames := wsFrames(t, sock.Bytes())
-	require.Len(t, frames, 1, "the client is sent exactly one frame")
-	require.Empty(t, frames[0],
-		"the payload is empty: no id, no error code, nothing the client can act on")
-	require.Zero(t, sock.WritesAfterFailure())
+	require.Zero(t, sock.Writes(), "the client is sent no frame at all")
+	require.Empty(t, sock.Bytes())
 }
 
 // TestWsWriteBatchResponse_AbandonsTheBatchWhenTheSocketDiesMidFrame drives a

@@ -240,11 +240,10 @@ func newForwardingNetwork(chainId int64) *forwardingNetwork {
 	return n
 }
 
-func (n *forwardingNetwork) EvmRefreshLatestBlock(context.Context) {}
-func (n *forwardingNetwork) Id() string                            { return n.networkId }
-func (n *forwardingNetwork) Label() string                         { return n.networkId }
-func (n *forwardingNetwork) ProjectId() string                     { return "test-project" }
-func (n *forwardingNetwork) Config() *common.NetworkConfig         { return n.cfg }
+func (n *forwardingNetwork) Id() string                    { return n.networkId }
+func (n *forwardingNetwork) Label() string                 { return n.networkId }
+func (n *forwardingNetwork) ProjectId() string             { return "test-project" }
+func (n *forwardingNetwork) Config() *common.NetworkConfig { return n.cfg }
 func (n *forwardingNetwork) Architecture() common.NetworkArchitecture {
 	return common.ArchitectureEvm
 }
@@ -253,13 +252,12 @@ func (n *forwardingNetwork) GetFinality(context.Context, *common.NormalizedReque
 	return n.finality
 }
 func (n *forwardingNetwork) Bootstrap(context.Context) error { return nil }
-func (n *forwardingNetwork) EvmHighestLatestBlockNumber(context.Context) int64 {
-	return n.highestLatest
+func (n *forwardingNetwork) EvmHead(context.Context, *common.NormalizedRequest) common.EvmHead {
+	return common.EvmHead{Latest: n.highestLatest, Finalized: n.highestFinalized, Leader: n.leader}
 }
-func (n *forwardingNetwork) EvmHighestFinalizedBlockNumber(context.Context) int64 {
-	return n.highestFinalized
+func (n *forwardingNetwork) EvmLaneHead(string, string) common.EvmHead {
+	return n.EvmHead(context.Background(), nil)
 }
-func (n *forwardingNetwork) EvmLeaderUpstream(context.Context) common.Upstream { return n.leader }
 
 // Forward drops the two upstream-only flags and reuses the shared router.
 func (n *forwardingNetwork) Forward(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {

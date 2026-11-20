@@ -221,7 +221,7 @@ func TestRunHedge_CompositeRequestsAreNeverHedged(t *testing.T) {
 	// calls against a node that is usually already the slow one.
 	e := hedgingExecutor(t, 0, nil)
 	req := requestFor(t, "eth_getLogs")
-	req.SetCompositeType(common.CompositeTypeLogsSplitProactive)
+	req.SetCompositeType(common.CompositeTypeLogsSplitOnError)
 	s := newHedgeScript(2)
 	want := hedgeResponse(t, "0x1")
 

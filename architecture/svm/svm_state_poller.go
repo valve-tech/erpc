@@ -305,9 +305,10 @@ func (e *SvmStatePoller) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
-// SetDebounceInterval wires the configured poll-throttle gate from
-// SvmNetworkConfig.StatePollerDebounce (see upstream.SetNetworkConfig). Callable
-// at any time; takes effect on the next ticker fire.
+// SetDebounceInterval wires the effective poll-throttle gate (per-upstream
+// override when set, else SvmNetworkConfig.StatePollerDebounce — see
+// upstream.SetNetworkConfig). Callable at any time; takes effect on the next
+// ticker fire.
 func (e *SvmStatePoller) SetDebounceInterval(d time.Duration) {
 	if d > 0 {
 		e.debounceInterval.Store(int64(d))
@@ -882,7 +883,7 @@ func (e *SvmStatePoller) suggestLatestSlot(slot int64) {
 	if slot <= 0 {
 		return
 	}
-	e.latestSlotShared.TryUpdate(e.appCtx, slot)
+	e.latestSlotShared.TryUpdate(e.appCtx, slot, time.Now())
 	// Tracker feed lives in the counter's OnValue callback (NewSvmStatePoller):
 	// it also covers traffic-fed and cross-instance updates, and skips values
 	// the counter rejected.
@@ -902,6 +903,6 @@ func (e *SvmStatePoller) suggestFinalizedSlot(slot int64) {
 	if slot <= 0 {
 		return
 	}
-	e.finalizedSlotShared.TryUpdate(e.appCtx, slot)
+	e.finalizedSlotShared.TryUpdate(e.appCtx, slot, time.Now())
 	// Tracker feed: see suggestLatestSlot.
 }

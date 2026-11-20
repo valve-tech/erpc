@@ -151,12 +151,6 @@ var (
 		Help:      "Open client WebSocket connections.",
 	}, []string{"project"})
 
-	MetricWebsocketSubscriptionsActive = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "websocket_subscriptions_active",
-		Help:      "Open client eth_subscribe subscriptions.",
-	}, []string{"project", "network", "kind"})
-
 	MetricWebsocketNotificationsSentTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "websocket_notifications_sent_total",
@@ -172,7 +166,7 @@ var (
 	MetricUpstreamSubscriptionsActive = DefineGauge(prometheus.GaugeOpts{
 		Namespace: "erpc",
 		Name:      "upstream_subscriptions_active",
-		Help:      "eth_subscribe subscriptions live on upstream WebSocket connections; one per filter shared by every client.",
+		Help:      "eth_subscribe subscriptions live on upstream WebSocket connections; one per topic a source feeds.",
 	}, []string{"project", "network", "upstream", "kind"})
 
 	MetricUpstreamSubscriptionEventsTotal = DefineCounter(prometheus.CounterOpts{
@@ -196,26 +190,146 @@ var (
 	MetricSubscriptionDedupEntries = DefineGauge(prometheus.GaugeOpts{
 		Namespace: "erpc",
 		Name:      "subscription_dedup_entries",
-		Help:      "Event keys held by the network's logs and newPendingTransactions dedup windows; each filter's window holds at most indexer.dedupWindowSize keys (default 8192).",
+		Help:      "Transaction hashes held by the network's mempool feed dedup set: those added within 60s, at most 100,000 per network.",
 	}, []string{"project", "network"})
-
-	MetricSubscriptionWithheldHeadsTotal = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "subscription_withheld_heads_total",
-		Help:      "Upstream newHeads events not delivered to clients because the network did not accept the head.",
-	}, []string{"project", "network"})
-
-	MetricSubscriptionUndeliveredTotal = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "subscription_undelivered_total",
-		Help:      "Upstream subscription events that passed dedup but matched no client subscription.",
-	}, []string{"project", "network", "kind"})
 
 	MetricNetworkSubscriptionLastHeadTimestamp = DefineGauge(prometheus.GaugeOpts{
 		Namespace: "erpc",
 		Name:      "network_subscription_last_head_timestamp_seconds",
-		Help:      "Unix time the subscription indexer last accepted a new head for the network.",
+		Help:      "Unix time the network-wide chain tracker's head last changed.",
 	}, []string{"project", "network"})
+
+	// MetricChainTrackerSourceHeadsTotal counts every source header intake
+	// handled, by outcome: voted, duplicate, malformed, gated_identity,
+	// gated_integrity, gated_voter.
+	MetricChainTrackerSourceHeadsTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_source_heads_total",
+		Help:      "Source headers handled by network intake, by outcome.",
+	}, []string{"project", "network", "upstream", "outcome"})
+
+	// MetricUpstreamReportAgeSeconds is how long the lag reference has stood
+	// above an upstream's newest report, by evidence: number (its shared
+	// counter) or hash (its newest hash vote; +Inf without one).
+	MetricUpstreamReportAgeSeconds = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "upstream_report_age_seconds",
+		Help:      "How long the lag reference has stood above the upstream's newest report, by evidence: number or hash.",
+	}, []string{"project", "network", "upstream", "evidence"})
+
+	MetricSourceResubscribeTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "source_resubscribe_total",
+		Help:      "Pending-transaction topics a push source subscribed again after 60s without a message while heads carried transactions.",
+	}, []string{"project", "network", "upstream", "topic"})
+
+	MetricSharedCounterRemoteRejectedTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "shared_counter_remote_rejected_total",
+		Help:      "Remote shared counter states this instance rejected, by reason (non_positive, small_rollback, held_rollback, stale_timestamp, malformed).",
+	}, []string{"reason"})
+
+	MetricChainTrackerReanchorTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_reanchor_total",
+		Help:      "Times a chain tracker's pins moved to another tree of held headers.",
+	}, []string{"project", "network"})
+
+	// MetricChainTrackerHeaderProofTotal counts the headers the network-wide
+	// chain tracker held, by what their hash proves under the registered
+	// header formats: verified; mismatch (after a header of the network
+	// verified, the network's format encodes it to another hash: q holders);
+	// unverified (any other: served at one holder); reason unencodable or
+	// hash_differs for the last two.
+	MetricChainTrackerHeaderProofTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_header_proof_total",
+		Help:      "Headers the network-wide chain tracker held, by hash proof (verified, unverified, mismatch) and reason (unencodable, hash_differs).",
+	}, []string{"project", "network", "proof", "reason"})
+
+	MetricChainTrackerResetTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_reset_total",
+		Help:      "Times a chain tracker reset to empty after 3 panics in a row.",
+	}, []string{"project", "network"})
+
+	MetricChainTrackerLatestReadTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_latest_read_total",
+		Help:      "Client eth_getBlockByNumber(latest) attempts sent upstream as the tag, each that upstream's poll of latest, by outcome: served (the view included the answer), head (the view's Head block served instead), failed (no answer).",
+	}, []string{"project", "network", "outcome"})
+
+	MetricChainTrackerSettleTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_settle_total",
+		Help:      "Chain tracker settle rounds, by why they started (tie, dispute, fork, recheck) and outcome (decided, undecided).",
+	}, []string{"project", "network", "reason", "outcome"})
+
+	MetricChainTrackerFetchTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_fetch_total",
+		Help:      "Chain tracker fetches by kind (header, receipts, logs, logs_hash: the logs gate's one header lookup by blockHash, bloom_trust: a block's receipts fetched to earn or keep the trust the logs gate's bloom verdicts need), scheduler class and outcome (ok, error, capacity: every upstream tried refused for capacity).",
+	}, []string{"project", "network", "kind", "class", "outcome"})
+
+	MetricChainTrackerFetchSlots = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_fetch_slots",
+		Help:      "Current share of the chain fetch scheduler's slots per class.",
+	}, []string{"project", "network", "class"})
+
+	MetricTaps = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "taps",
+		Help:      "Open taps: consumers reading a chain feed from their own cursor.",
+	}, []string{"project", "network", "transport", "kind"})
+
+	MetricTapEndTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "tap_end_total",
+		Help:      "Taps ended, by reason (out_of_range, lagging) and detail (below_window, fork_left_window, cursor_unknown, receipts_timeout, reorg_depth; lag).",
+	}, []string{"project", "network", "transport", "kind", "reason", "detail"})
+
+	MetricChainTrackerInvariantViolationsTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_invariant_violations_total",
+		Help:      "Chain-tracking invariant violations, by invariant; every one but final_hash_changed (a followed majority revert of a finalized block) must stay 0.",
+	}, []string{"project", "network", "invariant"})
+
+	MetricChainTrackerConfirmLagBlocks = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_confirm_lag_blocks",
+		Help:      "Blocks between the network-wide chain tracker's highest pin and its view's Head.",
+	}, []string{"project", "network"})
+
+	// MetricHeadClockTotal counts a lane's block clock fetches, one per
+	// answer, by kind (rung, probe, retry, vote, catch_up, guarantee,
+	// holder, edge, cold, held: a by-hash answer's block fetched by number,
+	// ahead: the shared early fetch, its block by number) and outcome: new
+	// (a new block), early (a rung's, probe's or retry's answer: the block
+	// was not there yet; an ahead fetch answered null), behind (another
+	// channel brought the block first), same (another kind's answer
+	// brought none), failed, joined (another fetch met the Ask: no fetch),
+	// dropped (answered after a clock reset), and skipped_push (a probe a
+	// push or another local fetch made needless: no fetch). Fetches are
+	// every outcome but joined and skipped_push.
+	MetricHeadClockTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "head_clock_total",
+		Help:      "Block clock fetches of a lane's chain tracker, by kind (rung, probe, retry, vote, catch_up, guarantee, holder, edge, cold, held, ahead) and outcome (new, early, behind, same, failed, joined, dropped, skipped_push).",
+	}, []string{"project", "network", "lane", "kind", "outcome"})
+
+	MetricHeadViewLagSeconds = DefineLabeledHistogram(prometheus.HistogramOpts{
+		Namespace: "erpc",
+		Name:      "head_view_lag_seconds",
+		Help:      "Time from a block's first local sight to the swap of the lane view that made it Head.",
+		Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+	}, []string{"project", "network", "lane"})
+
+	MetricHeadFirmLagBlocks = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "head_firm_lag_blocks",
+		Help:      "Blocks between a lane view's Head and its Firm: the thin region.",
+	}, []string{"project", "network", "lane"})
 
 	// MetricNetworkServedTipBlockNumber is the block number the network actually
 	// advertises/serves as the tip for a block tag (axis=latest|finalized): the
@@ -266,71 +380,6 @@ var (
 	// sustained regression as thousands. One sustained hold is +1 held, then +1
 	// failed_open if it never recovers — which is what makes any non-zero rate
 	// alert-worthy.
-	// MetricWsNotificationsDroppedTotal counts eth_subscription notifications
-	// that never reached a client's socket. reason="closing": the connection
-	// was closed with 4013 (a subscription passed its protocol cap, or the
-	// process's byte budget was spent and this connection held the most), so
-	// the client sees the gap. No notification is ever dropped silently.
-	MetricWsNotificationsDroppedTotal = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "ws_notifications_dropped_total",
-		Help:      "WebSocket subscription notifications that never reached the client, by network, event kind and reason (closing = the connection is being closed with 4013).",
-	}, []string{"network", "kind", "reason"})
-
-	// MetricIndexerDedupLateTotal counts filter events (logs, pending txs)
-	// the dedup window could not vouch for: a fresh key from a block the
-	// window has already evicted keys of. The window holds two blocks at the
-	// protocol's maximum logs per block, so a nonzero rate means one
-	// upstream ran more than that far behind another, and a duplicate may
-	// have reached clients.
-	MetricIndexerDedupLateTotal = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "indexer_dedup_late_total",
-		Help:      "Subscription filter events that arrived for a block the dedup window had already partly forgotten (a duplicate may have been delivered), by network and kind.",
-	}, []string{"network", "kind"})
-
-	// MetricWsQueuedNotifications and MetricWsQueuedBytes are what client
-	// subscriptions hold and have not yet written, per network.
-	MetricWsQueuedNotifications = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "ws_queued_notifications",
-		Help:      "WebSocket subscription notifications queued and not yet written, by network.",
-	}, []string{"network"})
-	MetricWsQueuedBytes = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "ws_queued_bytes",
-		Help:      "Bytes of WebSocket subscription notifications queued and not yet written, by network.",
-	}, []string{"network"})
-
-	// MetricWsQueueCap is the live per-subscription cap: two blocks of
-	// ceil(gasLimit / 375) logs, or notifyBufferSize if that is larger.
-	MetricWsQueueCap = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "ws_queue_cap",
-		Help:      "Per-subscription WebSocket notification queue cap, by network (two blocks at the protocol's maximum logs per block).",
-	}, []string{"network"})
-
-	// MetricWsBudgetBytesUsed and MetricWsBudgetBytesLimit are the process's
-	// notification byte budget.
-	MetricWsBudgetBytesUsed = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "ws_budget_bytes_used",
-		Help:      "Bytes charged against the process's WebSocket notification budget.",
-	}, []string{})
-	MetricWsBudgetBytesLimit = DefineGauge(prometheus.GaugeOpts{
-		Namespace: "erpc",
-		Name:      "ws_budget_bytes_limit",
-		Help:      "Size of the process's WebSocket notification budget in bytes.",
-	}, []string{})
-
-	// MetricWsBudgetClosesTotal counts connections closed with 4013, by
-	// reason: sub_cap or host_budget.
-	MetricWsBudgetClosesTotal = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "ws_budget_closes_total",
-		Help:      "WebSocket connections closed with 4013 because a subscriber fell too far behind, by reason (sub_cap = one subscription passed its protocol cap; host_budget = the process byte budget was spent and this connection held the most).",
-	}, []string{"reason"})
-
 	MetricNetworkServedTipRegressionTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_served_tip_regression_total",
@@ -372,6 +421,12 @@ var (
 		Name:      "selection_position",
 		Help:      "Selection-policy output position for an upstream: 0 = primary, 1+ = runner-up, -1 = excluded this tick.",
 	}, []string{"project", "network", "method", "upstream"})
+
+	MetricSelectionHeldPosition = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "selection_held_position",
+		Help:      "Held-ranking position for an upstream (finalized block reads on a network with a frozen upstream): 0 = primary, 1+ = runner-up, -1 = excluded; absent while the slot runs no held ranking. finality is the slot's (\"*\" unless evalScope splits by finality).",
+	}, []string{"project", "network", "method", "finality", "upstream"})
 
 	MetricSelectionRejectionTotal = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
@@ -517,12 +572,6 @@ var (
 		Help:      "Total number of times an upstream returned a stale (vs others) latest block number.",
 	}, []string{"project", "vendor", "network", "upstream", "category"})
 
-	MetricUpstreamStaleFinalizedBlock = DefineCounter(prometheus.CounterOpts{
-		Namespace: "erpc",
-		Name:      "upstream_stale_finalized_block_total",
-		Help:      "Total number of times an upstream returned a stale (vs others) finalized block number.",
-	}, []string{"project", "vendor", "network", "upstream"})
-
 	MetricUpstreamStaleUpperBound = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "upstream_stale_upper_bound_total",
@@ -547,6 +596,15 @@ var (
 		Name:      "integrity_violation_total",
 		Help:      "Total data-integrity check violations, by check id, verdict (reject = failed over; soft_flag = recorded but served) and target-block finality (finalized/unfinalized/unknown — separates genuine finalized/deterministic catches from reorg-prone unfinalized ones).",
 	}, []string{"project", "vendor", "network", "upstream", "category", "check", "verdict", "finality"})
+
+	// MetricIntegrityCheckSuspendedTotal counts integrity checks suspended
+	// for a network (spec §6.9): header checks no header passed at 2 heights
+	// in a row, the bloom check 8 blocks in a row mismatched.
+	MetricIntegrityCheckSuspendedTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "integrity_check_suspended_total",
+		Help:      "Integrity checks suspended for a network because no answer passed them at heights in a row, from vendors that meet the evidence quorum.",
+	}, []string{"project", "network", "check"})
 
 	// MetricUpstreamStateProvenBlock is the highest block at which the state
 	// probe PROVED the upstream holds that block's state (execution-context
@@ -576,45 +634,57 @@ var (
 		Help:      "Total state-trie probes by kind (context/proof/latest) and outcome (match/stale/pin_ignored/mismatch/unsupported/error).",
 	}, []string{"project", "vendor", "network", "upstream", "probe", "outcome"})
 
-	// MetricIntegrityFollowHead is the highest block of the CONTIGUOUS,
-	// parent-linked segment the ChainView follower has verified block by block
-	// (not the network head — see MetricIntegrityFollowLag for the difference).
-	MetricIntegrityFollowHead = DefineGauge(prometheus.GaugeOpts{
+	// MetricUpstreamTagStateStale is 1 while the tag-state gate skips the
+	// upstream for tag requests: its "latest" state is stale (spec §6.11).
+	MetricUpstreamTagStateStale = DefineGauge(prometheus.GaugeOpts{
 		Namespace: "erpc",
-		Name:      "integrity_follow_head",
-		Help:      "Highest block of the contiguous parent-linked chain segment verified by the integrity follower.",
+		Name:      "upstream_tag_state_stale",
+		Help:      "1 while the upstream's \"latest\" state is stale and the tag-state gate skips it for tag requests.",
+	}, []string{"project", "network", "upstream"})
+
+	// MetricUpstreamTagStateAllStaleTotal counts tag requests whose every
+	// routed upstream was stale: routed to the highest tag-state head, or
+	// refused when that head is more than 60s behind Latest.
+	MetricUpstreamTagStateAllStaleTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "upstream_tag_state_all_stale_total",
+		Help:      "Tag requests whose every routed upstream had stale \"latest\" state, by outcome (routed/refused).",
+	}, []string{"project", "network", "outcome"})
+
+	// MetricChainTrackerHead is the head of a chain tracker: the highest pin.
+	MetricChainTrackerHead = DefineGauge(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "chain_tracker_head",
+		Help:      "Head (highest pinned block) of a chain tracker.",
 	}, []string{"project", "network", "group"})
 
-	// MetricIntegrityFollowLag is how far the followed chain trails the network
-	// head. Steady-state should hover near zero; a growing lag means the
-	// follower cannot keep up (fetch failures, or a chain faster than
-	// maxBlocksPerTick).
-	MetricIntegrityFollowLag = DefineGauge(prometheus.GaugeOpts{
+	// MetricChainTrackerLag is how far a tracker's head trails the network's
+	// served tip.
+	MetricChainTrackerLag = DefineGauge(prometheus.GaugeOpts{
 		Namespace: "erpc",
-		Name:      "integrity_follow_lag",
-		Help:      "Blocks between the network head and the integrity follower's verified chain head.",
+		Name:      "chain_tracker_lag",
+		Help:      "Blocks between the network's served tip and a chain tracker's head.",
 	}, []string{"project", "network", "group"})
 
-	// MetricIntegrityFollowStall counts follower advances abandoned this tick,
-	// by reason. "unreconciled" means a forked block found no common ancestor
-	// within the reorg window — the follower is holding a chain the network no
-	// longer extends, which needs operator attention (window too small, or an
-	// upstream serving unrelated history).
-	MetricIntegrityFollowStall = DefineCounter(prometheus.CounterOpts{
+	// MetricChainTrackerReorgDepth observes how many pinned blocks each reorg
+	// of a chain tracker reverted. A depth of 1-2 is routine chain churn; a
+	// deep tail means evm.chainTracker.reorgWindow needs to cover it.
+	MetricChainTrackerReorgDepth = DefineLabeledHistogram(prometheus.HistogramOpts{
 		Namespace: "erpc",
-		Name:      "integrity_follow_stall_total",
-		Help:      "Total integrity follower advances abandoned, by reason (unreconciled = no common ancestor within the reorg window).",
-	}, []string{"project", "network", "group", "reason"})
-
-	// MetricIntegrityReorgDepth observes how many blocks each reconciled reorg
-	// replaced. A depth of 1-2 is routine chain churn; a deep tail means the
-	// reorgWindow needs to cover it or reconciliation will start failing.
-	MetricIntegrityReorgDepth = DefineLabeledHistogram(prometheus.HistogramOpts{
-		Namespace: "erpc",
-		Name:      "integrity_reorg_depth",
-		Help:      "Depth (blocks replaced) of each reorg reconciled by the integrity chain follower.",
+		Name:      "chain_tracker_reorg_depth",
+		Help:      "Depth (pinned blocks reverted) of each reorg a chain tracker followed.",
 		Buckets:   []float64{1, 2, 3, 5, 8, 13, 21, 34, 64, 128, 256},
 	}, []string{"project", "network", "group"})
+
+	// MetricTapDeliverySeconds observes, per block a tap writes, the time
+	// from when the block became deliverable (it reached the confirmed
+	// head, or the logs head for a logs tap) to its write.
+	MetricTapDeliverySeconds = DefineLabeledHistogram(prometheus.HistogramOpts{
+		Namespace: "erpc",
+		Name:      "tap_delivery_seconds",
+		Help:      "Seconds from a block's ready stamp (confirmed head; logs head for a logs tap) to the end of a tap's write of it.",
+		Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60},
+	}, []string{"transport", "kind"})
 
 	// MetricIntegrityCheck counts EVERY integrity check evaluation by outcome:
 	// pass (ran, no violation), skip (could not evaluate — unmodeled field /
@@ -629,12 +699,13 @@ var (
 	}, []string{"project", "vendor", "network", "upstream", "category", "check", "outcome"})
 
 	// MetricIntegrityAuxRequest counts auxiliary requests issued by integrity
-	// checks — force-fetches that are NOT part of the user's request (canonical
-	// header/receipts corroboration), by kind and outcome.
+	// checks — upstream requests that are NOT part of the user's request
+	// (canonical header/receipts corroboration, the logs gate's), by kind and
+	// outcome.
 	MetricIntegrityAuxRequest = DefineCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "integrity_aux_request_total",
-		Help:      "Total auxiliary (force-fetch) requests issued by integrity checks, by node group, kind (canonical_header/canonical_receipts), the actual method sent, target-block finality (finalized/unfinalized/unknown) and outcome (ok/error).",
+		Help:      "Total auxiliary requests issued by integrity checks, beyond the user's request, by node group, kind (canonical_header/canonical_receipts; the logs gate's logs_probe: an eth_getLogs ask of another holder or the re-ask, logs_hash: its header lookup of a blockHash, bloom_trust: a block's receipts fetched to earn or keep bloom trust), the actual method sent, target-block finality (finalized/unfinalized/unknown) and outcome (ok/error).",
 	}, []string{"project", "vendor", "network", "upstream", "group", "kind", "method", "finality", "outcome"})
 
 	// MetricIntegritySaved counts requests the integrity module SAVED: a check
@@ -941,6 +1012,59 @@ var (
 		Help:      "Total number of times the per-request fallback escape hatch fired because the primary upstream set was exhausted with retryable errors.",
 	}, []string{"project", "network", "category"})
 
+	// MetricHeadRefusalTotal counts the refusal rule's outcomes for requests
+	// naming a block (spec §6.4, §17): served, thin_found and thin_missing
+	// (a thin-region read found or still empty or missing after its
+	// retry), retried_found, retried_missing (a band read still empty or
+	// missing after its retry), served_missing (eth_getBlockByNumber in the
+	// head region, Latest − reorgWindow < N ≤ Latest, answered null or
+	// missing: the promise broke on this instance; other methods' null can
+	// be legit), future, future_after_wait (a near-future block still
+	// above the ceiling after W).
+	MetricHeadRefusalTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "head_refusal_total",
+		Help:      "Total requests naming a block, by the refusal rule's outcome: served, thin_found and thin_missing (Firm < N <= Latest, found or still empty or missing after the retry), retried_found, retried_missing (above Latest, at most the ceiling, empty or missing after the retry), served_missing (eth_getBlockByNumber with Latest - reorgWindow < N <= Latest, null or missing after the retry; must stay 0; other methods are not counted, their null or missing-data answer can be legit), future, future_after_wait.",
+	}, []string{"project", "network", "rule"})
+
+	// MetricLogsEmptyGateTotal counts the logs gate's verdicts on empty
+	// eth_getLogs answers the refusal rule would serve (spec §6.4 logs
+	// gate, §17): old (the block reached the view head W or more ago:
+	// served at once, unjudged), no (the pinned headers prove the range
+	// has no matching log: an empty block, a zero bloom, or a bloom that
+	// misses the filter once receipts proved the network's blooms; served
+	// at once), or, for a range that may hold
+	// one, maybe_alone (the request may select no other upstream, by its
+	// routing or its use-upstream selector, a split piece's pin included:
+	// served at once), maybe_agreed (another holder answered it empty
+	// too), maybe_found (another holder answered logs) and maybe_reasked
+	// (no holder answered within W: the first upstream's second answer).
+	// maybe_agreed, maybe_found and maybe_reasked are the reads that asked
+	// other holders, one at a time.
+	MetricLogsEmptyGateTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "logs_empty_gate_total",
+		Help:      "Total empty eth_getLogs answers the logs gate judged, by verdict: old (the block reached the view head W or more ago; served unjudged), no (headers prove no matching log: an empty block, a zero bloom, or a bloom that misses the filter once receipts proved the network's blooms; served), maybe_alone (the request may select no other upstream, by routing or use-upstream selector, split pieces included; served unconfirmed), maybe_agreed (another holder answered empty; served), maybe_found (another holder answered logs; served), maybe_reasked (no holder answered within W; the first upstream asked again and its answer served). maybe_agreed, maybe_found and maybe_reasked asked other holders one at a time, the next on an error, a null or the hedge delay. The gate runs only where integrity enables the getLogsEmptyGate check.",
+	}, []string{"project", "network", "verdict"})
+
+	// MetricHeadAskTotal counts every head Ask (spec §6.8, §17) by its
+	// caller and how it was met.
+	MetricHeadAskTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "head_ask_total",
+		Help:      "Total head Asks, by caller (clock, refusal, settle) and outcome (fetched, shared_fresh, inflight, backoff, pushed).",
+	}, []string{"project", "network", "reason", "outcome"})
+
+	// MetricFinalizedUnderQuorumTotal counts each advance of a lane's
+	// served Finalized that fewer voters attested than the quorum asks of
+	// the lane's voters (spec §6.4): the others' finalized tags are given
+	// up, so a lone attestation decides it.
+	MetricFinalizedUnderQuorumTotal = DefineCounter(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "finalized_under_quorum_total",
+		Help:      "Total advances of a lane's served finalized block attested by fewer voters than the served-tip quorum asks, the others' finalized tags given up.",
+	}, []string{"project", "network"})
+
 	// MetricCacheExecutorAttempt counts every attempt a cache-connector
 	// failsafe executor governs, keyed by the executor's identity (the
 	// matchMethod / matchFinality it was configured with) and the outcome
@@ -1054,7 +1178,8 @@ var (
 
 	// `reason` distinguishes a connector that genuinely had no entry
 	// ("connector_miss"), one that failed or timed out ("connector_error"), an
-	// entry rejected by the freshness/TTL guard ("ttl_rejected"), and a stored
+	// entry rejected by the freshness/TTL guard ("ttl_rejected"), an entry
+	// naming a block a reorg replaced ("orphaned"), and a stored
 	// empty result under CacheEmptyBehaviorIgnore ("empty_result"). Without it
 	// a slow or erroring cache backend is indistinguishable from a cold cache,
 	// which reads as a hit-rate problem instead of a latency problem.
@@ -1230,9 +1355,11 @@ var (
 	}, []string{"project", "network", "tag", "reason"})
 
 	// MetricConsensusCompositionWaiverUnproven counts fail-closed empty-outside-
-	// retention evaluations where the waiver could not be proven (no winner
-	// block, no finite abstainer availability lower bound, and/or no known
-	// chain head). Reason is one of: no_winner_block, no_avail_bound, no_head.
+	// retention evaluations where the waiver could not be proven. Reason is one
+	// of: no_request_block (neither the request nor the answer names a block),
+	// block_unconfirmed (no upstream outside the winners returned a hash
+	// lookup's answer block), block_contradicted (one did, and it disagrees),
+	// no_avail_bound, no_head.
 	// Mid-round deferral (round still collecting) is debug-logged, not counted.
 	MetricConsensusCompositionWaiverUnproven = DefineLabeledCounter(prometheus.CounterOpts{
 		Namespace: "erpc",
@@ -1463,16 +1590,6 @@ var (
 		Help:      "Size of the result body of upstream JSON-RPC responses in bytes (decoded post-gzip), per network/method/finality.",
 		Buckets:   []float64{4096, 65536, 1048576, 16777216, 104857600},
 	}, []string{"project", "network", "category", "finality"})
-
-	// Each client subscription has its own protocol-sized queue
-	// (server.webSocket.notifyBufferSize raises its floor); a connection has
-	// no queue of its own.
-	MetricWebsocketSendQueueLength = DefineLabeledHistogram(prometheus.HistogramOpts{
-		Namespace: "erpc",
-		Name:      "websocket_send_queue_length",
-		Help:      "Notifications still queued on a client subscription when its writer takes the next one.",
-		Buckets:   []float64{0, 1, 4, 16, 64, 128, 256, 1024},
-	}, []string{"project", "network", "kind"})
 )
 
 func ParseHistogramBuckets(bucketsStr string) ([]float64, error) {

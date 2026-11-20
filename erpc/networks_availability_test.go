@@ -31,7 +31,7 @@ func i64(v int64) *int64 { return &v }
 // Lower bound: exactBlock, request below lower should skip (UpstreamsExhausted)
 func TestNetworkAvailability_LowerExactBlock_Skip(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -77,6 +77,7 @@ func TestNetworkAvailability_LowerExactBlock_Skip(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -96,7 +97,7 @@ func TestNetworkAvailability_LowerExactBlock_Skip(t *testing.T) {
 // Lower bound: latestBlockMinus, skip when below (latest - N)
 func TestNetworkAvailability_LowerLatestMinus_Skip(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -141,6 +142,7 @@ func TestNetworkAvailability_LowerLatestMinus_Skip(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 
 	// Bootstrap upstreams registry AFTER creating network
 	upr.Bootstrap(ctx)
@@ -167,7 +169,7 @@ func TestNetworkAvailability_LowerLatestMinus_Skip(t *testing.T) {
 // Lower bound: earliestBlockPlus, initialize earliest via binary search fast-path (block 0 present) then skip for below-bound request
 func TestNetworkAvailability_LowerEarliestPlus_InitAndSkip(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 1) // Expect 1 persist mock for block 0
 
@@ -233,6 +235,7 @@ func TestNetworkAvailability_LowerEarliestPlus_InitAndSkip(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -252,7 +255,7 @@ func TestNetworkAvailability_LowerEarliestPlus_InitAndSkip(t *testing.T) {
 // Mixed invalid range (lower latest-10, upper earliest+0) should fail-open (unbounded) and allow request
 func TestNetworkAvailability_InvalidRange_FailOpen_AllowsRequest(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 2) // 2 persist mocks for block 0 and block 1
 
@@ -321,6 +324,7 @@ func TestNetworkAvailability_InvalidRange_FailOpen_AllowsRequest(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -339,7 +343,7 @@ func TestNetworkAvailability_InvalidRange_FailOpen_AllowsRequest(t *testing.T) {
 // Exact window with both bounds: below and above should skip, inside should pass
 func TestNetworkAvailability_Window_ExactLowerUpper(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -396,6 +400,7 @@ func TestNetworkAvailability_Window_ExactLowerUpper(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -433,7 +438,7 @@ func TestNetworkAvailability_Window_ExactLowerUpper(t *testing.T) {
 // earliestBlockPlus with updateRate=0 (freeze): discover earliest=1 (0 missing, 1 present) and do not advance later
 func TestNetworkAvailability_EarliestPlus_Freeze_NoAdvance(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 2) // 2 persist mocks for block discovery
 
@@ -495,6 +500,7 @@ func TestNetworkAvailability_EarliestPlus_Freeze_NoAdvance(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -522,7 +528,7 @@ func TestNetworkAvailability_EarliestPlus_Freeze_NoAdvance(t *testing.T) {
 // earliestBlockPlus with updateRate>0: start with earliest=0 then prune to 1 and verify request at 0 is skipped after scheduler
 func TestNetworkAvailability_EarliestPlus_UpdateRate_Advance(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 2) // 2 persist mocks remain after Times(1) is consumed
 
@@ -582,6 +588,7 @@ func TestNetworkAvailability_EarliestPlus_UpdateRate_Advance(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -602,7 +609,7 @@ func TestNetworkAvailability_EarliestPlus_UpdateRate_Advance(t *testing.T) {
 // Unsupported probe (eventLogs) should fail-open (earliest unknown => unbounded) and allow requests
 func TestNetworkAvailability_UnsupportedProbe_FailOpen(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 1) // 1 persist mock for block 0
 
@@ -654,6 +661,7 @@ func TestNetworkAvailability_UnsupportedProbe_FailOpen(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -670,7 +678,7 @@ func TestNetworkAvailability_UnsupportedProbe_FailOpen(t *testing.T) {
 // Upper earliest+0: above upper skipped, at earliest OK
 func TestNetworkAvailability_UpperEarliestPlus_Enforced(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 3) // 3 persist mocks for blocks
 
@@ -735,6 +743,7 @@ func TestNetworkAvailability_UpperEarliestPlus_Enforced(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -765,7 +774,7 @@ func b(v bool) *bool { return &v }
 // Default should NOT override method-level true (method > defaults)
 func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideMethod(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -826,6 +835,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideMethod(t *
 		}},
 	}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -844,7 +854,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideMethod(t *
 // Default should NOT override network-level true (network > defaults)
 func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideNetwork(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -897,6 +907,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideNetwork(t 
 		Evm:          &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}, // network-level true
 	}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -918,7 +929,7 @@ func TestNetworkAvailability_Enforce_Precedence_DefaultDoesNotOverrideNetwork(t 
 // other Enforce_* tests in this file).
 func TestNetworkAvailability_Enforce_ConfiguredBounds_Override_DefaultFalse(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -968,6 +979,7 @@ func TestNetworkAvailability_Enforce_ConfiguredBounds_Override_DefaultFalse(t *t
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -992,7 +1004,7 @@ func TestNetworkAvailability_Enforce_ConfiguredBounds_Override_DefaultFalse(t *t
 // and asserts that configured per-upstream bounds still take effect.
 func TestNetworkAvailability_Enforce_MergedDefaults_DoNotMaskConfiguredBounds(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -1048,6 +1060,7 @@ func TestNetworkAvailability_Enforce_MergedDefaults_DoNotMaskConfiguredBounds(t 
 		}},
 	}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -1066,7 +1079,7 @@ func TestNetworkAvailability_Enforce_MergedDefaults_DoNotMaskConfiguredBounds(t 
 // Network-level false should disable enforcement regardless of defaults
 func TestNetworkAvailability_Enforce_NetworkFalse_Disables(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 	defer util.AssertNoPendingMocks(t, 0)
 
@@ -1117,6 +1130,7 @@ func TestNetworkAvailability_Enforce_NetworkFalse_Disables(t *testing.T) {
 
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(false)}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -1135,7 +1149,7 @@ func TestNetworkAvailability_Enforce_NetworkFalse_Disables(t *testing.T) {
 // by enforceBlockAvailability (issue #934).
 func TestCheckUpstreamBlockAvailability_BlockBeyondLatest_ReturnsRetryableError(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1179,6 +1193,7 @@ func TestCheckUpstreamBlockAvailability_BlockBeyondLatest_ReturnsRetryableError(
 	// Enable enforcement
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -1206,7 +1221,7 @@ func TestCheckUpstreamBlockAvailability_BlockBeyondLatest_ReturnsRetryableError(
 // Test that small block distance is retryable
 func TestCheckUpstreamBlockAvailability_SmallDistance_IsRetryable(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1251,6 +1266,7 @@ func TestCheckUpstreamBlockAvailability_SmallDistance_IsRetryable(t *testing.T) 
 	// Enable enforcement
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -1302,7 +1318,7 @@ func TestErrUpstreamBlockUnavailable_ContainsDetails(t *testing.T) {
 // Test that ErrUpstreamBlockUnavailable error contains correct details
 func TestCheckUpstreamBlockAvailability_ErrorHasCorrectDetails(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1347,6 +1363,7 @@ func TestCheckUpstreamBlockAvailability_ErrorHasCorrectDetails(t *testing.T) {
 	// Enable enforcement so block availability is checked
 	ntwCfg := &common.NetworkConfig{Architecture: common.ArchitectureEvm, Evm: &common.EvmNetworkConfig{ChainId: 123, EnforceBlockAvailability: b(true)}}
 	network, _ := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
@@ -1384,10 +1401,12 @@ func TestCheckUpstreamBlockAvailability_ErrorHasCorrectDetails(t *testing.T) {
 //
 // EXPECTED: The upstream should be selected once, fail block availability check, and
 // the error should be recorded. The loop should then exhaust upstreams and return
-// ErrUpstreamsExhausted, NOT spin until context timeout.
+// ErrUpstreamsExhausted, NOT spin until context timeout. The network has a block time
+// sample, so the block is far future and refused at once; before the first sample a
+// report age is unknown and bounds nothing, so the block would wait up to W (spec §6.4).
 func TestRetryableBlockUnavailability_NoInfiniteLoop(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 	util.SetupMocksForEvmStatePoller()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1439,10 +1458,12 @@ func TestRetryableBlockUnavailability_NoInfiniteLoop(t *testing.T) {
 		},
 	}
 	network, err := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
+	sampleBlockTime(t, network)
 
 	// Request block 0x111188BA = latestBlock(0x11118888) + 50
 	// Distance of 50 is within default MaxRetryableBlockDistance of 128, so this is a RETRYABLE error
@@ -1484,15 +1505,15 @@ func TestRetryableBlockUnavailability_NoInfiniteLoop(t *testing.T) {
 }
 
 // TestHandleBlockSkip_RetryableTriggersStatePollerRefresh verifies that when a
-// block is slightly ahead of the upstream's known latest (retryable case),
-// handleBlockSkip triggers an async PollLatestBlockNumber call. We prove this
-// by using a dynamic gock response: after a baseline of polls during bootstrap,
-// the very next poll still returns the old block (consumed by EvmAssertBlockAvailability),
-// but the poll after that returns a newer block. If handleBlockSkip fires its
-// async poll, the state poller picks up the newer block number.
+// block is ahead of the upstream's known latest within the retryable distance,
+// handleBlockSkip Asks the upstream in the background (spec §6.4, §6.8): the
+// first poll after the bootstrap baseline is that Ask's, takes skipAskDelay
+// and returns a newer block. The request returns before it; the poller then
+// picks the newer block up. The block is beyond the near future, which
+// would wait up to W for the ceiling (§6.4).
 func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1521,6 +1542,8 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 			// the newer block so we can prove the refresh fired.
 			bn := "0x11118888"
 			if bl > 0 && sinceBaseline >= 1 {
+				// The skip's Ask is slow: the request must not wait on it.
+				time.Sleep(skipAskDelay)
 				bn = "0x11118889"
 			}
 			body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"number":"%s","timestamp":"0x6702a8f0"}}`, bn)
@@ -1551,7 +1574,7 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 			ChainId:             123,
 			StatePollerInterval: common.Duration(120 * time.Second),
 			StatePollerDebounce: common.Duration(1 * time.Nanosecond), // Near-zero debounce so every PollLatestBlockNumber fires (0 is overridden to 5s by defaults)
-			// Upper = latest turns "block just ahead of the head" into a retryable skip.
+			// Upper = latest turns a block ahead of the head into a retryable skip.
 			BlockAvailability: &common.EvmBlockAvailabilityConfig{
 				Upper: &common.EvmAvailabilityBoundConfig{LatestBlockMinus: i64(0)},
 			},
@@ -1585,41 +1608,46 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 		},
 	}
 	network, err := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
+	// Past the cold start, a block this far above fresh reports is future,
+	// beyond the near future: no wait, no Ask (spec §6.4).
+	sampleBlockTime(t, network)
 
 	pollBaseline.Store(latestPollCount.Load())
 	require.Greater(t, pollBaseline.Load(), int64(0), "state poller should have polled during bootstrap")
 
-	// Request block 0x11118889 (1 ahead of latest 0x11118888, retryable)
-	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0000000000000000000000000000000000000000","0x11118889"]}`))
+	// Request block 0x11118898: 16 ahead of latest 0x11118888, within the
+	// retryable distance (128), above the near future (W / bt + 1 = 4 blocks).
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0000000000000000000000000000000000000000","0x11118898"]}`))
 	req.SetNetwork(network)
 
-	fwdCtx, fwdCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	fwdCtx, fwdCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer fwdCancel()
+	start := time.Now()
 	_, fwdErr := network.Forward(fwdCtx, req)
+	elapsed := time.Since(start)
 	require.Error(t, fwdErr)
+	require.Less(t, elapsed, skipAskDelay/2, "the skipped upstream is Asked in the background: the request never waits on it")
 
-	// Wait for the handleBlockSkip async PollLatestBlockNumber goroutine
-	time.Sleep(300 * time.Millisecond)
-
-	afterPolls := latestPollCount.Load()
-	delta := afterPolls - pollBaseline.Load()
-	// Bounds-only gating no longer force-polls synchronously; handleBlockSkip fires
-	// at least the async refresh poll for a retryable skip.
-	require.GreaterOrEqual(t, delta, int64(1),
-		"retryable block skip should trigger at least 1 async refresh poll after baseline; delta=%d", delta)
+	require.Eventually(t, func() bool { return latestPollCount.Load()-pollBaseline.Load() >= 1 }, 2*skipAskDelay, 20*time.Millisecond,
+		"retryable block skip should trigger at least 1 async refresh poll after baseline")
 
 	// The async poll returned 0x11118889 → state poller should have updated
 	ups, upsErr := upr.GetSortedUpstreams(ctx, util.EvmNetworkId(123), "eth_getBalance")
 	require.NoError(t, upsErr)
 	require.NotEmpty(t, ups)
 	eu := ups[0].(common.EvmUpstream)
-	require.Equal(t, int64(0x11118889), eu.EvmStatePoller().LatestBlock(),
+	require.Eventually(t, func() bool { return eu.EvmStatePoller().LatestBlock() == 0x11118889 }, 2*skipAskDelay, 20*time.Millisecond,
 		"state poller should reflect the updated block from handleBlockSkip's async poll")
 }
+
+// skipAskDelay is how long the skipped upstream's Ask takes in
+// TestHandleBlockSkip_RetryableTriggersStatePollerRefresh.
+const skipAskDelay = 3 * time.Second
 
 // TestHandleBlockSkip_NonRetryableDoesNotTriggerRefresh verifies that when a
 // block is far beyond the upstream's latest (non-retryable case),
@@ -1628,7 +1656,7 @@ func TestHandleBlockSkip_RetryableTriggersStatePollerRefresh(t *testing.T) {
 // never fires an async poll, the state poller never picks up the newer block.
 func TestHandleBlockSkip_NonRetryableDoesNotTriggerRefresh(t *testing.T) {
 	util.ResetGock()
-	defer util.ResetGock()
+	t.Cleanup(util.ResetGock)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1718,10 +1746,15 @@ func TestHandleBlockSkip_NonRetryableDoesNotTriggerRefresh(t *testing.T) {
 		},
 	}
 	network, err := NewNetwork(ctx, &log.Logger, "prjA", ntwCfg, rlr, upr, mt, nil)
+	stopAtEnd(t, network)
 	require.NoError(t, err)
 	require.NoError(t, upr.PrepareUpstreamsForNetwork(ctx, util.EvmNetworkId(123)))
 	require.NoError(t, network.Bootstrap(ctx))
 	network.PinUpstreamOrderForTest()
+	// Past the cold start, a block far above fresh reports is future: no
+	// Ask, so every poll after baseline would be handleBlockSkip's. Cold,
+	// the refusal rule Asks the stale report, then the band (spec §6.4).
+	sampleBlockTime(t, network)
 
 	pollBaseline.Store(latestPollCount.Load())
 	require.Greater(t, pollBaseline.Load(), int64(0), "state poller should have polled during bootstrap")

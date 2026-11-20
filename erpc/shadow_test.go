@@ -259,8 +259,10 @@ func TestShadow_SkipsTheCandidateEntirelyAtSampleRateZero(t *testing.T) {
 	require.False(t, node.sawMethod("eth_blockNumber"))
 	before := shadowIdentical(t, shadows[0], network, "eth_blockNumber")
 
+	// The sample roll runs in shadowTargets, in the request path (upstream's
+	// split), so the mirror call goes through it as projects.go does.
 	for i := 0; i < 20; i++ {
-		project.executeShadowRequests(ctx, network, shadows,
+		project.executeShadowRequests(ctx, network, project.shadowTargets("eth_blockNumber", shadows),
 			servedResponse(t, network, "eth_blockNumber", `"0x64"`))
 	}
 

@@ -26,6 +26,7 @@ type FakeUpstream struct {
 	cordonMu           sync.RWMutex
 	tracker            HealthTracker
 	stateProvenBlock   atomic.Int64
+	forward            func(context.Context, *NormalizedRequest) (*NormalizedResponse, error)
 }
 
 func NewFakeUpstream(id string, opts ...func(*FakeUpstream)) Upstream {
@@ -84,6 +85,14 @@ func WithGrpcConfig(cfg *GrpcUpstreamConfig) func(*FakeUpstream) {
 func WithFakeUpstreamNetworkID(networkID string) func(*FakeUpstream) {
 	return func(u *FakeUpstream) {
 		u.networkIDOverride = networkID
+	}
+}
+
+// WithForward makes Forward answer through fn; without it Forward returns
+// nil, nil.
+func WithForward(fn func(context.Context, *NormalizedRequest) (*NormalizedResponse, error)) func(*FakeUpstream) {
+	return func(u *FakeUpstream) {
+		u.forward = fn
 	}
 }
 
@@ -158,6 +167,9 @@ func (u *FakeUpstream) EvmStatePoller() EvmStatePoller {
 }
 
 func (u *FakeUpstream) Forward(ctx context.Context, nq *NormalizedRequest, skipSyncingCheck, isHedgeAttempt bool) (*NormalizedResponse, error) {
+	if u.forward != nil {
+		return u.forward(ctx, nq)
+	}
 	return nil, nil
 }
 
@@ -325,6 +337,25 @@ func (p *FakeEvmStatePoller) LatestBlock() int64 {
 	return p.latestBlockNumber
 }
 
+// LatestReportAt has no receive time: a fake's report reaches no further
+// than itself.
+func (p *FakeEvmStatePoller) LatestReportAt() time.Time {
+	return time.Time{}
+}
+
+// LatestAskAt is zero: a fake is never Asked.
+func (p *FakeEvmStatePoller) LatestAskAt() time.Time {
+	return time.Time{}
+}
+
+// ClockTurn is a no-op: a fake has no full poll.
+func (p *FakeEvmStatePoller) ClockTurn(time.Time) {}
+
+// HeadBackingOff is false: a fake never fails a fetch.
+func (p *FakeEvmStatePoller) HeadBackingOff() bool {
+	return false
+}
+
 func (p *FakeEvmStatePoller) Poll(ctx context.Context) error {
 	return nil
 }
@@ -345,24 +376,56 @@ func (p *FakeEvmStatePoller) SetSyncingState(state EvmSyncingState) {
 	// No-op for testing
 }
 
-func (p *FakeEvmStatePoller) SuggestFinalizedBlock(blockNumber int64) {
+func (p *FakeEvmStatePoller) SuggestFinalizedBlock(blockNumber int64, _ time.Time) {
 	p.finalizedBlockNumber = blockNumber
 }
 
-func (p *FakeEvmStatePoller) SuggestLatestBlock(blockNumber int64) {
+func (p *FakeEvmStatePoller) SuggestLatestBlock(blockNumber int64, _ time.Time) {
 	p.latestBlockNumber = blockNumber
 }
-
-func (p *FakeEvmStatePoller) RefreshLatestBlock() {}
 
 func (p *FakeEvmStatePoller) PollLatestBlockNumberAtLeast(ctx context.Context, want int64) (int64, error) {
 	return p.PollLatestBlockNumber(ctx)
 }
-func (p *FakeEvmStatePoller) ResetChainIdCordon() {}
+
+func (p *FakeEvmStatePoller) RewindLatestBlock(blockNumber int64) {
+	if blockNumber > 0 && blockNumber < p.latestBlockNumber {
+		p.latestBlockNumber = blockNumber
+	}
+}
+
+func (p *FakeEvmStatePoller) ObserveHead(n int64, _ time.Time) bool {
+	if n > p.latestBlockNumber {
+		p.latestBlockNumber = n
+	}
+	return true
+}
+
+func (p *FakeEvmStatePoller) Ask(context.Context, HeadNeed, time.Duration, time.Time, AskReason) HeadAnswer {
+	return HeadAnswer{Outcome: AskSharedFresh, Block: p.latestBlockNumber}
+}
+
+func (p *FakeEvmStatePoller) AskBackground(HeadNeed, time.Duration, time.Time, AskReason) HeadAnswer {
+	return HeadAnswer{Outcome: AskSharedFresh, Block: p.latestBlockNumber}
+}
+
+// ReadLatest takes no answer: the fake has no intake.
+func (p *FakeEvmStatePoller) ReadLatest(time.Time) func([]byte, bool) EvmHeader {
+	return func([]byte, bool) EvmHeader { return nil }
+}
+
+func (p *FakeEvmStatePoller) AskReaching(context.Context, int64, time.Duration, AskReason) HeadAnswer {
+	return HeadAnswer{Outcome: AskSharedFresh, Block: p.latestBlockNumber}
+}
+
+func (p *FakeEvmStatePoller) RefreshFinalized(context.Context, time.Duration) bool { return true }
+func (p *FakeEvmStatePoller) FinalizedReportAt() time.Time                         { return time.Time{} }
 
 func (p *FakeEvmStatePoller) SyncingState() EvmSyncingState {
 	return EvmSyncingStateUnknown
 }
+
+func (p *FakeEvmStatePoller) Wait() {}
 
 func (p *FakeEvmStatePoller) GetDiagnostics() *EvmStatePollerDiagnostics {
 	return &EvmStatePollerDiagnostics{

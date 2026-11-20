@@ -1,66 +1,12 @@
-// Package wsclient adapts a client WebSocket connection into an
-// indexer.EventEgress with a queue and writer goroutine per subscription.
-// The slow-client policy lives here rather than in the indexer core because
-// future egresses (Kafka, webhook) will want different policies.
-//
-// The policy: never evict. A subscription's queue grows on demand up to
-// the protocol's ceiling (two blocks of the most logs a block can hold),
-// and the process shares one byte budget. A subscriber past its cap, or
-// the largest one when the budget is spent, has its connection closed so
-// the client can see the gap, resubscribe and back-fill. Every
-// notification that is not written belongs to a closing connection.
+// Package wsclient holds the subscriptions of one client WebSocket
+// connection. Each subscription is a tap that writes its own notifications.
 package wsclient
 
 import (
-	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
-
-	"github.com/erpc/erpc/indexer"
-	"github.com/rs/zerolog"
 )
-
-// DropReason says why a notification never reached the wire.
-type DropReason string
-
-// DropClosing: the connection is closing (or was just closed) because a
-// subscriber fell too far behind. The client gets a close, so the gap is
-// visible.
-const DropClosing DropReason = "closing"
-
-// CloseReason says why the adapter asked for its connection to close.
-type CloseReason string
-
-const (
-	// CloseSubCap: one subscription queued more than its protocol cap.
-	CloseSubCap CloseReason = "sub_cap"
-	// CloseHostBudget: the process's byte budget was spent and this
-	// connection held the most queued bytes.
-	CloseHostBudget CloseReason = "host_budget"
-)
-
-// Options sets the queue limits and the callbacks.
-type Options struct {
-	// MinQueue is a floor on every subscription's cap (the notifyBufferSize
-	// setting). It never preallocates.
-	MinQueue int
-	// QueueCap returns the live protocol cap for a network. The cap is
-	// max(MinQueue, QueueCap); when both are 0 there is no cap, and only
-	// the budget bounds the queue.
-	QueueCap func(networkID string) int
-	// Budget is shared by every adapter in the process. It may be nil.
-	Budget *ByteBudget
-	// OnDrop is called once per notification that does not reach the
-	// writer. It may be nil.
-	OnDrop func(networkID string, kind indexer.EventKind, reason DropReason)
-	// OnClose is called once per adapter, the first time it must close. The
-	// callee closes the connection; it must not block. It may be nil.
-	OnClose func(reason CloseReason)
-	// OnQueue reports every change to a network's queued items and bytes.
-	// It may be nil.
-	OnQueue func(networkID string, deltaItems int, deltaBytes int64)
-}
 
 // ErrClosed is returned by AddSubscription once the adapter was drained.
 var ErrClosed = errors.New("connection closed")
@@ -69,224 +15,114 @@ var ErrClosed = errors.New("connection closed")
 // already holds the maximum number of subscriptions.
 var ErrLimitExceeded = errors.New("subscription limit exceeded")
 
-// NotificationWriter writes notifications to the client connection.
-type NotificationWriter interface {
-	// WriteSubscriptionNotification writes result; queued is how many
-	// notifications of sub still wait behind it.
-	WriteSubscriptionNotification(sub Subscription, result json.RawMessage, queued int) error
-}
-
-// Adapter is the EventEgress of one client connection.
+// Adapter is the subscription set of one client connection.
 type Adapter struct {
-	connID string
-	writer NotificationWriter
-	logger *zerolog.Logger
-	opts   Options
-
-	// closing is set the first time the adapter asks for a close. From then
-	// on, every delivery is a DropClosing.
-	closing atomic.Bool
-	// queued is the bytes held across this adapter's subscriptions, both
-	// queued and popped but not yet written.
-	queued atomic.Int64
-
-	unregister     func()
-	unregisterOnce sync.Once
-
-	mu sync.RWMutex
-	// drained is set under mu, so AddSubscription never races Drain; it is
-	// atomic because maybeUnregister reads it without mu.
-	drained atomic.Bool
+	mu      sync.RWMutex
+	drained bool
 	subs    map[string]*clientSub // clientSubId -> sub
-	// routes indexes subs by event key for InterestedIn and Deliver.
-	routes map[routeKey]map[string]struct{}
-}
-
-type routeKey struct {
-	kind       indexer.EventKind
-	networkID  string
-	filterHash string
 }
 
 type clientSub struct {
-	id         string
-	kind       indexer.EventKind
-	networkID  string
-	filterHash string // "" for newHeads
+	id        string
+	kind      EventKind
+	networkID string
 
-	q notifyQueue
-	// pending counts notifications queued or popped but not yet written;
-	// the cap applies to it.
-	pending atomic.Int64
-	wake    chan struct{}
-	done    chan struct{}
-	closed  atomic.Bool
+	// opened is closed once the client has the subscription id: nothing is
+	// written before it, as geth sends the id first.
+	opened   chan struct{}
+	openOnce sync.Once
+	// removed is set before the unsubscribe answer is written; a
+	// notification written after that answer sees it and is dropped.
+	removed atomic.Bool
+	// stop ends the subscription's tap.
+	stop func()
 }
 
-// New creates the adapter of a client connection. writer is called from
-// every subscription's goroutine, so it must be safe for concurrent use.
-func New(connID string, writer NotificationWriter, logger *zerolog.Logger, opts Options) *Adapter {
-	lg := logger.With().Str("connId", connID).Logger()
-	a := &Adapter{
-		connID: connID,
-		writer: writer,
-		logger: &lg,
-		opts:   opts,
-		subs:   make(map[string]*clientSub),
-		routes: make(map[routeKey]map[string]struct{}),
-	}
-	if opts.Budget != nil {
-		a.unregister = opts.Budget.Register(a)
-	}
-	return a
+func (s *clientSub) describe() Subscription {
+	return Subscription{ClientSubID: s.id, Kind: s.kind, NetworkID: s.networkID, removed: &s.removed}
 }
 
-func (a *Adapter) Name() string { return "ws:client:" + a.connID }
+// New creates the adapter of a client connection.
+func New() *Adapter {
+	return &Adapter{subs: make(map[string]*clientSub)}
+}
 
-// QueuedBytes returns the bytes this connection holds and has not written.
-func (a *Adapter) QueuedBytes() int64 { return a.queued.Load() }
-
-func (a *Adapter) InterestedIn(kind indexer.EventKind, networkID, filterHash string) bool {
+// Open lets clientSubID's notifications flow, once the response carrying
+// its id is written.
+func (a *Adapter) Open(clientSubID string) {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-	_, ok := a.routes[routeKey{kind: kind, networkID: networkID, filterHash: filterHash}]
-	return ok
-}
-
-// Deliver enqueues the event on every matching subscription. It never
-// blocks the indexer, and it never evicts a queued notification.
-func (a *Adapter) Deliver(ev indexer.IndexedEvent) {
-	a.mu.RLock()
-	routes := a.routes[routeKey{kind: ev.Kind, networkID: ev.NetworkId, filterHash: ev.FilterHash}]
-	subs := make([]*clientSub, 0, len(routes))
-	for id := range routes {
-		subs = append(subs, a.subs[id])
-	}
+	sub := a.subs[clientSubID]
 	a.mu.RUnlock()
-
-	for _, sub := range subs {
-		a.enqueue(sub, ev.Payload)
+	if sub != nil {
+		sub.openOnce.Do(func() { close(sub.opened) })
 	}
 }
 
-// AddSubscription registers a subscription and starts its writer. It fails
-// with ErrLimitExceeded when the connection already holds maxSubs, and with
-// ErrClosed once the adapter was drained.
-func (a *Adapter) AddSubscription(clientSubID, networkID string, kind indexer.EventKind, filterHash string, maxSubs int) error {
-	sub := &clientSub{
-		id:         clientSubID,
-		kind:       kind,
-		networkID:  networkID,
-		filterHash: filterHash,
-		wake:       make(chan struct{}, 1),
-		done:       make(chan struct{}),
-	}
-
+// AddSubscription registers a subscription whose tap writes after opened
+// is closed by Open; stop ends that tap when the subscription is removed.
+// It fails with ErrLimitExceeded when the connection already holds
+// maxSubs, and with ErrClosed once the adapter was drained.
+func (a *Adapter) AddSubscription(clientSubID, networkID string, kind EventKind, maxSubs int, stop func()) (Subscription, <-chan struct{}, error) {
+	sub := &clientSub{id: clientSubID, kind: kind, networkID: networkID, opened: make(chan struct{}), stop: stop}
 	a.mu.Lock()
-	if a.drained.Load() {
-		a.mu.Unlock()
-		return ErrClosed
+	defer a.mu.Unlock()
+	if a.drained {
+		return Subscription{}, nil, ErrClosed
 	}
 	if len(a.subs) >= maxSubs {
-		a.mu.Unlock()
-		return ErrLimitExceeded
+		return Subscription{}, nil, ErrLimitExceeded
 	}
 	a.subs[clientSubID] = sub
-	key := routeKey{kind: kind, networkID: networkID, filterHash: filterHash}
-	set, ok := a.routes[key]
-	if !ok {
-		set = make(map[string]struct{})
-		a.routes[key] = set
-	}
-	set[clientSubID] = struct{}{}
-	a.mu.Unlock()
-
-	go a.runWriter(sub)
-	return nil
+	return sub.describe(), sub.opened, nil
 }
 
-// RemoveSubscription removes a subscription, stops its writer, and returns
-// what the caller needs to release its filter.
-func (a *Adapter) RemoveSubscription(clientSubID string) (kind indexer.EventKind, networkID, filterHash string, existed bool) {
+// RemoveSubscription marks a subscription removed, removes it and stops
+// its tap.
+func (a *Adapter) RemoveSubscription(clientSubID string) (kind EventKind, existed bool) {
 	a.mu.Lock()
 	sub, ok := a.subs[clientSubID]
-	if !ok {
-		a.mu.Unlock()
-		return 0, "", "", false
-	}
 	delete(a.subs, clientSubID)
-	key := routeKey{kind: sub.kind, networkID: sub.networkID, filterHash: sub.filterHash}
-	if set, ok := a.routes[key]; ok {
-		delete(set, clientSubID)
-		if len(set) == 0 {
-			delete(a.routes, key)
-		}
-	}
 	a.mu.Unlock()
-
-	a.stop(sub)
-	return sub.kind, sub.networkID, sub.filterHash, true
+	if !ok {
+		return 0, false
+	}
+	sub.removed.Store(true)
+	sub.stop()
+	return sub.kind, true
 }
 
-// Drain removes every subscription, releases every queued byte, and makes
-// later AddSubscription calls fail. It leaves the budget once a writer's
-// in-flight batch is released too. It returns the subscriptions it
-// removed, so the caller releases exactly those; a concurrent
-// RemoveSubscription owns any it removed first. Call it on connection
-// close before detaching from the indexer.
+// Drain removes every subscription and makes later AddSubscription calls
+// fail. It returns the subscriptions it removed; a concurrent
+// RemoveSubscription owns any it removed first.
 func (a *Adapter) Drain() []Subscription {
-	// Mark closing without asking for a close: the connection is already
-	// going. The budget then treats any bytes still in flight as recovering,
-	// not as a reason to evict another connection.
-	a.closing.Store(true)
-
 	a.mu.Lock()
 	subs := a.subs
-	a.drained.Store(true)
+	a.drained = true
 	a.subs = make(map[string]*clientSub)
-	a.routes = make(map[routeKey]map[string]struct{})
 	a.mu.Unlock()
 
 	out := make([]Subscription, 0, len(subs))
 	for _, sub := range subs {
-		a.stop(sub)
-		out = append(out, sub.snapshot())
+		sub.removed.Store(true)
+		sub.stop()
+		out = append(out, sub.describe())
 	}
-	a.maybeUnregister()
 	return out
-}
-
-// maybeUnregister leaves the budget once a drained adapter holds no bytes.
-func (a *Adapter) maybeUnregister() {
-	if a.unregister != nil && a.drained.Load() && a.queued.Load() == 0 {
-		a.unregisterOnce.Do(a.unregister)
-	}
-}
-
-// stop closes a sub's queue, releases what it held, and stops its writer.
-// A batch the writer already popped is released by the writer itself.
-func (a *Adapter) stop(sub *clientSub) {
-	a.release(sub, sub.q.reset()...)
-	if sub.closed.CompareAndSwap(false, true) {
-		close(sub.done)
-	}
-}
-
-func (sub *clientSub) snapshot() Subscription {
-	return Subscription{
-		ClientSubID: sub.id,
-		Kind:        sub.kind,
-		NetworkID:   sub.networkID,
-		FilterHash:  sub.filterHash,
-	}
 }
 
 // Subscription describes one subscription.
 type Subscription struct {
 	ClientSubID string
-	Kind        indexer.EventKind
+	Kind        EventKind
 	NetworkID   string
-	FilterHash  string
+
+	removed *atomic.Bool
+}
+
+// Removed reports whether the subscription was removed: its tap must not
+// write any more.
+func (s Subscription) Removed() bool {
+	return s.removed.Load()
 }
 
 // Count returns the number of active subscriptions.
@@ -294,159 +130,4 @@ func (a *Adapter) Count() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return len(a.subs)
-}
-
-func (a *Adapter) runWriter(sub *clientSub) {
-	snap := sub.snapshot()
-	for {
-		select {
-		case <-sub.done:
-			return
-		case <-sub.wake:
-		}
-		batch, _ := sub.q.popAll()
-		for i, payload := range batch {
-			stopped := a.closing.Load()
-			if !stopped {
-				select {
-				case <-sub.done:
-					stopped = true
-				default:
-				}
-			}
-			if stopped {
-				// Stopped mid-batch: release what was popped and not written.
-				a.release(sub, batch[i:]...)
-				return
-			}
-			// pending still counts this payload; the rest wait behind it.
-			queued := int(sub.pending.Load()) - 1
-			if queued < 0 {
-				queued = 0
-			}
-			if err := a.writer.WriteSubscriptionNotification(snap, payload, queued); err != nil {
-				a.logger.Debug().Err(err).Str("clientSubId", sub.id).
-					Msg("failed to write subscription notification")
-			}
-			a.release(sub, payload)
-		}
-	}
-}
-
-// --- enqueue ----------------------------------------------------------
-
-// enqueue queues one payload for sub. It never blocks and never evicts.
-func (a *Adapter) enqueue(sub *clientSub, payload json.RawMessage) {
-	if a.closing.Load() {
-		a.dropped(sub)
-		return
-	}
-	if limit := a.capFor(sub.networkID); limit > 0 && sub.pending.Load()+1 > int64(limit) {
-		a.logger.Warn().Str("clientSubId", sub.id).Str("kind", sub.kind.String()).
-			Str("networkId", sub.networkID).Int("cap", limit).
-			Msg("subscription queue reached its protocol cap; closing slow client connection")
-		a.close(CloseSubCap)
-		a.dropped(sub)
-		return
-	}
-
-	n := int64(len(payload))
-	if b := a.opts.Budget; b != nil && !b.Reserve(payload) {
-		victim, fits := b.EvictLargest()
-		if !fits && (victim == nil || victim == a) {
-			b.Release(payload)
-			a.logger.Warn().Str("clientSubId", sub.id).Int64("budgetBytes", b.Limit()).
-				Int64("queuedBytes", a.QueuedBytes()).
-				Msg("notification byte budget spent and this connection holds the most; closing it")
-			a.close(CloseHostBudget)
-			a.dropped(sub)
-			return
-		}
-		// Otherwise queue this one. Either the overshoot is only bytes a
-		// closing connection is about to release, or another open
-		// connection holds the most and is closed now.
-		if !fits {
-			victim.logger.Warn().Int64("budgetBytes", b.Limit()).
-				Int64("queuedBytes", victim.QueuedBytes()).
-				Msg("notification byte budget spent and this connection holds the most; closing it")
-			victim.close(CloseHostBudget)
-		}
-	}
-
-	if _, _, ok := sub.q.push(payload); !ok {
-		// The sub was removed while we were here.
-		if a.opts.Budget != nil {
-			a.opts.Budget.Release(payload)
-		}
-		return
-	}
-	sub.pending.Add(1)
-	a.queued.Add(n)
-	if a.opts.OnQueue != nil {
-		a.opts.OnQueue(sub.networkID, 1, n)
-	}
-	select {
-	case sub.wake <- struct{}{}:
-	default:
-	}
-}
-
-// capFor is the live per-subscription cap: max(MinQueue, QueueCap).
-func (a *Adapter) capFor(networkID string) int {
-	limit := a.opts.MinQueue
-	if a.opts.QueueCap != nil {
-		if c := a.opts.QueueCap(networkID); c > limit {
-			limit = c
-		}
-	}
-	return limit
-}
-
-// close asks the caller to close the connection, once. Everything queued is
-// released at once: a closing connection writes nothing more, and its bytes
-// must not hold the budget while the connection is torn down. A batch a
-// writer already took goes when that writer next checks in.
-func (a *Adapter) close(reason CloseReason) {
-	if !a.closing.CompareAndSwap(false, true) {
-		return
-	}
-	a.mu.RLock()
-	subs := make([]*clientSub, 0, len(a.subs))
-	for _, sub := range a.subs {
-		subs = append(subs, sub)
-	}
-	a.mu.RUnlock()
-	for _, sub := range subs {
-		a.release(sub, sub.q.reset()...)
-	}
-	if a.opts.OnClose != nil {
-		a.opts.OnClose(reason)
-	}
-}
-
-// release undoes the accounting for payloads that left sub's queue,
-// written or not.
-func (a *Adapter) release(sub *clientSub, payloads ...json.RawMessage) {
-	if len(payloads) == 0 {
-		return
-	}
-	var bytes int64
-	for _, p := range payloads {
-		bytes += int64(len(p))
-		if a.opts.Budget != nil {
-			a.opts.Budget.Release(p)
-		}
-	}
-	sub.pending.Add(-int64(len(payloads)))
-	a.queued.Add(-bytes)
-	if a.opts.OnQueue != nil {
-		a.opts.OnQueue(sub.networkID, -len(payloads), -bytes)
-	}
-	a.maybeUnregister()
-}
-
-func (a *Adapter) dropped(sub *clientSub) {
-	if a.opts.OnDrop != nil {
-		a.opts.OnDrop(sub.networkID, sub.kind, DropClosing)
-	}
 }

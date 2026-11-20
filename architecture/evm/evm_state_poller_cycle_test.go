@@ -38,7 +38,7 @@ func pollingUpstream(t *testing.T, head int64, syncing forwardHandler) *forwardi
 
 func TestPoll_ANodeIsCalledSyncedOnlyAfterEnoughConsecutiveAnswers(t *testing.T) {
 	up := pollingUpstream(t, 500, syncingResult(`false`))
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	for i := 1; i < FullySyncedThreshold; i++ {
 		require.NoError(t, p.Poll(context.Background()))
@@ -64,7 +64,7 @@ func TestPoll_ASyncingAnswerMarksTheNodeSyncingAndRestartsTheCount(t *testing.T)
 		}
 		return jsonResult(req, `false`)
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	// Get within one answer of "fully synced".
 	for i := 1; i < FullySyncedThreshold; i++ {
@@ -97,42 +97,12 @@ func TestPoll_AnUpstreamThatOptsOutIsMarkedNotSyncingWithoutAsking(t *testing.T)
 	})
 	skip := true
 	up.cfg.Evm.SkipSyncingCheck = &skip
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	require.NoError(t, p.Poll(context.Background()))
 
 	assert.Equal(t, common.EvmSyncingStateNotSyncing, p.SyncingState())
 	assert.Equal(t, 0, up.callCount("eth_syncing"))
-}
-
-// --- fetchSyncingState: the give-up latch ---
-
-func TestFetchSyncingState_OnlyAnUnsupportedAnswerStopsTheProbe(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		err      error
-		wantSkip bool
-	}{
-		{"Unsupported", common.NewErrEndpointUnsupported(errors.New("eth_syncing is not available")), true},
-		{"MethodIgnored", common.NewErrUpstreamMethodIgnored("eth_syncing", "fwd-ups"), true},
-		// Discriminating: a transport failure says nothing about method
-		// support. Latching on it would blind the poller to a node that comes
-		// back a second later.
-		{"TransportFailure", errors.New("dial tcp: connection refused"), false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := syncingPoller(t, func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
-				return nil, tc.err
-			})
-
-			_, err := p.fetchSyncingState(context.Background())
-			require.Error(t, err)
-
-			p.stateMu.RLock()
-			defer p.stateMu.RUnlock()
-			assert.Equal(t, tc.wantSkip, p.skipSyncingCheck)
-		})
-	}
 }
 
 // --- PollLatestBlockNumber: the give-up counter ---
@@ -142,7 +112,7 @@ func TestPollLatestBlockNumber_GivesUpAfterTenUnsupportedAnswers(t *testing.T) {
 	up.on("eth_getBlockByNumber", func(_ context.Context, _ *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 		return nil, common.NewErrEndpointUnsupported(errors.New("no eth_getBlockByNumber on this node"))
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	p.SetNetworkConfig(&common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
 		Evm:          &common.EvmNetworkConfig{ChainId: 123, FallbackStatePollerDebounce: common.Duration(time.Nanosecond)},
@@ -177,7 +147,7 @@ func TestPollLatestBlockNumber_AMajorJumpOnAMismatchedChainIsDropped(t *testing.
 		defer mu.Unlock()
 		return jsonResult(req, blockHeader(head))
 	})
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	p.SetNetworkConfig(&common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,
 		Evm:          &common.EvmNetworkConfig{ChainId: 123, FallbackStatePollerDebounce: common.Duration(time.Nanosecond)},
@@ -232,8 +202,8 @@ func (u *countingChainIdUpstream) chainIdCalls() int {
 
 func TestVerifyThenSuggestLatestBlock_OnlyOneVerificationRunsAtATime(t *testing.T) {
 	up := &countingChainIdUpstream{forwardingUpstream: newForwardingUpstream(123)}
-	p := newGateTestPoller(t, up)
-	p.SuggestLatestBlock(1_000)
+	p := newUpstreamTestPoller(t, up, nil)
+	p.SuggestLatestBlock(1_000, time.Now())
 	require.Equal(t, int64(1_000), p.LatestBlock())
 
 	dropped := int64(1_000 + common.DefaultToleratedBlockHeadRollback + 9_000)
@@ -241,12 +211,12 @@ func TestVerifyThenSuggestLatestBlock_OnlyOneVerificationRunsAtATime(t *testing.
 
 	// Hold the verification lock, exactly as an in-flight verification would.
 	p.latestMajorVerifyInProgress.Lock()
-	p.verifyThenSuggestLatestBlock(dropped)
+	p.verifyThenSuggestLatestBlock(dropped, time.Now())
 	p.latestMajorVerifyInProgress.Unlock()
 
 	// A second, uncontended suggestion. Taking the lock afterwards joins its
 	// goroutine without a margin — it releases the lock on exit.
-	p.verifyThenSuggestLatestBlock(kept)
+	p.verifyThenSuggestLatestBlock(kept, time.Now())
 	p.latestMajorVerifyInProgress.Lock()
 	p.latestMajorVerifyInProgress.Unlock()
 
@@ -260,12 +230,12 @@ func TestVerifyThenSuggestLatestBlock_OnlyOneVerificationRunsAtATime(t *testing.
 
 func TestVerifyThenSuggestLatestBlock_ASuggestionOvertakenWhileQueuedIsDropped(t *testing.T) {
 	up := &countingChainIdUpstream{forwardingUpstream: newForwardingUpstream(123)}
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	// Another path already advanced the head past the queued suggestion.
-	p.SuggestLatestBlock(9_000)
+	p.SuggestLatestBlock(9_000, time.Now())
 	require.Equal(t, int64(9_000), p.LatestBlock())
 
-	p.verifyThenSuggestLatestBlock(1_000)
+	p.verifyThenSuggestLatestBlock(1_000, time.Now())
 
 	// Wait for the verification goroutine by taking the lock it releases on
 	// exit — no margin, no polling.
@@ -309,7 +279,7 @@ func prunedUpstream(t *testing.T, head int64) (*forwardingUpstream, chan struct{
 
 func TestInitializeEarliestBlockDetection_ASearchThatFindsNothingLeavesTheBoundUnknown(t *testing.T) {
 	up, _ := prunedUpstream(t, 9_000)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.initializeEarliestBlockDetectionAndStartScheduler(context.Background())
 
@@ -327,7 +297,7 @@ func TestInitializeEarliestBlockDetection_ASearchThatFindsNothingLeavesTheBoundU
 
 func TestRunPeriodicEarliestBlockBoundUpdateLoop_KeepsProbingUntilTheAppContextEnds(t *testing.T) {
 	up, probed := prunedUpstream(t, 9_000)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	appCtx, cancel := context.WithCancel(context.Background())
 	p.appCtx = appCtx
@@ -373,7 +343,7 @@ func TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported(t *testing.
 	} {
 		t.Run(string(probe), func(t *testing.T) {
 			up := nilAnsweringUpstream(t)
-			p := newGateTestPoller(t, up)
+			p := newUpstreamTestPoller(t, up, nil)
 
 			ok, unsupported, err := p.checkProbe(context.Background(), probe, 10)
 
@@ -392,7 +362,7 @@ func TestCheckProbe_ANilAnswerReadsAsNotAvailableAndNotAsUnsupported(t *testing.
 func TestVerifyChainIdOnMajorHeadMove_ALargeBackwardMoveIsCheckedToo(t *testing.T) {
 	up := newForwardingUpstream(123)
 	up.setChainId("999", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	// A head that fell thousands of blocks: the same evidence of a cross-wired
 	// endpoint as a jump forward, seen from the other side.
@@ -410,7 +380,7 @@ func TestVerifyChainIdOnMajorHeadMove_ALargeBackwardMoveIsCheckedToo(t *testing.
 func TestVerifyChainIdOnMajorHeadMove_AnUpstreamWithNoChainIdIsNotSecondGuessed(t *testing.T) {
 	up := newForwardingUpstream(123)
 	up.setChainId("", errors.New("dial tcp: connection refused"))
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	ok := p.verifyChainIdOnMajorHeadMove(
 		context.Background(), "latest",

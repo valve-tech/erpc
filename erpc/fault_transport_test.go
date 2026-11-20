@@ -432,9 +432,19 @@ func newFaultWsConnection(t *testing.T) (*WsConnection, *faultConn) {
 
 	conn, sock := newFaultWsConn(t)
 	lg := zerolog.New(io.Discard)
-	return &WsConnection{
-		id:     "ws-fault",
-		conn:   conn,
-		logger: &lg,
-	}, sock
+	wsc := &WsConnection{
+		id:      "ws-fault",
+		conn:    conn,
+		logger:  &lg,
+		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	// Every data write goes through the connection's one writer goroutine
+	// (ws_writer.go), as in a served connection.
+	wsc.startWriter()
+	t.Cleanup(func() {
+		wsc.closed.Store(true)
+		wsc.stopWriter()
+	})
+	return wsc, sock
 }

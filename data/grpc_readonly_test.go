@@ -78,26 +78,26 @@ func TestGrpcConnector_ReadOnlyContract(t *testing.T) {
 	})
 }
 
-// TestGrpcConnector_CacheLatestBlockTimestamp pins the head-age reporter the
+// TestGrpcConnector_CacheLatestBlock pins the head-age reporter the
 // realtime cache guard depends on: an unknown network must report "not known"
 // rather than a zero timestamp that reads as 1970.
-func TestGrpcConnector_CacheLatestBlockTimestamp(t *testing.T) {
+func TestGrpcConnector_CacheLatestBlock(t *testing.T) {
 	t.Parallel()
 
 	g := &GrpcConnector{
-		id:                "grpc-head",
-		latestTsByNetwork: map[string]int64{"evm:1": 1739000000},
+		id:              "grpc-head",
+		latestByNetwork: map[string]latestBlock{"evm:1": {number: 900, timestamp: 1739000000}},
 	}
 
-	ts, ok := g.CacheLatestBlockTimestamp("evm:1")
+	_, ts, ok := g.CacheLatestBlock("evm:1")
 	require.True(t, ok, "a network with a polled head must report a known timestamp")
 	assert.Equal(t, int64(1739000000), ts)
 
-	_, ok = g.CacheLatestBlockTimestamp("evm:999")
+	_, _, ok = g.CacheLatestBlock("evm:999")
 	assert.False(t, ok, "an unpolled network must report its head as unknown")
 
-	g.latestTsByNetwork["evm:2"] = 0
-	_, ok = g.CacheLatestBlockTimestamp("evm:2")
+	g.latestByNetwork["evm:2"] = latestBlock{number: 5}
+	_, _, ok = g.CacheLatestBlock("evm:2")
 	assert.False(t, ok, "a zero timestamp must read as unknown, not as 1970")
 }
 

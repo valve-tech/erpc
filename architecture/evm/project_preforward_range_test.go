@@ -53,8 +53,8 @@ func rangeNetwork(project string, head int64) *mockNetwork {
 	n := new(mockNetwork)
 	n.On("ProjectId").Return(project).Maybe()
 	n.On("Id").Return("evm:123").Maybe()
-	n.On("EvmHighestLatestBlockNumber", mock.Anything).Return(head).Maybe()
-	n.On("EvmHighestFinalizedBlockNumber", mock.Anything).Return(head).Maybe()
+	n.On("HeadLatest", mock.Anything).Return(head).Maybe()
+	n.On("HeadFinalized", mock.Anything).Return(head).Maybe()
 	// The project hook now also enforces the hard getLogs limits (upstream),
 	// which read the network config; no limits are set here.
 	n.On("Config").Return(&common.NetworkConfig{

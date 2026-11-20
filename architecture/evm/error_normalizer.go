@@ -2,9 +2,11 @@ package evm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	bdscommon "github.com/blockchain-data-standards/manifesto/common"
@@ -16,6 +18,52 @@ import (
 
 func init() {
 	_ = (&bdscommon.ErrorDetails{}).ProtoReflect().Descriptor()
+}
+
+// ErrNullRound is the cause eRPC gives an upstream's answer that the
+// height it was asked has no block: a Filecoin null round. Lotus answers
+// it with code 12, "requested epoch was a null round (N)", data N; a
+// future epoch is code 1 and no null round. The answer reaches clients as
+// the upstream sent it; this cause is the one place that recognises it, so
+// no reader matches its text (NullRoundOf).
+type ErrNullRound struct{ Epoch uint64 }
+
+func (e *ErrNullRound) Error() string { return fmt.Sprintf("epoch %d is a null round", e.Epoch) }
+
+// NullRoundOf is the epoch an upstream answered is a null round, through
+// any wrapping, a sweep's per-upstream errors included.
+func NullRoundOf(err error) (uint64, bool) {
+	var nr *ErrNullRound
+	if errors.As(err, &nr) {
+		return nr.Epoch, true
+	}
+	return 0, false
+}
+
+// lotusNullRound is Lotus's code for a null round (ErrNullRound).
+const lotusNullRound common.JsonRpcErrorNumber = 12
+
+// nullRoundEpoch recognises Lotus's null-round answer: its code, its
+// message, and the epoch in its data, else in its message.
+func nullRoundEpoch(code common.JsonRpcErrorNumber, err *common.ErrJsonRpcExceptionExternal) (uint64, bool) {
+	if code != lotusNullRound || !strings.HasPrefix(err.Message, "requested epoch was a null round") {
+		return 0, false
+	}
+	switch d := err.Data.(type) {
+	case float64:
+		if d >= 0 && d == float64(uint64(d)) {
+			return uint64(d), true
+		}
+	case json.Number:
+		if n, perr := strconv.ParseUint(string(d), 10, 64); perr == nil {
+			return n, true
+		}
+	}
+	var n uint64
+	if _, serr := fmt.Sscanf(err.Message, "requested epoch was a null round (%d)", &n); serr == nil {
+		return n, true
+	}
+	return 0, false
 }
 
 // reth prints a revert as Debug text in the message and sends no "data" field.
@@ -93,6 +141,14 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 			}
 		}
 
+		if epoch, ok := nullRoundEpoch(code, err); ok {
+			return common.NewErrEndpointServerSideException(
+				common.NewErrJsonRpcExceptionInternal(int(code), code, err.Message, &ErrNullRound{Epoch: epoch}, details),
+				nil,
+				r.StatusCode,
+			)
+		}
+
 		//----------------------------------------------------------------
 		// "Request-too-large / range-too-large" errors
 		//----------------------------------------------------------------
@@ -119,6 +175,11 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 			strings.Contains(msg, "try paginating") ||
 			(strings.Contains(msg, "maximum") && strings.Contains(msg, "blocks distance")) ||
 			strings.Contains(msg, "eth_getLogs is limited") ||
+			// Chainstack (-32602) and Filecoin (-32005); as a client or capacity
+			// error the first stopped the sweep and the second never split.
+			strings.Contains(msg, "block range exceeds") ||
+			// thirdweb (-32005).
+			strings.Contains(msg, "number of requested blocks") ||
 			// jsonrpsee — which reth and everything built on it uses — rejects an
 			// oversized response body with "Response is too big" and carries the
 			// byte cap in Data ("Exceeded max limit of 167772160"). That is a SIZE
@@ -211,6 +272,10 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 				),
 			)
 		} else if r.StatusCode == 429 ||
+			// -32005 is the vendors' "limit exceeded" code, sent with any
+			// HTTP status; range and billing refusals that share it matched above.
+			code == common.JsonRpcErrorCapacityExceeded ||
+			strings.Contains(msg, "compute units") ||
 			strings.Contains(msg, "requests limited to") ||
 			strings.Contains(msg, "has exceeded") ||
 			strings.Contains(msg, "Exceeded the quota") ||
@@ -362,7 +427,7 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 			}
 			return execErr
 		}
-		// Aurora (Borealis engine) answers debug_trace* with -32603 for two
+		// Aurora (Borealis engine) answers debug_trace* with -32603 for
 		// per-transaction outcomes that no other node can change:
 		//   "no EVM execution in transaction 0x…": a NEAR-native transaction
 		//     surfaced in the EVM block, so there is nothing to trace;
@@ -370,13 +435,17 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 		//     the engine's own verdict for that transaction;
 		//   "StandaloneError(TransactionHashNotFound(0x…))": the tracer has no
 		//     EVM record of a transaction the chain does list (engine system
-		//     calls to 0x4444…192b), for old and new blocks alike.
+		//     calls to 0x4444…192b), for old and new blocks alike;
+		//   `StandaloneError(Borsh("Unexpected length of input"))`: the
+		//     engine cannot decode its stored record of that transaction and
+		//     answers the same way, in ~15 ms, on every attempt.
 		// As a server-side exception every request was retried until the
 		// failsafe gave up (12 attempts each) and the caller saw
 		// ErrUpstreamsExhausted instead of the real reason.
 		if strings.Contains(msg, "no EVM execution in transaction") ||
 			strings.Contains(msg, "EVM tracing failed in transaction") ||
-			strings.Contains(msg, "StandaloneError(TransactionHashNotFound(") {
+			strings.Contains(msg, "StandaloneError(TransactionHashNotFound(") ||
+			strings.Contains(msg, "StandaloneError(Borsh(") {
 			return common.NewErrEndpointExecutionException(
 				common.NewErrJsonRpcExceptionInternal(
 					int(code),
@@ -482,6 +551,38 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 				),
 				common.NonceExceptionReasonNonceTooLow,
 			)
+		}
+
+		// A nonce above the sender's next nonce (a nonce gap). Nodes that keep
+		// no queue for future nonces refuse it (Arbitrum's sequencer; geth-family
+		// preChecks on eth_call/eth_estimateGas). Wordings: geth, reth, Nethermind
+		// "nonce too high"; Besu "Nonce too high" (-32006) and "Transaction nonce
+		// is too distant from current sender nonce"; Erigon "nonce gap too large".
+		// The node answered correctly, so the refusal must not count toward the
+		// circuit breaker: as a server-side exception a relayer's nonce gap
+		// opened the breakers and refused its reads as well.
+		if strings.Contains(ml, "nonce too high") ||
+			strings.Contains(ml, "nonce is too distant") ||
+			strings.Contains(ml, "nonce gap too large") {
+			execErr := common.NewErrEndpointExecutionException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorTransactionRejected,
+					err.Message,
+					nil,
+					details,
+				),
+			)
+			// The verdict is only as fresh as the node's head: an upstream that
+			// has not applied the sender's last mined transaction sees the
+			// correct next nonce as a gap, for a send and for an eth_call or
+			// eth_estimateGas that sets the nonce. Keep failover so an
+			// up-to-date upstream can answer; the upstream that refused is not
+			// asked again.
+			if re, ok := execErr.(common.RetryableError); ok {
+				return re.WithRetryableTowardNetwork(true)
+			}
+			return execErr
 		}
 
 		// HyperEVM (Hyperliquid) returns opaque HyperCore↔HyperEVM boundary
@@ -668,12 +769,15 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 
 		//----------------------------------------------------------------
 		// "Exceeds block gas limit": the transaction's gas limit is above the
-		// block gas limit (geth txpool ErrGasLimit). The block gas limit is
+		// block gas limit (geth txpool ErrGasLimit). Monad says "gas limit too
+		// high" for the same check on eth_call / eth_estimateGas (monad-ethcall
+		// executor: gas limit above the block header's). The block gas limit is
 		// consensus state, so every upstream refuses the same transaction:
 		// not retried, not even for eth_sendRawTransaction.
 		//----------------------------------------------------------------
 
-		if strings.Contains(ml, "exceeds block gas limit") {
+		if strings.Contains(ml, "exceeds block gas limit") ||
+			strings.Contains(ml, "gas limit too high") {
 			return common.NewErrEndpointExecutionException(
 				common.NewErrJsonRpcExceptionInternal(
 					int(code),
@@ -683,6 +787,34 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 					details,
 				),
 			)
+		}
+
+		//----------------------------------------------------------------
+		// "User-specified gas exceeds provider limit": the call asks for more
+		// gas than this node allows for eth_call / eth_estimateGas (Monad's
+		// RPC wording for its per-provider gas cap, -32000). The cap is node
+		// configuration, not chain state: another upstream may allow more, so
+		// the call still fails over across the network, but the upstream that
+		// refused is not asked again. Left as the server-side default, one
+		// such call was retried and hedged on every upstream until the
+		// failsafe gave up (about 70 attempts over 6 upstreams), and the
+		// caller saw ErrUpstreamsExhausted instead of the node's reason.
+		//----------------------------------------------------------------
+
+		if strings.Contains(ml, "gas exceeds provider limit") {
+			execErr := common.NewErrEndpointExecutionException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorCallException,
+					err.Message,
+					nil,
+					details,
+				),
+			)
+			if re, ok := execErr.(common.RetryableError); ok {
+				return re.WithRetryableTowardNetwork(true)
+			}
+			return execErr
 		}
 
 		//----------------------------------------------------------------
@@ -782,6 +914,28 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 			strings.Contains(ml, "rlp: value size exceeds") ||
 			strings.Contains(ml, "invalid transaction") ||
 			strings.Contains(ml, "transaction type not supported") {
+			return common.NewErrEndpointClientSideException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorInvalidArgument,
+					err.Message,
+					nil,
+					details,
+				),
+			).WithRetryableTowardNetwork(false)
+		}
+
+		//----------------------------------------------------------------
+		// "empty input": eth_simulateV1 with no block to simulate
+		// (`blockStateCalls: []`). go-ethereum, Erigon and Nethermind refuse
+		// it with these words; Monad upstreams answer it as -32000.
+		// The request itself is invalid, so no upstream can answer it: not
+		// retried. Left as the server-side default, each such call was asked
+		// about 36 times over 3 upstreams before the caller saw
+		// ErrUpstreamsExhausted. The exact message is matched, not a substring.
+		//----------------------------------------------------------------
+
+		if strings.EqualFold(strings.TrimSpace(err.Message), "empty input") {
 			return common.NewErrEndpointClientSideException(
 				common.NewErrJsonRpcExceptionInternal(
 					int(code),

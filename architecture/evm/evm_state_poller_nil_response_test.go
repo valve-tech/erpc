@@ -3,11 +3,39 @@ package evm
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/data"
+	"github.com/erpc/erpc/health"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newUpstreamTestPoller is newGateTestPoller for any upstream double. It
+// builds the poller on tracker, or on a fresh tracker when tracker is nil,
+// and gives a *suggestGateUpstream that tracker as newGateTestPoller does.
+func newUpstreamTestPoller(t *testing.T, up common.Upstream, tracker *health.Tracker) *EvmStatePoller {
+	t.Helper()
+	appCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	logger := zerolog.Nop()
+	if tracker == nil {
+		tracker = health.NewTracker(&logger, "test", 2*time.Second)
+	}
+	if sg, ok := up.(*suggestGateUpstream); ok {
+		sg.tracker = tracker
+	}
+	ssr, err := data.NewSharedStateRegistry(appCtx, &logger, &common.SharedStateConfig{
+		Connector: &common.ConnectorConfig{
+			Driver: common.DriverMemory,
+			Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"},
+		},
+	})
+	require.NoError(t, err)
+	return NewEvmStatePoller("test", appCtx, &logger, up, tracker, ssr)
+}
 
 // An upstream can end a request with no response and no error. Upstream.Forward
 // logs that pair by name — "upstream request ended with nil response and nil
@@ -40,13 +68,13 @@ func nilAnswerUpstream(method string) *forwardingUpstream {
 // latches skipLatestBlockCheck after ten of them.
 func TestFetchBlock_ANilAnswerReportsNoBlockInsteadOfPanicking(t *testing.T) {
 	up := nilAnswerUpstream("eth_getBlockByNumber")
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	num, ts, err := p.fetchBlock(context.Background(), "latest")
+	pb, err := p.fetchBlock(context.Background(), "latest", common.UpstreamPoliciesTimeoutOnly)
 
 	require.NoError(t, err, "an upstream that answered nothing is not a JSON-RPC error")
-	assert.Equal(t, int64(0), num, "no answer means no block number")
-	assert.Equal(t, int64(0), ts)
+	assert.Equal(t, int64(0), pb.number, "no answer means no block number")
+	assert.Equal(t, int64(0), pb.timestamp)
 	require.Equal(t, 1, up.callCount("eth_getBlockByNumber"), "the poller must really have asked")
 }
 
@@ -58,7 +86,7 @@ func TestFetchBlock_ANilAnswerReportsNoBlockInsteadOfPanicking(t *testing.T) {
 // caller count the failure.
 func TestFetchSyncingState_ANilAnswerIsAnErrorNotANotSyncingClaim(t *testing.T) {
 	up := nilAnswerUpstream("eth_syncing")
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	syncing, err := p.fetchSyncingState(context.Background())
 

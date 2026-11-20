@@ -30,7 +30,7 @@ func TestIsBlockFinalized_RefusesToAnswerBeforeAnyHeadIsKnown(t *testing.T) {
 	// that has been final for hours. The typed error lets the caller fall back
 	// instead of trusting a made-up answer.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	final, err := p.IsBlockFinalized(100)
 	require.Error(t, err, "with no head known at all, the poller must say it cannot tell")
@@ -45,9 +45,9 @@ func TestIsBlockFinalized_UsesTheRealFinalizedHeadWhenItHasOne(t *testing.T) {
 	// A real finalized head from the chain beats any inference. The boundary
 	// matters: the finalized block itself IS final, the next one is not.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
-	p.finalizedBlockShared.TryUpdate(pollerCtx(t), 1000)
-	p.latestBlockShared.TryUpdate(pollerCtx(t), 5000)
+	p := newUpstreamTestPoller(t, up, nil)
+	p.finalizedBlockShared.TryUpdate(pollerCtx(t), 1000, time.Now())
+	p.latestBlockShared.TryUpdate(pollerCtx(t), 5000, time.Now())
 	require.Equal(t, int64(1000), p.FinalizedBlock())
 
 	for _, tc := range []struct {
@@ -74,10 +74,10 @@ func TestIsBlockFinalized_InfersAFinalizedHeadFromTheLatestWhenTheChainOffersNon
 	// forever and never become permanently cacheable. The inference sits a
 	// fallback depth below the head.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	depth := p.fallbackFinalityDepth()
 	latest := depth + 500
-	p.latestBlockShared.TryUpdate(pollerCtx(t), latest)
+	p.latestBlockShared.TryUpdate(pollerCtx(t), latest, time.Now())
 	require.Zero(t, p.FinalizedBlock(), "precondition: no real finalized head")
 
 	final, err := p.IsBlockFinalized(500)
@@ -101,9 +101,9 @@ func TestIsBlockFinalized_TreatsAShallowChainAsHavingNothingFinal(t *testing.T) 
 	// and mark genesis-adjacent blocks final on a chain that can still reorg
 	// them. The code guards this with `if latestBlock > depth`; pin the guard.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	depth := p.fallbackFinalityDepth()
-	p.latestBlockShared.TryUpdate(pollerCtx(t), depth-1)
+	p.latestBlockShared.TryUpdate(pollerCtx(t), depth-1, time.Now())
 
 	for _, block := range []int64{1, 2, depth - 2} {
 		final, err := p.IsBlockFinalized(block)
@@ -111,13 +111,12 @@ func TestIsBlockFinalized_TreatsAShallowChainAsHavingNothingFinal(t *testing.T) 
 		assert.Falsef(t, final, "block %d on a chain shorter than the fallback depth must not be final", block)
 	}
 
-	// Genesis is the one exception the guard leaves through: the inferred head
-	// pins at 0, so block 0 reads as final. Genesis never reorgs, so this is
-	// correct — recorded here so nobody reads it as the underflow the guard
-	// prevents.
+	// Upstream's rule (#1335) leaves no exception: while latest is not above
+	// the depth, nothing is final by inference, genesis included. The fork
+	// used to record genesis as final here.
 	final, err := p.IsBlockFinalized(0)
 	require.NoError(t, err)
-	assert.True(t, final, "genesis is final on any chain length")
+	assert.False(t, final, "a chain shorter than the fallback depth infers no final block")
 }
 
 func TestIsBlockFinalized_AnswersFromTheFinalizedHeadEvenWithNoLatestHead(t *testing.T) {
@@ -127,8 +126,8 @@ func TestIsBlockFinalized_AnswersFromTheFinalizedHeadEvenWithNoLatestHead(t *tes
 	// arrive. A finalized head alone is enough to answer, and must not be
 	// discarded because the latest head has not landed yet.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
-	p.finalizedBlockShared.TryUpdate(pollerCtx(t), 700)
+	p := newUpstreamTestPoller(t, up, nil)
+	p.finalizedBlockShared.TryUpdate(pollerCtx(t), 700, time.Now())
 	require.Zero(t, p.LatestBlock(), "precondition: no latest head")
 
 	final, err := p.IsBlockFinalized(700)
@@ -150,21 +149,21 @@ func TestSuggestLatestBlock_SilentlyDropsAnythingNotStrictlyNewer(t *testing.T) 
 	// any test that suggests a value and then waits for it inherently racy.
 	// Pinning it here stops someone "fixing" the silence into a rollback.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	p.SuggestLatestBlock(2000)
+	p.SuggestLatestBlock(2000, time.Now())
 	require.Equal(t, int64(2000), p.LatestBlock())
 
-	p.SuggestLatestBlock(2000) // equal
+	p.SuggestLatestBlock(2000, time.Now()) // equal
 	assert.Equal(t, int64(2000), p.LatestBlock(), "an equal sample must not disturb the head")
 
-	p.SuggestLatestBlock(1) // far behind
+	p.SuggestLatestBlock(1, time.Now()) // far behind
 	assert.Equal(t, int64(2000), p.LatestBlock(), "a stale sample must never roll the head back")
 
-	p.SuggestLatestBlock(0) // the zero value a failed probe produces
+	p.SuggestLatestBlock(0, time.Now()) // the zero value a failed probe produces
 	assert.Equal(t, int64(2000), p.LatestBlock(), "a zero from a failed probe must never reach the head")
 
-	p.SuggestLatestBlock(2001) // strictly newer: applies
+	p.SuggestLatestBlock(2001, time.Now()) // strictly newer: applies
 	assert.Equal(t, int64(2001), p.LatestBlock())
 }
 
@@ -176,14 +175,14 @@ func TestSuggestFinalizedBlock_SilentlyDropsAnythingNotStrictlyNewer(t *testing.
 	// be worse than a latest head that did: entries already written to the cache
 	// as permanent would be re-fetched and could disagree.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
-	p.SuggestFinalizedBlock(2000)
+	p.SuggestFinalizedBlock(2000, time.Now())
 	require.Eventually(t, func() bool { return p.FinalizedBlock() == 2000 },
 		2*time.Second, 10*time.Millisecond)
 
 	for _, stale := range []int64{2000, 1, 0} {
-		p.SuggestFinalizedBlock(stale)
+		p.SuggestFinalizedBlock(stale, time.Now())
 	}
 	require.Never(t, func() bool { return p.FinalizedBlock() != 2000 },
 		300*time.Millisecond, 20*time.Millisecond,
@@ -197,7 +196,7 @@ func TestSyncingState_RoundTripsWhatTheProbeReported(t *testing.T) {
 	// getter take different locks, so a mismatch between them would show up only
 	// as an upstream that never leaves (or never enters) the syncing state.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	assert.Equal(t, common.EvmSyncingStateUnknown, p.SyncingState(),
 		"a poller that has not probed yet must report unknown, not 'not syncing'")
@@ -224,7 +223,7 @@ func TestIsObjectNull_TreatsAPollerWithoutAnUpstreamAsAbsent(t *testing.T) {
 	assert.True(t, (&EvmStatePoller{}).IsObjectNull(), "a poller with no upstream is not usable")
 
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 	assert.False(t, p.IsObjectNull(), "a fully wired poller must report itself present")
 }
 
@@ -235,7 +234,7 @@ func TestEarliestBlock_ReportsZeroForAProbeItHasNeverRun(t *testing.T) {
 	// it. Returning anything else for an unprobed method would fence off history
 	// the upstream actually holds.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	for _, probe := range []common.EvmAvailabilityProbeType{
 		common.EvmProbeBlockHeader,
@@ -254,19 +253,30 @@ func TestSetNetworkConfig_IgnoresAConfigWithNoEvmBlock(t *testing.T) {
 	// A non-EVM (or empty) network config reaching an EVM poller would otherwise
 	// null out the finality settings the poller was built with, silently
 	// changing which blocks count as final.
+	//
+	// The configured depth is read directly: since #1335 fallbackFinalityDepth
+	// raises it to an age floor, which would hide the configured value.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
+	configuredDepth := func() int64 {
+		p.stateMu.RLock()
+		defer p.stateMu.RUnlock()
+		if p.cfg == nil {
+			return 0
+		}
+		return p.cfg.FallbackFinalityDepth
+	}
 	p.SetNetworkConfig(&common.NetworkConfig{Evm: &common.EvmNetworkConfig{
 		ChainId:               123,
 		FallbackFinalityDepth: 64,
 	}})
-	require.Equal(t, int64(64), p.fallbackFinalityDepth(), "precondition: the real config applied")
+	require.Equal(t, int64(64), configuredDepth(), "precondition: the real config applied")
 
 	p.SetNetworkConfig(nil)
-	assert.Equal(t, int64(64), p.fallbackFinalityDepth(), "a nil config must be ignored, not applied")
+	assert.Equal(t, int64(64), configuredDepth(), "a nil config must be ignored, not applied")
 
 	p.SetNetworkConfig(&common.NetworkConfig{})
-	assert.Equal(t, int64(64), p.fallbackFinalityDepth(), "a config with no evm block must be ignored")
+	assert.Equal(t, int64(64), configuredDepth(), "a config with no evm block must be ignored")
 }
 
 func TestSetNetworkConfig_PrefersTheOperatorsAliasForTheNetworkLabel(t *testing.T) {
@@ -275,7 +285,7 @@ func TestSetNetworkConfig_PrefersTheOperatorsAliasForTheNetworkLabel(t *testing.
 	// The label lands on every metric this poller emits. An operator who set an
 	// alias expects to find it on their dashboard rather than the raw chain id.
 	up := newSuggestGateUpstream(123, "0x7b", nil)
-	p := newGateTestPoller(t, up)
+	p := newUpstreamTestPoller(t, up, nil)
 
 	p.SetNetworkConfig(&common.NetworkConfig{
 		Architecture: common.ArchitectureEvm,

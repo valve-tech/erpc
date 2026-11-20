@@ -257,6 +257,16 @@ func proxyLabel(client *http.Client) string {
 	return proxy.String()
 }
 
+// dropIdleAfterTimeout closes hc's idle connections once a request on it
+// timed out with no response: a black-holed keep-alive pool answers on
+// none of its sockets, so the next request opens a new connection rather
+// than spend another timeout on the next dead one (spec §19 U4).
+func dropIdleAfterTimeout(hc *http.Client, err error) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, common.ErrDynamicTimeoutExceeded) {
+		hc.CloseIdleConnections()
+	}
+}
+
 func (c *GenericHttpJsonRpcClient) queueRequest(id interface{}, req *batchRequest) {
 	c.logger.Trace().Interface("id", id).Object("request", req.request).Msgf("attempt to queue request for batch")
 	c.batchMu.Lock()
@@ -465,7 +475,8 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msgf("sending json rpc POST request (batch)")
 
 	// pick the client from the proxy pool registry (if configured) or fallback
-	resp, err := c.getHttpClient().Do(httpReq)
+	hc := c.getHttpClient()
+	resp, err := hc.Do(httpReq)
 	if err != nil {
 		// net/http puts the full request URL, API key included, into a
 		// *url.Error. Redact it before anything logs, traces or wraps it.
@@ -473,6 +484,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		if batchCause := effectiveCause(batchCtx); batchCause != nil {
 			err = batchCause
 		}
+		dropIdleAfterTimeout(hc, err)
 		// Each request's own ctx carries the policy-driven cause (e.g.
 		// ErrDynamicTimeoutExceeded), while the shared batch ctx only has the
 		// earliest-deadline plain DeadlineExceeded. Prefer the per-request cause
@@ -707,7 +719,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 	)
 	defer span.End()
 
-	if common.IsTracingDetailed {
+	if common.IsTracingDetailed() {
 		span.SetAttributes(
 			attribute.String("request.id", fmt.Sprintf("%v", req.ID())),
 		)
@@ -768,7 +780,8 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", util.RedactHeaders(httpReq.Header)).Msg("sending json rpc POST request (single)")
 
-	resp, err := c.getHttpClient().Do(httpReq)
+	hc := c.getHttpClient()
+	resp, err := hc.Do(httpReq)
 	if err != nil {
 		// net/http puts the full request URL, API key included, into a
 		// *url.Error. Redact it before anything logs, traces or wraps it.
@@ -778,6 +791,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 		if cause != nil {
 			err = cause
 		}
+		dropIdleAfterTimeout(hc, err)
 		common.SetTraceSpanError(span, err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, common.ErrDynamicTimeoutExceeded) {
 			return nil, common.NewErrEndpointRequestTimeout(time.Since(reqStartTime), err)

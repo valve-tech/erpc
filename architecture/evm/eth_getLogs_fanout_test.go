@@ -181,7 +181,7 @@ func TestExecuteGetLogsSubRequests_AnErrorMemberOnOneSubRangeFailsTheWholeMerge(
 	close(second.release)
 
 	merged, fromCache, err := executeGetLogsSubRequests(
-		context.Background(), n, splitRequest(), contiguousSubs(1, 2), "")
+		context.Background(), n, splitRequest(), contiguousSubs(1, 2), "", "")
 
 	require.Error(t, err, "a sub-range that reported an error must fail the whole split")
 	assert.Contains(t, err.Error(), "log index is rebuilding")
@@ -202,7 +202,7 @@ func TestExecuteGetLogsSubRequests_ASubRangeWithNoJsonRpcResponseIsAFailure(t *t
 	close(second.release)
 
 	merged, _, err := executeGetLogsSubRequests(
-		context.Background(), n, splitRequest(), contiguousSubs(1, 2), "")
+		context.Background(), n, splitRequest(), contiguousSubs(1, 2), "", "")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected empty json-rpc response")
@@ -229,7 +229,7 @@ func TestExecuteGetLogsSubRequests_TheCallWaitsForEveryInFlightSubRangeAndJoinsE
 	done := make(chan outcome, 1)
 	go func() {
 		merged, _, err := executeGetLogsSubRequests(
-			context.Background(), n, splitRequest(), contiguousSubs(1, 3), "")
+			context.Background(), n, splitRequest(), contiguousSubs(1, 3), "", "")
 		done <- outcome{merged: merged, err: err}
 	}()
 
@@ -278,7 +278,7 @@ func TestExecuteGetLogsSubRequests_TheConfiguredConcurrencyBoundsTheRequestsInFl
 	done := make(chan outcome, 1)
 	go func() {
 		merged, _, err := executeGetLogsSubRequests(
-			context.Background(), n, splitRequest(), contiguousSubs(1, 4), "")
+			context.Background(), n, splitRequest(), contiguousSubs(1, 4), "", "")
 		done <- outcome{merged: merged, err: err}
 	}()
 
@@ -341,7 +341,7 @@ func TestExecuteGetLogsSubRequests_TheMergeIsFromCacheOnlyWhenEverySubRangeWas(t
 			close(second.release)
 
 			merged, fromCache, err := executeGetLogsSubRequests(
-				context.Background(), n, splitRequest(), contiguousSubs(1, 2), "")
+				context.Background(), n, splitRequest(), contiguousSubs(1, 2), "", "")
 
 			require.NoError(t, err)
 			// Discriminating: both cases merge the SAME two logs. Only the flag
@@ -379,7 +379,7 @@ func TestExecuteGetLogsSubRequests_TheSkipCacheReadDirectiveOverridesTheParents(
 	parent.SetDirectives(&common.RequestDirectives{SkipCacheRead: "parent-value"})
 
 	_, _, err := executeGetLogsSubRequests(
-		context.Background(), n, parent, contiguousSubs(1, 2), "memory-*")
+		context.Background(), n, parent, contiguousSubs(1, 2), "memory-*", "")
 
 	require.NoError(t, err)
 	mu.Lock()

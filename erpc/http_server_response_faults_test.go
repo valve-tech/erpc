@@ -84,7 +84,7 @@ func faultResponseHandlerWithLogger(t *testing.T, logger zerolog.Logger) http.Ha
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 
-	srv, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, cfg.Indexer, erpcInstance)
+	srv, err := NewHttpServer(ctx, &logger, cfg.Server, cfg.HealthCheck, cfg.Admin, erpcInstance)
 	require.NoError(t, err)
 	return srv.createRequestHandler()
 }

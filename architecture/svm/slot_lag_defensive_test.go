@@ -78,22 +78,6 @@ func TestFilterByFinalizedSlotLag_NeverDropsAnUpstreamStillBootstrapping(t *test
 	}
 }
 
-// HighestFinalizedSlot must skip upstreams with no usable poller rather than
-// counting them as zero or panicking. It feeds the reference slot, so a panic
-// here takes down every consensus request.
-func TestHighestFinalizedSlot_SkipsUpstreamsWithNoUsablePoller(t *testing.T) {
-	ups := []common.Upstream{
-		upstreamWithNoPoller("booting"),
-		upstreamWithNullPoller("null"),
-		nonSvmUpstream(t, "evm-1"),
-		upstreamAt("current", 4242),
-	}
-
-	if got := HighestFinalizedSlot(ups); got != 4242 {
-		t.Fatalf("HighestFinalizedSlot = %d, want 4242", got)
-	}
-}
-
 // ReferenceFinalizedSlot must ignore the same upstreams. A non-SVM upstream in
 // the pool must not become the reference, and a bootstrapping one must not
 // drag it to zero.
