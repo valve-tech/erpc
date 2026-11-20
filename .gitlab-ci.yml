@@ -59,6 +59,9 @@ test:
 # (pipelines 4677-4701). Each has an open entry in valve/upstream-bug-log.md
 # (196, 202). Remove a name when its entry is fixed; never add one without an
 # entry. A runner system failure retries once.
+# The erpc package took 1,782-1,801 s on 0.3.0.19, at the old 30m go test
+# timeout. The 0.3.0.20 sync added tests and passed it, so the bound is 45m,
+# inside the job's 1h.
 test-erpc:
   timeout: 1h
   allow_failure: false
@@ -71,4 +74,4 @@ test-erpc:
   script:
     - !reference [.container-tests, script]
     - export QUARANTINE='^(TestAdminApi_ReadOnlyMethods|TestWebSocket_SubscriptionDedup|TestWebSocket_UnsubscribeIsScopedToConnection|TestInit_ServesTheSecondCallFromTheCacheItsConfigNames)$'
-    - go test -count 1 -parallel 2 -timeout 30m -skip "$CONTAINER_TESTS|$QUARANTINE" ./erpc
+    - go test -count 1 -parallel 2 -timeout 45m -skip "$CONTAINER_TESTS|$QUARANTINE" ./erpc
