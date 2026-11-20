@@ -52,6 +52,12 @@ type Slot struct {
 	// `cache`; nil when the tick recorded no blocks.
 	methodBlocks atomic.Pointer[methodBlockIndex]
 
+	// tierOnlyExcluded holds the ids of the upstreams the most recent tick
+	// dropped first at the tier split (TierSplitStep), so before any
+	// health, cordon or capability step judged them. Same atomic contract
+	// as `cache`. Read by Engine.TierExcludedOnly.
+	tierOnlyExcluded atomic.Pointer[map[string]struct{}]
+
 	// lastAccessedAtMs is unix-millis of the last tick OR GetOrdered
 	// touching this slot. Drives the engine's idle-slot eviction —
 	// per-(method, finality) slots that haven't seen traffic in a
@@ -381,6 +387,13 @@ func (s *Slot) tickOnce() {
 	if len(decision.Diff.Added) > 0 || len(decision.Diff.Removed) > 0 {
 		s.engine.eligibleChanged(s.networkID)
 	}
+	tierOnly := make(map[string]struct{})
+	for _, ex := range excluded {
+		if ex.Step == TierSplitStep && len(ex.LeafReasons) == 0 {
+			tierOnly[ex.ID] = struct{}{}
+		}
+	}
+	s.tierOnlyExcluded.Store(&tierOnly)
 
 	// 6b. Reconcile this network's probe subsystem against the
 	// eval-emitted `__probeConfig`. Non-nil → create/update Prober;

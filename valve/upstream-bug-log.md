@@ -8004,3 +8004,131 @@ The cost: a read that the table does not list (`txpool_*`, `web3_clientVersion`,
 generator sets `preserveDefaultMethods: true`.
 
 Not reported upstream yet. The same code is in upstream.
+
+## 207. The fallback escape tries the `tier:fallback` upstreams in random order
+
+**Status: FIXED in the fork.** `TestFailover_TwoPaidFallbacks`
+(`erpc/networks_failover_escape_test.go`) pins it. Its
+`QuickNodeServesAndAlchemyIsNotCalled`, `AlchemyOnlyAfterQuickNodeFails` and
+`QuickNodeBudgetDeniesSoAlchemyServes` cases failed in 5 or 6 of 10 runs on
+`0.3.0.18-valve`, and pass in 10 of 10 with the fix.
+
+`GetFallbackEscapeUpstreams` (`upstream/registry.go`) walked the network's
+upstreams in registry order. The registry adds an upstream when its bootstrap
+finishes, and the bootstraps run in parallel. So the order changed from one
+start to the next. Valve lists QuickNode before Alchemy and expects QuickNode
+to be tried first.
+
+The fix sorts the escape list by each upstream's index in the project's
+upstream list (`UpstreamsRegistry.ConfigIndex`). An upstream that a provider
+made sorts after the listed ones, in registry order.
+
+Not reported upstream yet. The same code is in upstream.
+
+## 208. A use-upstream pin cannot reach an upstream the selection policy cordoned
+
+**Status: FIXED in the fork.** `TestFailover_TwoPaidFallbacks`
+(`erpc/networks_failover_escape_test.go`) pins it, in the cases whose names
+start with `UseUpstream`. The fix is opt-in: `failover.allowPinToFallback`.
+
+`X-ERPC-Use-Upstream: alchemy-evm-1` on `eth_getFilterChanges` failed with
+`ErrUpstreamsExhausted` and 0 attempts. The default policy cordons
+`tier:fallback` upstreams while the primaries are healthy. The pin only
+filters the routed list (`NormalizedRequest.NextUpstream`), so it found
+nothing. The escape did not fire either, because nothing was tried and
+`lastErr` stayed nil. A filter made on a fallback could never be polled.
+
+The fix, `Network.withPinnedFallbacks` (`erpc/networks.go`), acts only when
+the network sets `failover.allowPinToFallback: true` (default off), the
+request is not internal, and no routed upstream matches the pin. The request
+then uses the matching fallbacks, in config order, that pass every one of:
+
+- the escape's own filter: breaker closed, method allowed;
+- no health-tracker cordon;
+- in the request's lane;
+- `policy.Engine.TierExcludedOnly`: the policy's latest tick dropped the
+  upstream first at the tier split (`preferTag`), with no leaf reason, and
+  no `blockMethods` entry blocks it. The policy's own health excludes
+  (errors, throttling, latency, block lag) write no tracker cordon, so only
+  the policy can say whether it dropped the upstream for health. A policy
+  that splits tiers with another step never lets a pin through.
+
+Their budget and rate limits still apply. A pin to an unknown, unhealthy or
+lagging upstream still fails with `ErrUpstreamsExhausted`.
+
+It is opt-in because a pin that widens past the policy lets any caller who
+can send the directive spend the fallback's budget. Valve's relay strips
+client directives, but eRPC also answers unauthenticated on the internal
+mesh, and other operators have no such relay. Internal pins (the integrity
+state prober, the chain-view selector) never widen, or they would spend a
+paid budget on every pass.
+
+With the setting on, a pin that matches a `tier:fallback` upstream gets one
+attempt per request (`Network.isPinnedFallback`). The request marks it
+before the attempt (`MarkSingleAttempt`), and `MarkUpstreamCompleted` keeps
+it reserved under the request's lock, so no hedge can take it in between.
+Without that rule, network retry 2 and hedge 1 sent a failing pinned
+fallback 4 paid calls. The escape already had this once-per-request rule.
+
+Known limit, left as it is: the multiplexer key (`Network.multiplexKey`,
+`req.CacheHash()`) ignores `UseUpstream`. Two identical concurrent requests
+with different pins can share one upstream answer. That predates this fix.
+
+Not reported upstream yet. The same code is in upstream.
+
+## 209. A spent `"*"` budget stops the upstream from registering
+
+**Status: FIXED in the fork.** `TestUpstreamForward_RateLimitBudget`, case
+`init probes neither spend nor hit the budget`
+(`upstream/upstream_forward_test.go`), pins it. The `"*"` budgets of
+`TestFailover_TwoPaidFallbacks` also need the fix to bootstrap.
+
+At init, `detectFeatures` calls `eth_chainId` through `Upstream.Forward`,
+and `Forward` checks the upstream's rate-limit budget. A `"*"` rule with no
+permits left (a budget spent for the day, or `maxCount: 0`) denied the call.
+Init failed, and the upstream stayed unregistered until the budget reset.
+
+The fix marks the init probes' context (`withInitProbe`, `upstream/upstream.go`):
+`detectFeatures` and the SVM genesis-hash check. `Forward` neither checks nor
+spends the budget for a marked call. The chain-family probes use their own
+HTTP client and never reached the budget. The state poller's polls still
+count, as before; a denied first poll does not fail init.
+
+Not reported upstream yet. The same code is in upstream.
+
+## 210. `TierExcludedOnly` trusts step order: a health exclude placed after the tier split is not seen
+
+**Status:** open. No test pins it yet; entry 211 adds the unit tests.
+
+`policy.Engine.TierExcludedOnly` (`internal/policy/engine.go`, entry 208)
+lets a pin reach a fallback when the latest tick dropped it first at the
+tier split (`preferTag`). The step record is first-step-wins. In the
+default policy every health exclude runs before `preferTag`, so a lagging
+or failing fallback is recorded under `excludeIf`. A custom policy that
+puts an `excludeIf` after `preferTag` gets the opposite: `preferTag`
+drops the fallback first, and the later exclude never records against it.
+A pin can then reach a fallback that the policy would also drop for
+health.
+
+The fix: also require that the tick wrote no probe verdict for the
+upstream. Every exclude step judges the upstreams an earlier step already
+dropped (`_sweepAbsentForVerdicts`, `internal/policy/stdlib/stdlib.js`)
+and records a verdict for each it would drop. So "no verdict" means "no
+exclude step would drop it", whatever the step order.
+
+Fork-only: upstream has no `TierExcludedOnly`.
+
+## 211. `TierExcludedOnly` has no unit tests in `internal/policy`
+
+**Status:** open. Only the network-level cases of
+`TestFailover_TwoPaidFallbacks` (`erpc/networks_failover_escape_test.go`)
+cover it today.
+
+The tests should cover, against the engine directly: a fallback dropped
+only by the tier split (true); dropped first by `removeCordoned` or an
+`excludeIf` (false); blocked by `blockMethods` for the method (false);
+before the first tick (false); a narrow slot that has no order yet, which
+must read the wildcard slot as `GetOrderedInLane` does; a lane slot; and,
+once entry 210 is fixed, an `excludeIf` placed after `preferTag` (false).
+
+Fork-only: upstream has no `TierExcludedOnly`.

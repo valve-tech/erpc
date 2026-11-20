@@ -368,6 +368,31 @@ func TestUpstreamForward_RateLimitBudget(t *testing.T) {
 		assert.Equal(t, int32(3), sc.calls.Load())
 	})
 
+	t.Run("init probes neither spend nor hit the budget", func(t *testing.T) {
+		env := newFwdEnv(t, &common.RateLimiterConfig{
+			Store: &common.RateLimitStoreConfig{Driver: "memory"},
+			Budgets: []*common.RateLimitBudgetConfig{{
+				Id:    "one-any",
+				Rules: []*common.RateLimitRuleConfig{{Method: "*", MaxCount: 1, Period: common.RateLimitPeriodMinute}},
+			}},
+		})
+		sc := ok()
+		u := env.mustUpstream(t, &common.UpstreamConfig{Id: "rl-init", RateLimitBudget: "one-any"}, sc)
+		for i := range 3 {
+			_, err := u.EvmGetChainId(withInitProbe(env.ctx))
+			require.NoError(t, err, "init probe %d", i)
+		}
+		// Request counting is per method. The probes spent nothing, so
+		// eth_chainId's one permit is still there.
+		_, err := u.EvmGetChainId(env.ctx)
+		require.NoError(t, err)
+		// Outside init, eth_chainId counts like any call.
+		_, err = u.EvmGetChainId(env.ctx)
+		require.Error(t, err)
+		assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamRateLimitRuleExceeded), "%v", err)
+		assert.Equal(t, int32(4), sc.calls.Load())
+	})
+
 	t.Run("unknown budget is an error", func(t *testing.T) {
 		env := newFwdEnv(t, rl)
 		sc := ok()

@@ -2347,6 +2347,10 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 				v := *defaults.Failover.OnDefaultsExhausted
 				cp.OnDefaultsExhausted = &v
 			}
+			if defaults.Failover.AllowPinToFallback != nil {
+				v := *defaults.Failover.AllowPinToFallback
+				cp.AllowPinToFallback = &v
+			}
 			n.Failover = &cp
 		}
 		if n.Evm != nil && defaults.Evm != nil {

@@ -538,6 +538,41 @@ func (e *Engine) GetExcluded(networkID, method, finality string) []common.Upstre
 	return nil
 }
 
+// TierSplitStep is the stdlib step that splits the primary tier from the
+// fallback tier in the default policy.
+const TierSplitStep = "preferTag"
+
+// TierExcludedOnly reports whether the latest tick of the slot that serves
+// (networkID, method, finality, laneIDs) dropped u at the tier split and for
+// no other reason: no earlier step (removeCordoned, an excludeIf on errors,
+// throttling, latency or block lag) dropped it, and no blockMethods entry
+// blocks it for method. Slot resolution mirrors GetOrderedInLane. It is
+// false before any tick, so a caller that widens past the policy with it
+// fails closed. A policy that splits tiers with another step never
+// answers true.
+func (e *Engine) TierExcludedOnly(networkID, method, finality string, laneIDs []string, u common.Upstream) bool {
+	slot, wildcard := e.lookupSlotWithFallback(networkID, method, finality, laneIDs)
+	// Read the slot GetOrderedInLane reads: the narrow one once it has
+	// produced an order, else the wildcard.
+	s := wildcard
+	if slot != nil {
+		if r := slot.cache.Load(); r != nil && len(r.tip) > 0 {
+			s = slot
+		}
+	}
+	if s == nil || s.cache.Load() == nil {
+		return false
+	}
+	tierOnly := s.tierOnlyExcluded.Load()
+	if tierOnly == nil {
+		return false
+	}
+	if _, ok := (*tierOnly)[u.Id()]; !ok {
+		return false
+	}
+	return !s.methodBlocks.Load().blocks(u.Id(), method)
+}
+
 // withMethodBlocked appends the upstreams blocked for one method to the
 // slot's excluded set, skipping duplicates. Returns `excluded` as-is when
 // nothing is added; never mutates it.
